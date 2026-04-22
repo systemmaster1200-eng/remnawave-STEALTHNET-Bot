@@ -466,32 +466,6 @@ export function ClientLoginPage() {
                     }}
                     className={cn("h-9 rounded-lg text-sm transition-colors", authMode === "email_code" ? "bg-primary text-primary-foreground" : "hover:bg-muted")}
                   >
-                    {t("cabinet.login.mode_email_code")}
-                  </button>
-                </div>
-              )}
-              <div className="grid grid-cols-2 gap-2 rounded-xl border border-white/10 p-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMode("password");
-                    setError("");
-                    setSuccessMessage("");
-                  }}
-                  className={cn("h-9 rounded-lg text-sm transition-colors", authMode === "password" ? "bg-primary text-primary-foreground" : "hover:bg-muted")}
-                >
-                  {t("cabinet.login.mode_password")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMode("email_code");
-                    setError("");
-                    setSuccessMessage("");
-                  }}
-                  className={cn("h-9 rounded-lg text-sm transition-colors", authMode === "email_code" ? "bg-primary text-primary-foreground" : "hover:bg-muted")}
-                >
-                  {t("cabinet.login.mode_email_code")}
                 </button>
               </div>
               <div className="space-y-2">
