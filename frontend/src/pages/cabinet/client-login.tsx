@@ -39,7 +39,6 @@ export function ClientLoginPage() {
   });
   const [telegramBotUsername, setTelegramBotUsername] = useState<string | null>(null);
   const [emailCodeLoginEnabled, setEmailCodeLoginEnabled] = useState(false);
-  const [emailCodeLoginEnabled, setEmailCodeLoginEnabled] = useState(true);
   const [googleEnabled, setGoogleEnabled] = useState(false);
   const [googleClientId, setGoogleClientId] = useState<string | null>(null);
   const [publicAppUrl, setPublicAppUrl] = useState<string | null>(null);
