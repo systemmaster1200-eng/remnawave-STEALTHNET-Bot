@@ -38,6 +38,7 @@ export function ClientLoginPage() {
     logo: null,
   });
   const [telegramBotUsername, setTelegramBotUsername] = useState<string | null>(null);
+  const [emailCodeLoginEnabled, setEmailCodeLoginEnabled] = useState(false);
   const [emailCodeLoginEnabled, setEmailCodeLoginEnabled] = useState(true);
   const [googleEnabled, setGoogleEnabled] = useState(false);
   const [googleClientId, setGoogleClientId] = useState<string | null>(null);
@@ -99,6 +100,7 @@ export function ClientLoginPage() {
         setTelegramBotUsername(c.telegramBotUsername ?? null);
         setTelegramBotId(c.telegramBotId ?? null);
         setGoogleEnabled(!!c.googleLoginEnabled);
+        setEmailCodeLoginEnabled(c.emailCodeLoginEnabled === true);
         setEmailCodeLoginEnabled(c.emailCodeLoginEnabled !== false);
         setGoogleClientId(c.googleClientId ?? null);
         setPublicAppUrl(c.publicAppUrl ?? null);
@@ -110,6 +112,8 @@ export function ClientLoginPage() {
   useEffect(() => {
     if (!emailCodeLoginEnabled && authMode === "email_code") {
       setAuthMode("password");
+      setEmailCode("");
+      setSuccessMessage("");
     }
   }, [emailCodeLoginEnabled, authMode]);
 
