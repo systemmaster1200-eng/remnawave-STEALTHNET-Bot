@@ -100,7 +100,6 @@ export function ClientLoginPage() {
         setTelegramBotId(c.telegramBotId ?? null);
         setGoogleEnabled(!!c.googleLoginEnabled);
         setEmailCodeLoginEnabled(c.emailCodeLoginEnabled === true);
-        setEmailCodeLoginEnabled(c.emailCodeLoginEnabled !== false);
         setGoogleClientId(c.googleClientId ?? null);
         setPublicAppUrl(c.publicAppUrl ?? null);
         setAppleEnabled(!!c.appleLoginEnabled);
@@ -466,8 +465,10 @@ export function ClientLoginPage() {
                     }}
                     className={cn("h-9 rounded-lg text-sm transition-colors", authMode === "email_code" ? "bg-primary text-primary-foreground" : "hover:bg-muted")}
                   >
-                </button>
-              </div>
+                    {t("cabinet.login.mode_email_code")}
+                  </button>
+                </div>
+              )}
               <div className="space-y-2">
                 <Label htmlFor="email">Email</Label>
                 <Input id="email"
