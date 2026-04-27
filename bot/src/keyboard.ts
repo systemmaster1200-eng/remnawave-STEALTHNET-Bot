@@ -725,6 +725,7 @@ export function giftMenuButtons(
 /** Список вторичных подписок с кнопками «Подключить» и «Подарить» */
 export function giftSubscriptionButtons(
   subscriptions: { id: string; subscriptionIndex: number | null; giftStatus: string | null }[],
+  activeCodeIdsBySubscriptionId: Record<string, string>,
   backLabel?: string | null,
   innerStyles?: InnerButtonStyles,
   emojiIds?: InnerEmojiIds
@@ -734,6 +735,7 @@ export function giftSubscriptionButtons(
   const rows: InlineButton[][] = [];
   for (const sub of subscriptions) {
     const idx = sub.subscriptionIndex ?? 0;
+    const activeCodeId = activeCodeIdsBySubscriptionId[sub.id];
     const statusLabel =
       sub.giftStatus === "GIFTED"
         ? " (подарена)"
@@ -742,6 +744,16 @@ export function giftSubscriptionButtons(
           : sub.giftStatus === "ACTIVATED_SELF"
             ? " (для себя)"
             : "";
+    if (sub.giftStatus === "GIFT_RESERVED") {
+      rows.push([
+        btn(`🎟️ Подарок #${idx}${statusLabel}`, `gift:show_code:${sub.id}`, "primary", emojiIds?.card),
+      ]);
+      rows.push([
+        btn(`✅ Оставить себе #${idx}`, `gift:connect:${sub.id}`, "primary", emojiIds?.connect),
+        btn(`❌ Отменить подарок #${idx}`, activeCodeId ? `gift:cancel_code:${activeCodeId}` : "gift:codes", "danger"),
+      ]);
+      continue;
+    }
     // Кнопка «Подключить» нужна и для ACTIVATED_SELF — иначе при нескольких таких подписках
     // остаётся только «Назад», без страницы подписки / Remna.
     rows.push([

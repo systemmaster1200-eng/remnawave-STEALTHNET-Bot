@@ -598,6 +598,13 @@ export function ClientGiftsPage() {
                 const isReserved = sub.giftStatus === "GIFT_RESERVED";
                 const activeCode = codes.find(c => c.secondarySubscriptionId === sub.id && c.status === "ACTIVE");
                 const isFinalized = isGifted || isActivatedSelf;
+                const statusText = isGifted
+                  ? "Эта подписка была подарена вам."
+                  : isActivatedSelf
+                    ? "Эта подписка была активирована вами."
+                    : isReserved
+                      ? "Подарок уже создан. Можно скопировать код или ссылку, отменить подарок либо оставить подписку себе."
+                      : "Доступна для подарка или активации себе.";
 
                 return (
                   <motion.div
@@ -612,7 +619,7 @@ export function ClientGiftsPage() {
                       <div>
                         <h3 className="text-xl font-bold text-foreground">Подписка #{sub.subscriptionIndex}</h3>
                         <p className="text-sm text-muted-foreground mt-1 max-w-[240px]">
-                          {isGifted ? "Эта подписка была подарена вам." : isActivatedSelf ? "Эта подписка была активирована вами." : isReserved ? "Для подписки создан код." : "Доступна для подарка или активации себе."}
+                          {statusText}
                         </p>
                       </div>
                       <span className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold ${isGifted ? 'bg-purple-500/15 text-purple-500 border border-purple-500/20' : isActivatedSelf ? 'bg-blue-500/15 text-blue-500 border border-blue-500/20' : isReserved ? 'bg-amber-500/15 text-amber-500 border border-amber-500/20' : 'bg-green-500/15 text-green-500 border border-green-500/20'}`}>
@@ -634,44 +641,65 @@ export function ClientGiftsPage() {
                         <CheckCircle2 className="w-5 h-5 text-green-500" />
                         <span className="text-sm font-semibold text-green-600 dark:text-green-400">Активирована</span>
                       </div>
+                    ) : isReserved ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-auto">
+                        <Button
+                          variant="secondary"
+                          className="rounded-xl bg-primary/10 hover:bg-primary/20 text-primary border-none shadow-none w-full gap-2"
+                          onClick={() => handleGetUrl(sub)}
+                          disabled={!activeCode || actionLoading === `url-${sub.id}`}
+                        >
+                          {actionLoading === `url-${sub.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : copiedId === `url-${sub.id}` ? <Check className="w-4 h-4" /> : <LinkIcon className="w-4 h-4" />}
+                          Скопировать ссылку
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          className="rounded-xl bg-background/70 hover:bg-muted text-foreground border border-border/60 shadow-none w-full gap-2"
+                          onClick={() => activeCode && copyCode(activeCode.code, activeCode.id)}
+                          disabled={!activeCode}
+                        >
+                          {activeCode && copiedId === `code-${activeCode.id}` ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                          Скопировать код
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          className="rounded-xl bg-green-500/10 hover:bg-green-500/20 text-green-600 dark:text-green-400 font-semibold border-none shadow-none w-full gap-2"
+                          onClick={() => handleActivateForSelf(sub.id)}
+                          disabled={actionLoading === `activate-${sub.id}`}
+                        >
+                          {actionLoading === `activate-${sub.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                          Оставить себе
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          className="rounded-xl bg-destructive/10 text-destructive hover:bg-destructive hover:text-destructive-foreground border-none shadow-none w-full gap-2"
+                          onClick={() => activeCode && handleCancelCode(activeCode.id)}
+                          disabled={!activeCode || actionLoading === `cancel-${activeCode.id}`}
+                        >
+                          {activeCode && actionLoading === `cancel-${activeCode.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />}
+                          Отменить подарок
+                        </Button>
+                      </div>
                     ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-auto">
-                      <Button 
-                        className="rounded-xl shadow-md w-full gap-2"
-                        onClick={() => handleCreateCode(sub.id)}
-                        disabled={isReserved || actionLoading === `create-${sub.id}`}
-                      >
-                        {actionLoading === `create-${sub.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <Gift className="w-4 h-4" />}
-                        Подарить
-                      </Button>
-                      <Button 
-                        variant="secondary" 
-                        className="rounded-xl bg-primary/10 hover:bg-primary/20 text-primary border-none shadow-none w-full gap-2"
-                        onClick={() => handleGetUrl(sub)}
-                        disabled={!activeCode || actionLoading === `url-${sub.id}`}
-                      >
-                        {actionLoading === `url-${sub.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : copiedId === `url-${sub.id}` ? <Check className="w-4 h-4" /> : <LinkIcon className="w-4 h-4" />}
-                        Ссылка
-                      </Button>
-                      <Button 
-                        variant="secondary" 
-                        className="rounded-xl bg-green-500/10 hover:bg-green-500/20 text-green-600 dark:text-green-400 font-semibold border-none shadow-none w-full gap-2"
-                        onClick={() => handleActivateForSelf(sub.id)}
-                        disabled={actionLoading === `activate-${sub.id}`}
-                      >
-                        {actionLoading === `activate-${sub.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                        Активировать себе
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        className="rounded-xl bg-destructive/10 text-destructive hover:bg-destructive hover:text-destructive-foreground border-none shadow-none w-full gap-2"
-                        onClick={() => activeCode && handleCancelCode(activeCode.id)}
-                        disabled={!activeCode || actionLoading === `cancel-${activeCode.id}`}
-                      >
-                        {activeCode && actionLoading === `cancel-${activeCode.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />}
-                        Отменить код
-                      </Button>
-                    </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-auto">
+                        <Button
+                          className="rounded-xl shadow-md w-full gap-2"
+                          onClick={() => handleCreateCode(sub.id)}
+                          disabled={actionLoading === `create-${sub.id}`}
+                        >
+                          {actionLoading === `create-${sub.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <Gift className="w-4 h-4" />}
+                          Подарить
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          className="rounded-xl bg-green-500/10 hover:bg-green-500/20 text-green-600 dark:text-green-400 font-semibold border-none shadow-none w-full gap-2"
+                          onClick={() => handleActivateForSelf(sub.id)}
+                          disabled={actionLoading === `activate-${sub.id}`}
+                        >
+                          {actionLoading === `activate-${sub.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                          Активировать себе
+                        </Button>
+                      </div>
                     )}
                   </motion.div>
                 );

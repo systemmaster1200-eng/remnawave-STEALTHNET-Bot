@@ -325,6 +325,31 @@ function getSubUser(sub: unknown): Record<string, unknown> | null {
   return r;
 }
 
+function buildGiftShareMarkup(
+  codeId: string,
+  code: string,
+  tariffName: string | null | undefined,
+  config: Awaited<ReturnType<typeof api.getPublicConfig>>,
+): { inline_keyboard: (({ text: string; callback_data: string } | { text: string; url: string })[])[] } {
+  const appUrl = config?.publicAppUrl?.replace(/\/$/, "") ?? "";
+  const giftUrl = appUrl ? `${appUrl}/gift/${code}` : "";
+  const shareText = `🎁 Я дарю тебе VPN-подписку STEALTHNET${tariffName ? ` (${tariffName})` : ""}! Активируй по ссылке:`;
+  const shareUrl = giftUrl
+    ? `https://t.me/share/url?url=${encodeURIComponent(giftUrl)}&text=${encodeURIComponent(shareText)}`
+    : "";
+  const buttons: (({ text: string; callback_data: string } | { text: string; url: string })[])[] = [];
+  if (shareUrl) {
+    buttons.push([{ text: "📤 Поделиться в Telegram", url: shareUrl }]);
+  }
+  if (giftUrl) {
+    buttons.push([{ text: "🔗 Ссылка на подарок", url: giftUrl }]);
+  }
+  buttons.push([{ text: "❌ Отменить подарок", callback_data: `gift:cancel_code:${codeId}` }]);
+  buttons.push([{ text: "📋 К подпискам", callback_data: "gift:subscriptions" }]);
+  buttons.push([{ text: config?.botBackLabel ?? "← Назад", callback_data: "menu:gift" }]);
+  return { inline_keyboard: buttons };
+}
+
 function bytesToGb(bytes: number): string {
   return (bytes / (1024 * 1024 * 1024)).toFixed(2);
 }
@@ -2978,7 +3003,10 @@ bot.on("callback_query:data", async (ctx) => {
 
     if (data === "gift:subscriptions") {
       try {
-        const result = await api.getGiftSubscriptions(token);
+        const [result, codesResult] = await Promise.all([
+          api.getGiftSubscriptions(token),
+          api.getGiftCodes(token),
+        ]);
         if (!result.subscriptions?.length) {
           await editMessageContent(
             ctx,
@@ -2987,10 +3015,15 @@ bot.on("callback_query:data", async (ctx) => {
           );
           return;
         }
+        const activeCodeIdsBySubscriptionId = Object.fromEntries(
+          (codesResult.codes ?? [])
+            .filter((code) => code.status === "ACTIVE")
+            .map((code) => [code.secondarySubscriptionId, code.id]),
+        );
         await editMessageContent(
           ctx,
-          `📋 Мои подписки\n\nУ вас ${result.subscriptions.length} доп. подписок:`,
-          giftSubscriptionButtons(result.subscriptions, config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
+          "📋 Мои подписки\n\nЗдесь видно все дополнительные подписки: доступные, уже подаренные и те, для которых код уже создан.",
+          giftSubscriptionButtons(result.subscriptions, activeCodeIdsBySubscriptionId, config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
         );
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка загрузки";
@@ -3057,31 +3090,48 @@ bot.on("callback_query:data", async (ctx) => {
         const result = await api.createGiftCode(token, { secondarySubscriptionId: subscriptionId });
         const expiresAt = new Date(result.expiresAt).toLocaleDateString("ru-RU");
         const tariffLabel = result.tariffName ? `\nТариф: ${result.tariffName}` : "";
-
-        // Формируем ссылку на подарок и кнопку "Поделиться"
-        const appUrl = config?.publicAppUrl?.replace(/\/$/, "") ?? "";
-        const giftUrl = appUrl ? `${appUrl}/gift/${result.code}` : "";
-        const shareText = `🎁 Я дарю тебе VPN-подписку STEALTHNET${result.tariffName ? ` (${result.tariffName})` : ""}! Активируй по ссылке:`;
-        const shareUrl = giftUrl
-          ? `https://t.me/share/url?url=${encodeURIComponent(giftUrl)}&text=${encodeURIComponent(shareText)}`
-          : "";
-
-        const buttons: (({ text: string; callback_data: string } | { text: string; url: string })[])[] = [];
-        if (shareUrl) {
-          buttons.push([{ text: "📤 Поделиться в Telegram", url: shareUrl }]);
-        }
-        if (giftUrl) {
-          buttons.push([{ text: "🔗 Ссылка на подарок", url: giftUrl }]);
-        }
-        buttons.push([{ text: config?.botBackLabel ?? "← Назад", callback_data: "menu:gift" }]);
+        const codes = await api.getGiftCodes(token);
+        const activeCode = codes.codes.find(
+          (code) => code.secondarySubscriptionId === subscriptionId && code.code === result.code && code.status === "ACTIVE",
+        );
+        const buttons = buildGiftShareMarkup(activeCode?.id ?? result.code, result.code, result.tariffName, config);
 
         await editMessageContent(
           ctx,
           `🎁 Подарочный код создан!\n\nКод: \`${result.code}\`${tariffLabel}\n\nОтправьте этот код получателю или поделитесь ссылкой. Код действителен до ${expiresAt}.`,
-          { inline_keyboard: buttons },
+          { inline_keyboard: buttons.inline_keyboard },
         );
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания кода";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
+    if (data.startsWith("gift:show_code:")) {
+      const subscriptionId = data.slice("gift:show_code:".length);
+      try {
+        const codes = await api.getGiftCodes(token);
+        const activeCode = codes.codes.find(
+          (code) => code.secondarySubscriptionId === subscriptionId && code.status === "ACTIVE",
+        );
+        if (!activeCode) {
+          await editMessageContent(
+            ctx,
+            "❌ Для этой подписки активный подарочный код не найден.",
+            giftCodeResultButtons(config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
+          );
+          return;
+        }
+        const expiresAt = new Date(activeCode.expiresAt).toLocaleDateString("ru-RU");
+        const buttons = buildGiftShareMarkup(activeCode.id, activeCode.code, null, config);
+        await editMessageContent(
+          ctx,
+          `🎟️ Подарок уже создан.\n\nКод: \`${activeCode.code}\`\n\nПоделитесь кодом или ссылкой. Код действителен до ${expiresAt}.`,
+          { inline_keyboard: buttons.inline_keyboard },
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка загрузки подарка";
         await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
       }
       return;

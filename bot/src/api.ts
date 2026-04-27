@@ -721,7 +721,7 @@ export async function buyGiftSubscription(
 export async function getGiftSubscriptions(
   token: string
 ): Promise<{ subscriptions: { id: string; remnawaveUuid: string | null; subscriptionIndex: number | null; giftStatus: string | null; ownerId: string }[] }> {
-  return fetchJson("/api/client/gift/subscriptions", { token });
+  return fetchJson("/api/client/gift/subscriptions/all", { token });
 }
 
 /** Создать подарочный код */
