@@ -63,6 +63,8 @@ function getUserLang(userId: number): string {
   return userLangCache.get(userId) ?? "ru";
 }
 
+const TELEGRAM_API_MIRROR = "https://astracattg.netlify.app/";
+
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) {
   console.error("Set BOT_TOKEN in .env");
@@ -92,16 +94,20 @@ async function createBotWithProxy(token: string): Promise<Bot> {
       if (lower.startsWith("http://") || lower.startsWith("https://")) {
         console.log("[Proxy] Telegram Bot API через HTTP прокси");
         return new Bot(token, {
-          apiRoot: "https://astracattg.netlify.app/",
-          client: { baseFetchConfig: { dispatcher: new UndiciProxyAgent(url) } as any },
+          client: {
+            apiRoot: TELEGRAM_API_MIRROR,
+            baseFetchConfig: { dispatcher: new UndiciProxyAgent(url) } as any,
+          },
         });
       }
       if (lower.startsWith("socks5://") || lower.startsWith("socks4://") || lower.startsWith("socks://")) {
-        console.log("[Proxy] Telegram Bot API через SOCKS прокси");
+        console.log("[Proxy] Telegram Bot API через SOCKС прокси");
         const agent = new SocksProxyAgent(url);
         return new Bot(token, {
-          apiRoot: "https://astracattg.netlify.app/",
-          client: { baseFetchConfig: { agent } as any },
+          client: {
+            apiRoot: TELEGRAM_API_MIRROR,
+            baseFetchConfig: { agent } as any,
+          },
         });
       }
       console.warn(`[Proxy] Неизвестный протокол прокси: ${url}, запуск без прокси`);
@@ -110,7 +116,7 @@ async function createBotWithProxy(token: string): Promise<Bot> {
     console.warn("[Bot] Не удалось получить конфиг, запуск без прокси");
   }
   return new Bot(token, {
-    apiRoot: "https://astracattg.netlify.app/",
+    client: { apiRoot: TELEGRAM_API_MIRROR },
   });
 }
 
