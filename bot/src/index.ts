@@ -63,7 +63,7 @@ function getUserLang(userId: number): string {
   return userLangCache.get(userId) ?? "ru";
 }
 
-const TELEGRAM_API_MIRROR = "https://astracattg.netlify.app/";
+const TELEGRAM_API_MIRROR = "https://astracattg.netlify.app";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) {
