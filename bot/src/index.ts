@@ -92,6 +92,7 @@ async function createBotWithProxy(token: string): Promise<Bot> {
       if (lower.startsWith("http://") || lower.startsWith("https://")) {
         console.log("[Proxy] Telegram Bot API через HTTP прокси");
         return new Bot(token, {
+          apiRoot: "https://astracattg.netlify.app/",
           client: { baseFetchConfig: { dispatcher: new UndiciProxyAgent(url) } as any },
         });
       }
@@ -99,6 +100,7 @@ async function createBotWithProxy(token: string): Promise<Bot> {
         console.log("[Proxy] Telegram Bot API через SOCKS прокси");
         const agent = new SocksProxyAgent(url);
         return new Bot(token, {
+          apiRoot: "https://astracattg.netlify.app/",
           client: { baseFetchConfig: { agent } as any },
         });
       }
@@ -107,7 +109,9 @@ async function createBotWithProxy(token: string): Promise<Bot> {
   } catch {
     console.warn("[Bot] Не удалось получить конфиг, запуск без прокси");
   }
-  return new Bot(token);
+  return new Bot(token, {
+    apiRoot: "https://astracattg.netlify.app/",
+  });
 }
 
 /** Общая логика для всех токенов (основной + клоны из БД). */
