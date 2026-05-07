@@ -64,6 +64,8 @@ function getUserLang(userId: number): string {
 }
 
 const TELEGRAM_API_MIRROR = "https://astracattg.netlify.app";
+const mirrorBuildUrl = (_root: string, token: string, method: string) =>
+  `${TELEGRAM_API_MIRROR}/bot${token}/${method}`;
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -95,7 +97,7 @@ async function createBotWithProxy(token: string): Promise<Bot> {
         console.log("[Proxy] Telegram Bot API через HTTP прокси");
         return new Bot(token, {
           client: {
-            apiRoot: TELEGRAM_API_MIRROR,
+            buildUrl: mirrorBuildUrl,
             baseFetchConfig: { dispatcher: new UndiciProxyAgent(url) } as any,
           },
         });
@@ -105,7 +107,7 @@ async function createBotWithProxy(token: string): Promise<Bot> {
         const agent = new SocksProxyAgent(url);
         return new Bot(token, {
           client: {
-            apiRoot: TELEGRAM_API_MIRROR,
+            buildUrl: mirrorBuildUrl,
             baseFetchConfig: { agent } as any,
           },
         });
@@ -116,7 +118,7 @@ async function createBotWithProxy(token: string): Promise<Bot> {
     console.warn("[Bot] Не удалось получить конфиг, запуск без прокси");
   }
   return new Bot(token, {
-    client: { apiRoot: TELEGRAM_API_MIRROR },
+    client: { buildUrl: mirrorBuildUrl },
   });
 }
 
