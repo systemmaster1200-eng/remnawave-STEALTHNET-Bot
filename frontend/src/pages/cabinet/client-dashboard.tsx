@@ -661,7 +661,7 @@ function ClassicDashboardPage() {
                 <span className="text-[11px] text-muted-foreground mt-0.5 leading-tight">
                   {config?.yookassaRecurringEnabled
                     ? <>Сначала с баланса{client.yookassaPaymentMethodTitle ? <>, затем с карты <span className="font-medium">{client.yookassaPaymentMethodTitle}</span></> : ", затем с карты"}</>
-                    : "Списание с баланса"
+                    : t("cabinet.dashboard.balance_deduction")
                   }
                 </span>
               )}
@@ -907,7 +907,7 @@ function ClassicDashboardPage() {
               <p className="text-5xl font-extrabold tracking-tight text-foreground drop-shadow-sm">
                 {formatMoney(client.balance, client.preferredCurrency)}
               </p>
-              <p className="text-[15px] text-muted-foreground mt-3">На счету для продления тарифов</p>
+              <p className="text-[15px] text-muted-foreground mt-3">{t("cabinet.dashboard.balance_for_renewal")}</p>
             </div>
             
             <div className="flex items-center justify-between p-4 rounded-2xl bg-background/40 border border-border/50 text-left">
@@ -929,7 +929,7 @@ function ClassicDashboardPage() {
                   <span className="text-sm text-muted-foreground mt-0.5">
                     {config?.yookassaRecurringEnabled
                       ? <>Сначала с баланса{client.yookassaPaymentMethodTitle ? <>, затем с карты <span className="font-medium">{client.yookassaPaymentMethodTitle}</span></> : ", затем с карты"}</>
-                      : "Списание с баланса"
+                      : t("cabinet.dashboard.balance_deduction")
                     }
                   </span>
                 )}
@@ -1003,15 +1003,15 @@ function ClassicDashboardPage() {
           <CardContent className="space-y-5 pt-2 flex flex-col justify-center h-[calc(100%-5rem)]">
             {hasReferralLinks ? (
               <>
-                <p className="text-[15px] text-muted-foreground leading-relaxed">Делитесь ссылкой и получайте <strong className="text-foreground">бонус на баланс</strong> за каждого приглашенного друга!</p>
+                <p className="text-[15px] text-muted-foreground leading-relaxed" dangerouslySetInnerHTML={{ __html: t("cabinet.dashboard.referral_bonus_html") }} />
                 {referralLinkSite && (
                   <div className="space-y-2">
-                    <p className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">Сайт</p>
+                    <p className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">{t("cabinet.referral.site_label")}</p>
                     <div className="flex items-center gap-2">
                       <code className="rounded-xl bg-background/50 border border-border/50 px-4 py-3 text-[15px] font-mono flex-1 truncate block text-foreground/80" title={referralLinkSite}>
                         {referralLinkSite}
                       </code>
-                      <Button variant="secondary" size="icon" onClick={() => copyReferral("site")} className="shrink-0 h-12 w-12 rounded-xl hover:scale-105 transition-transform border border-border/50 bg-background/50" title="Копировать">
+                      <Button variant="secondary" size="icon" onClick={() => copyReferral("site")} className="shrink-0 h-12 w-12 rounded-xl hover:scale-105 transition-transform border border-border/50 bg-background/50" title={t("cabinet.common.copy")}>
                         {referralCopied === "site" ? <Check className="h-5 w-5 text-green-500" /> : <Copy className="h-5 w-5 text-foreground/70" />}
                       </Button>
                     </div>
@@ -1020,7 +1020,7 @@ function ClassicDashboardPage() {
                 <div className="pt-3">
                   <Button variant="outline" className="w-full rounded-xl h-12 text-[15px] bg-background/30 hover:bg-background/60 transition-colors border-border/50 [&_svg]:self-center [&_span]:leading-none" asChild>
                      <Link to="/cabinet/referral" className="inline-flex items-center justify-center gap-2 leading-none">
-                       <span className="inline-flex items-center leading-none">Подробная статистика</span>
+                       <span className="inline-flex items-center leading-none">{t("cabinet.dashboard.detailed_stats")}</span>
                        <ArrowRight className="h-4 w-4 shrink-0" />
                      </Link>
                   </Button>
@@ -1028,15 +1028,15 @@ function ClassicDashboardPage() {
               </>
             ) : vpnUrl ? (
               <div className="flex flex-col h-full justify-between space-y-6">
-                <p className="text-[15px] text-muted-foreground leading-relaxed">Ваша подписка готова к использованию. Перейдите к настройке приложения.</p>
+                <p className="text-[15px] text-muted-foreground leading-relaxed">{t("cabinet.dashboard.subscription_ready_desc")}</p>
                 <div className="p-6 bg-primary/10 rounded-2xl border border-primary/20 text-center">
                    <Wifi className="h-12 w-12 text-primary mx-auto mb-3 opacity-80" />
-                   <p className="text-[15px] text-foreground font-medium">Всё готово к работе</p>
+                   <p className="text-[15px] text-foreground font-medium">{t("cabinet.dashboard.ready_to_use")}</p>
                 </div>
                 <Button variant="default" size="lg" className="w-full gap-2 rounded-xl shadow-lg h-14 text-[16px] hover:scale-105 transition-transform [&_svg]:self-center [&_span]:leading-none" asChild>
                   <Link to="/cabinet/subscribe" className="inline-flex items-center justify-center gap-2 leading-none">
                     <Wifi className="h-5 w-5 shrink-0" />
-                    <span className="inline-flex items-center leading-none">Подключить VPN</span>
+                    <span className="inline-flex items-center leading-none">{t("cabinet.dashboard.connect_vpn")}</span>
                   </Link>
                 </Button>
               </div>

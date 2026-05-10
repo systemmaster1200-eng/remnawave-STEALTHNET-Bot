@@ -273,7 +273,7 @@ function ThemePopover() {
                       "text-[10px] font-medium tracking-tight truncate w-full text-center transition-colors",
                       isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground"
                     )}>
-                      {palette.label}
+                      {t(`cabinet.layout.accent_${key}`)}
                     </span>
                   </button>
                 );

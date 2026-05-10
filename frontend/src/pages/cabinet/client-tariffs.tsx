@@ -24,6 +24,7 @@ import {
 import { useCabinetMiniapp } from "@/pages/cabinet/cabinet-layout";
 import { PayNowPanel } from "@/components/payment/pay-now-panel";
 import { cn } from "@/lib/utils";
+import { localizePaymentProviderLabel, localizePlategaMethodLabel } from "@/lib/payment-labels";
 
 function formatMoney(amount: number, currency: string) {
   return new Intl.NumberFormat("ru-RU", {
@@ -668,7 +669,10 @@ function ClassicTariffsPage() {
             )}
 
             {(() => {
-              const providerLabel = (id: string, fallback: string) => paymentProviders.find((p) => p.id === id)?.label || fallback;
+              const providerLabel = (id: string, fallback: string) => {
+                const label = paymentProviders.find((p) => p.id === id)?.label || fallback;
+                return localizePaymentProviderLabel(t, id, label);
+              };
               const isRub = tariff.currency.toUpperCase() === "RUB";
               const btnCls = cn("w-full", isMobileOrMiniapp ? "justify-start gap-4 px-6 h-16 rounded-2xl border-white/5 bg-card/40 hover:bg-card/60" : "gap-3 hover:bg-background/80 hover:shadow-md hover:-translate-y-0.5 transition-all duration-300 rounded-xl h-14 border-border/50 group justify-center px-6 relative");
 
@@ -727,14 +731,14 @@ function ClassicTariffsPage() {
                           <div className="p-2 rounded-xl bg-green-500/10">
                             {payLoading ? <Loader2 className="h-6 w-6 animate-spin text-green-500" /> : <CreditCard className="h-6 w-6 text-green-500" />}
                           </div>
-                          <span className="text-base font-bold">{m.label}</span>
+                          <span className="text-base font-bold">{localizePlategaMethodLabel(t, m)}</span>
                         </>
                       ) : (
                         <>
                           <div className="absolute left-6 p-1.5 rounded-lg bg-green-500/10 group-hover:bg-green-500/20 transition-colors">
                             {payLoading ? <Loader2 className="h-5 w-5 animate-spin text-green-500" /> : <CreditCard className="h-5 w-5 text-green-500" />}
                           </div>
-                          <span className="text-base font-medium">💳 {m.label}</span>
+                          <span className="text-base font-medium">💳 {localizePlategaMethodLabel(t, m)}</span>
                         </>
                       )}
                     </Button>
@@ -1210,8 +1214,12 @@ function UnifiedPurchaseModal({
   onClose: () => void;
   onConfirm: () => void;
 }) {
+  const { t, i18n } = useTranslation();
   const tariff = modal?.tariff;
   if (!tariff) return null;
+  const dayLabel = (days: number) => i18n.resolvedLanguage?.startsWith("en")
+    ? `${days} ${days === 1 ? t("cabinet.common.day_one") : t("cabinet.common.day_many")}`
+    : formatRuDays(days);
 
   const opts = [...(tariff.priceOptions ?? [])].sort((a, b) =>
     a.sortOrder !== b.sortOrder ? a.sortOrder - b.sortOrder : a.durationDays - b.durationDays
@@ -1292,7 +1300,7 @@ function UnifiedPurchaseModal({
           {opts.length > 0 && (
             <section>
               <Label className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-2.5 block">
-                <Calendar className="inline h-3 w-3 mr-1" /> Длительность
+                <Calendar className="inline h-3 w-3 mr-1" /> {t("cabinet.tariffs.duration_label")}
               </Label>
               <div className={cn(
                 "grid gap-2",
@@ -1321,10 +1329,10 @@ function UnifiedPurchaseModal({
                         </span>
                       )}
                       <p className={cn("text-sm font-bold", isActive && "text-primary")}>
-                        {opt.durationDays} {formatRuDays(opt.durationDays).replace(/^\d+\s/, "")}
+                        {dayLabel(opt.durationDays)}
                       </p>
                       <p className="text-[10px] text-muted-foreground mt-0.5 tabular-nums">
-                        {formatMoney(Math.round(perDay * 100) / 100, tariff.currency)}/день
+                        {formatMoney(Math.round(perDay * 100) / 100, tariff.currency)}/{t("cabinet.common.day_one")}
                       </p>
                     </button>
                   );
@@ -1338,10 +1346,10 @@ function UnifiedPurchaseModal({
             <section>
               <div className="flex items-center justify-between mb-2.5">
                 <Label className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-                  <Smartphone className="inline h-3 w-3 mr-1" /> Доп. устройства
+                  <Smartphone className="inline h-3 w-3 mr-1" /> {t("cabinet.tariffs.extra_devices")}
                 </Label>
                 <span className="text-[10px] text-muted-foreground tabular-nums">
-                  В тарифе: <strong className="text-foreground">{includedDevices}</strong>
+                  {t("cabinet.tariffs.included_devices")}: <strong className="text-foreground">{includedDevices}</strong>
                 </span>
               </div>
               <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
@@ -1378,18 +1386,18 @@ function UnifiedPurchaseModal({
                       <div className="flex items-center justify-center gap-1 mb-1">
                         <Smartphone className={cn("h-3.5 w-3.5", isActive ? "text-primary" : "text-muted-foreground")} />
                         <span className={cn("text-sm font-bold", isActive && "text-primary")}>
-                          {tile.extras === 0 ? "Без доп." : `+${tile.extras}`}
+                          {tile.extras === 0 ? t("cabinet.tariffs.no_extra") : `+${tile.extras}`}
                         </span>
                       </div>
                       <p className="text-[11px] font-bold text-foreground/90 tabular-nums text-center">
                         {formatMoney(tile.total, tariff.currency)}
                       </p>
                       <p className="text-[9px] text-muted-foreground/80 text-center mt-0.5">
-                        {tile.totalDevices} устр
+                        {tile.totalDevices} {t("cabinet.tariffs.devices_short")}
                       </p>
                       {isBest && (
                         <p className="text-[9px] font-medium text-fuchsia-500 dark:text-fuchsia-400 text-center mt-0.5">
-                          выгоднее всего
+                          {t("cabinet.tariffs.best_value")}
                         </p>
                       )}
                     </motion.button>
@@ -1402,20 +1410,20 @@ function UnifiedPurchaseModal({
           {/* ── 3. Итог ── */}
           <section className="rounded-2xl border border-primary/30 bg-gradient-to-br from-primary/[0.08] via-fuchsia-500/[0.04] to-purple-500/[0.06] p-4">
             <div className="flex items-baseline justify-between mb-1">
-              <span className="text-xs text-muted-foreground">Длительность</span>
+              <span className="text-xs text-muted-foreground">{t("cabinet.tariffs.duration_label")}</span>
               <span className="text-xs font-medium tabular-nums">
-                {selectedOpt?.durationDays ?? 0} {formatRuDays(selectedOpt?.durationDays ?? 0).replace(/^\d+\s/, "")}
+                {dayLabel(selectedOpt?.durationDays ?? 0)}
               </span>
             </div>
             <div className="flex items-baseline justify-between mb-1">
-              <span className="text-xs text-muted-foreground">Тариф ({includedDevices} устр)</span>
+              <span className="text-xs text-muted-foreground">{t("cabinet.tariffs.tariff_label")} ({includedDevices} {t("cabinet.tariffs.devices_short")})</span>
               <span className="text-xs font-medium tabular-nums">
                 {formatMoney(unitPrice, tariff.currency)}
               </span>
             </div>
             {extrasEnabled && selectedExtraDevices > 0 && (
               <div className="flex items-baseline justify-between mb-1">
-                <span className="text-xs text-muted-foreground">+{selectedExtraDevices} доп. устр</span>
+                <span className="text-xs text-muted-foreground">+{selectedExtraDevices} {t("cabinet.tariffs.extra_devices_short")}</span>
                 <span className="text-xs font-medium tabular-nums">
                   {formatMoney(pricePerExtra * (selectedDays / EXTRA_DEVICE_BASE_DAYS), tariff.currency)} × {selectedExtraDevices}
                 </span>
@@ -1424,7 +1432,7 @@ function UnifiedPurchaseModal({
             {savedAmount > 0 && (
               <div className="flex items-baseline justify-between mb-1 text-emerald-500 dark:text-emerald-400">
                 <span className="text-xs flex items-center gap-1">
-                  <Sparkles className="h-3 w-3" /> Скидка {appliedPct}%
+                  <Sparkles className="h-3 w-3" /> {t("cabinet.tariffs.discount")} {appliedPct}%
                 </span>
                 <span className="text-xs font-bold tabular-nums">
                   −{formatMoney(savedAmount, tariff.currency)}
@@ -1432,7 +1440,7 @@ function UnifiedPurchaseModal({
               </div>
             )}
             <div className="border-t border-primary/20 mt-2 pt-2 flex items-baseline justify-between">
-              <span className="text-sm font-medium">К оплате</span>
+              <span className="text-sm font-medium">{t("cabinet.tariffs.total")}</span>
               <AnimatePresence mode="popLayout">
                 <motion.span
                   key={finalTotal}
@@ -1450,7 +1458,7 @@ function UnifiedPurchaseModal({
 
         <DialogFooter className="relative mt-4 gap-2 sm:gap-2 flex-col sm:flex-row">
           <Button variant="outline" onClick={onClose} className="rounded-xl">
-            Отмена
+            {t("cabinet.tariffs.cancel")}
           </Button>
           <Button
             onClick={onConfirm}
@@ -1458,7 +1466,7 @@ function UnifiedPurchaseModal({
             className="rounded-xl gap-2 h-11 px-6 text-base font-bold bg-gradient-to-r from-primary via-fuchsia-500 to-purple-500 hover:from-primary/90 hover:via-fuchsia-500/90 hover:to-purple-500/90 shadow-lg shadow-primary/30"
           >
             <CreditCard className="h-4 w-4" />
-            К оплате
+            {t("cabinet.tariffs.total")}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 import { Users, Percent, Wallet, Link2, Copy, Check, Loader2, Globe, Send, Info } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
@@ -24,6 +25,7 @@ export function ClientReferralPage() {
 }
 
 function ClassicReferralPage() {
+  const { t } = useTranslation();
   const { state } = useClientAuth();
   const config = useCabinetConfig();
   const token = state.token ?? null;
@@ -53,7 +55,7 @@ function ClassicReferralPage() {
     api
       .getClientReferralStats(token)
       .then(setStats)
-      .catch((e) => setError(e instanceof Error ? e.message : "Ошибка загрузки"))
+      .catch((e) => setError(e instanceof Error ? e.message : t("cabinet.common.error_loading")))
       .finally(() => setLoading(false));
   }, [token]);
 
@@ -70,7 +72,7 @@ function ClassicReferralPage() {
     return (
       <div className="flex flex-col items-center justify-center min-h-[200px] gap-4">
         <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        <p className="text-sm text-muted-foreground">Загрузка…</p>
+        <p className="text-sm text-muted-foreground">{t("cabinet.common.loading")}</p>
       </div>
     );
   }
@@ -102,10 +104,10 @@ function ClassicReferralPage() {
               <div className="inline-flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary shadow-inner border border-primary/20">
                 <Users className="h-7 w-7" />
               </div>
-              <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl text-foreground">Рефералы</h1>
+              <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl text-foreground">{t("cabinet.referral.title")}</h1>
             </div>
             <p className="text-[16px] text-muted-foreground max-w-xl leading-relaxed">
-              Приглашайте друзей — получайте процент от их пополнений прямо на свой баланс
+              {t("cabinet.referral.web_subtitle")}
             </p>
           </div>
         </div>
@@ -126,8 +128,8 @@ function ClassicReferralPage() {
             <div className="min-w-0 flex-1">
               <p className="text-2xl sm:text-3xl font-bold tracking-tight mb-0 sm:mb-1"><span className="text-foreground">{s.referralPercent}</span><span className="text-muted-foreground/50 ml-1 text-xl sm:text-2xl">%</span></p>
               <div className="flex flex-col sm:block">
-                <p className="text-xs sm:text-sm text-muted-foreground font-medium leading-tight">Процент</p>
-                <p className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 opacity-70 leading-tight">от пополнений (1 уровень)</p>
+                <p className="text-xs sm:text-sm text-muted-foreground font-medium leading-tight">{t("cabinet.referral.percent_label")}</p>
+                <p className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 opacity-70 leading-tight">{t("cabinet.referral.level_1_payments")}</p>
               </div>
             </div>
           </div>
@@ -147,8 +149,8 @@ function ClassicReferralPage() {
             <div className="min-w-0 flex-1">
               <p className="text-2xl sm:text-3xl font-bold tracking-tight mb-0 sm:mb-1 text-foreground">{s.referralCount}</p>
               <div className="flex flex-col sm:block">
-                <p className="text-xs sm:text-sm text-muted-foreground font-medium leading-tight">Приглашено</p>
-                <p className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 opacity-70 leading-tight">активных рефералов</p>
+                <p className="text-xs sm:text-sm text-muted-foreground font-medium leading-tight">{t("cabinet.referral.invited_label")}</p>
+                <p className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 opacity-70 leading-tight">{t("cabinet.referral.active_referrals")}</p>
               </div>
             </div>
           </div>
@@ -168,8 +170,8 @@ function ClassicReferralPage() {
             <div className="min-w-0 flex-1">
               <p className="text-2xl sm:text-3xl font-bold tracking-tight mb-0 sm:mb-1 truncate text-foreground">{formatMoney(s.totalEarnings, currency)}</p>
               <div className="flex flex-col sm:block">
-                <p className="text-xs sm:text-sm text-muted-foreground font-medium leading-tight">Заработок</p>
-                <p className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 opacity-70 leading-tight">зачислено на баланс</p>
+                <p className="text-xs sm:text-sm text-muted-foreground font-medium leading-tight">{t("cabinet.referral.earnings_label")}</p>
+                <p className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 opacity-70 leading-tight">{t("cabinet.referral.credited_to_balance")}</p>
               </div>
             </div>
           </div>
@@ -195,8 +197,8 @@ function ClassicReferralPage() {
                   <Link2 className="h-5 w-5" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <h3 className="text-lg font-bold tracking-tight text-foreground truncate">Ваши ссылки</h3>
-                  <p className="text-xs text-muted-foreground mt-[1px] truncate">Копируйте и делитесь с друзьями</p>
+                  <h3 className="text-lg font-bold tracking-tight text-foreground truncate">{t("cabinet.referral.your_links")}</h3>
+                  <p className="text-xs text-muted-foreground mt-[1px] truncate">{t("cabinet.referral.copy_share")}</p>
                 </div>
               </div>
 
@@ -207,7 +209,7 @@ function ClassicReferralPage() {
                       <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-black/5 dark:bg-white/10 shrink-0 text-muted-foreground">
                         <Globe className="w-4 h-4" />
                       </div>
-                      <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Сайт</div>
+                      <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{t("cabinet.referral.site_label")}</div>
                     </div>
                     <div className="flex items-center gap-2 min-w-0">
                       <code className="flex-1 min-w-0 truncate text-xs font-mono text-primary/80 select-all bg-background/50 px-3 py-2 rounded-xl border border-border/50">{referralLinkSite}</code>
@@ -223,7 +225,7 @@ function ClassicReferralPage() {
                       <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-[#0088cc]/10 text-[#0088cc] shrink-0">
                         <Send className="w-4 h-4 ml-[-2px] mt-[1px]" />
                       </div>
-                      <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Бот</div>
+                      <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{t("cabinet.referral.bot_label")}</div>
                     </div>
                     <div className="flex items-center gap-2 min-w-0">
                       <code className="flex-1 min-w-0 truncate text-xs font-mono text-primary/80 select-all bg-background/50 px-3 py-2 rounded-xl border border-border/50">{referralLinkBot}</code>
@@ -239,7 +241,7 @@ function ClassicReferralPage() {
         ) : (
           <div className="p-6 rounded-[2rem] border border-dashed border-border/50 flex flex-col items-center justify-center text-center gap-3 bg-muted/20">
             <Link2 className="w-8 h-8 text-muted-foreground/50" />
-            <p className="text-sm text-muted-foreground">Реферальные ссылки пока недоступны.</p>
+            <p className="text-sm text-muted-foreground">{t("cabinet.referral.links_unavailable")}</p>
           </div>
         )}
 
@@ -254,24 +256,24 @@ function ClassicReferralPage() {
               <Info className="h-5 w-5" />
             </div>
             <div className="min-w-0">
-              <h3 className="text-lg font-bold tracking-tight text-foreground truncate">Как это работает</h3>
-              <p className="text-xs text-muted-foreground mt-[1px] truncate">Правила начисления бонусов</p>
+              <h3 className="text-lg font-bold tracking-tight text-foreground truncate">{t("cabinet.referral.how_it_works")}</h3>
+              <p className="text-xs text-muted-foreground mt-[1px] truncate">{t("cabinet.referral.bonus_rules")}</p>
             </div>
           </div>
           <div className="flex flex-col gap-3">
             <div className="flex items-start gap-3 sm:gap-4 p-3 sm:p-4 rounded-2xl bg-background/60 border border-border/50 shadow-sm">
               <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary shrink-0 font-bold">1</div>
               <div className="min-w-0">
-                <p className="text-sm font-medium text-foreground mb-0.5">Уровень 1 <span className="text-primary font-bold ml-1">({s.referralPercent}%)</span></p>
-                <p className="text-xs text-muted-foreground leading-relaxed">Процент от пополнений тех, кто напрямую перешёл по вашей ссылке.</p>
+                <p className="text-sm font-medium text-foreground mb-0.5">{t("cabinet.referral.level", { level: 1 })} <span className="text-primary font-bold ml-1">({s.referralPercent}%)</span></p>
+                <p className="text-xs text-muted-foreground leading-relaxed">{t("cabinet.referral.level_1_desc")}</p>
               </div>
             </div>
             {(s.referralPercentLevel2 ?? 0) > 0 && (
               <div className="flex items-start gap-3 sm:gap-4 p-3 sm:p-4 rounded-2xl bg-background/60 border border-border/50 shadow-sm">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary shrink-0 font-bold">2</div>
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-foreground mb-0.5">Уровень 2 <span className="text-primary font-bold ml-1">({s.referralPercentLevel2}%)</span></p>
-                  <p className="text-xs text-muted-foreground leading-relaxed">Процент от пополнений рефералов ваших рефералов.</p>
+                  <p className="text-sm font-medium text-foreground mb-0.5">{t("cabinet.referral.level", { level: 2 })} <span className="text-primary font-bold ml-1">({s.referralPercentLevel2}%)</span></p>
+                  <p className="text-xs text-muted-foreground leading-relaxed">{t("cabinet.referral.level_2_desc")}</p>
                 </div>
               </div>
             )}
@@ -279,8 +281,8 @@ function ClassicReferralPage() {
               <div className="flex items-start gap-3 sm:gap-4 p-3 sm:p-4 rounded-2xl bg-background/60 border border-border/50 shadow-sm">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary shrink-0 font-bold">3</div>
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-foreground mb-0.5">Уровень 3 <span className="text-primary font-bold ml-1">({s.referralPercentLevel3}%)</span></p>
-                  <p className="text-xs text-muted-foreground leading-relaxed">Процент от пополнений рефералов второго уровня.</p>
+                  <p className="text-sm font-medium text-foreground mb-0.5">{t("cabinet.referral.level", { level: 3 })} <span className="text-primary font-bold ml-1">({s.referralPercentLevel3}%)</span></p>
+                  <p className="text-xs text-muted-foreground leading-relaxed">{t("cabinet.referral.level_3_desc")}</p>
                 </div>
               </div>
             )}
@@ -289,8 +291,8 @@ function ClassicReferralPage() {
                 <Wallet className="h-4 w-4" />
               </div>
               <div className="min-w-0">
-                <p className="text-sm font-medium text-foreground mb-0.5">Начисление на баланс</p>
-                <p className="text-xs text-muted-foreground leading-relaxed">Все средства автоматически зачисляются на ваш баланс и могут быть использованы для оплаты тарифов.</p>
+                <p className="text-sm font-medium text-foreground mb-0.5">{t("cabinet.referral.balance_accrual")}</p>
+                <p className="text-xs text-muted-foreground leading-relaxed">{t("cabinet.referral.balance_accrual_desc")}</p>
               </div>
             </div>
           </div>

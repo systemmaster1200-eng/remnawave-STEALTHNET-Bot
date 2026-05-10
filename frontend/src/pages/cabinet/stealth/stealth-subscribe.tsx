@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { Laptop, Download, Key, Copy, Check, ArrowRight, Smartphone, MonitorSmartphone, Apple, Tv, ExternalLink, Plus } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
@@ -106,6 +107,7 @@ function buildDeeplinkHref(rawLink: string, subUrl: string, baseUrl: string, isM
 }
 
 export function StealthSubscribe() {
+  const { t } = useTranslation();
   const { state } = useClientAuth();
   const navigate = useNavigate();
 
@@ -194,6 +196,7 @@ export function StealthSubscribe() {
   }
 
   const PlatformIcon = platformIcon(platform);
+  const lang = (state.client?.preferredLang ?? "ru").toLowerCase().startsWith("en") ? "en" : "ru";
 
   const externalBtns = useMemo(() => collectButtons(currentApp, "external"), [currentApp]);
   const subscriptionBtns = useMemo(() => collectButtons(currentApp, "subscriptionLink"), [currentApp]);
@@ -215,16 +218,15 @@ export function StealthSubscribe() {
           </div>
 
           <div className="text-center space-y-1.5">
-            <h2 className="text-2xl font-bold">Настройка на {PLATFORM_LABELS[platform]}</h2>
-            <p className="text-sm text-zinc-400">3 шага для завершения настройки</p>
+            <h2 className="text-2xl font-bold">{t("cabinet.subscribe.setup_on", { platform: PLATFORM_LABELS[platform] })}</h2>
+            <p className="text-sm text-zinc-400">{t("cabinet.subscribe.steps_hint")}</p>
           </div>
 
           <div className="space-y-2.5">
-            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 text-center">Выберите клиент</p>
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 text-center">{t("cabinet.subscribe.choose_client")}</p>
             {apps.length === 0 ? (
               <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-center text-xs text-amber-200">
-                Для платформы «{PLATFORM_LABELS[platform]}» приложения не настроены.
-                Выберите другую платформу ниже.
+                {t("cabinet.subscribe.platform_apps_empty", { platform: PLATFORM_LABELS[platform] })}
               </div>
             ) : (
               <div className="grid grid-cols-2 gap-2.5">
@@ -249,7 +251,7 @@ export function StealthSubscribe() {
                       {/* Featured chip — над карточкой */}
                       {isFeatured && (
                         <span className="absolute -top-2.5 left-3 rounded-full bg-violet-500 px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest text-white shadow-[0_4px_12px_-4px_rgba(167,139,250,0.6)]">
-                          Рекомендуется
+                          {t("cabinet.subscribe.recommended")}
                         </span>
                       )}
 
@@ -287,7 +289,7 @@ export function StealthSubscribe() {
                             active && !isFeatured && "text-rose-300/90",
                             !active && "text-zinc-500",
                           )}>
-                            {active ? "Выбрано" : isFeatured ? "VPN Client" : "Альтернативный клиент"}
+                            {active ? t("cabinet.subscribe.selected") : isFeatured ? "VPN Client" : t("cabinet.subscribe.alternative_client")}
                           </div>
                         </div>
                       </div>
@@ -306,7 +308,7 @@ export function StealthSubscribe() {
               onClick={() => setStep(2)}
               disabled={!currentApp || loading}
             >
-              Начать настройку
+              {t("cabinet.subscribe.start_setup")}
             </StadiumButton>
             <StadiumButton
               variant="outline"
@@ -314,12 +316,12 @@ export function StealthSubscribe() {
               iconLeft={<MonitorSmartphone className="h-4 w-4" />}
               onClick={() => setShowOtherDevices((v) => !v)}
             >
-              Другое устройство
+              {t("cabinet.subscribe.other_device")}
             </StadiumButton>
 
             {showOtherDevices && (
               <div className="rounded-2xl border border-white/[0.08] bg-zinc-900/40 p-3 space-y-2.5">
-                <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">Выберите устройство</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">{t("cabinet.subscribe.choose_device")}</p>
                 <div className="grid grid-cols-2 gap-2">
                   {(Object.keys(PLATFORM_LABELS) as Platform[]).map((p) => {
                     const active = p === platform;
@@ -345,7 +347,7 @@ export function StealthSubscribe() {
                       <p className="font-mono text-[11px] text-zinc-200 break-all">{subUrl}</p>
                     </div>
                     <StadiumButton variant="outline" size="md" iconLeft={<Copy className="h-4 w-4" />} onClick={copyUrl}>
-                      {copied ? "Скопировано" : "Скопировать ссылку с ключом"}
+                      {copied ? t("cabinet.subscribe.copied") : t("cabinet.subscribe.copy_key_link")}
                     </StadiumButton>
                   </>
                 )}
@@ -361,15 +363,15 @@ export function StealthSubscribe() {
           <div className="pt-4"><ConcentricRings icon={Download} /></div>
 
           <div className="text-center space-y-1.5">
-            <h2 className="text-2xl font-bold">Установка {currentApp?.name ?? "клиента"}</h2>
+            <h2 className="text-2xl font-bold">{t("cabinet.subscribe.install_app", { app: currentApp?.name ?? t("cabinet.subscribe.client") })}</h2>
             <p className="text-sm text-zinc-400 px-2">
-              Установите приложение клиента на устройство — кнопки ниже откроют соответствующие магазины приложений.
+              {t("cabinet.subscribe.install_desc")}
             </p>
           </div>
 
           {externalBtns.length === 0 ? (
             <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-center text-xs text-amber-200">
-              Ссылки на установку для этого приложения не настроены.
+              {t("cabinet.subscribe.install_links_empty")}
             </div>
           ) : (
             <div className="space-y-2.5">
@@ -381,7 +383,7 @@ export function StealthSubscribe() {
                   iconLeft={<ExternalLink className="h-4 w-4" />}
                   onClick={() => btn.link && openExternal(btn.link)}
                 >
-                  {getText(btn.text, "ru") || "Установить клиент"}
+                  {getText(btn.text, lang) || t("cabinet.subscribe.install_client")}
                 </StadiumButton>
               ))}
             </div>
@@ -389,7 +391,7 @@ export function StealthSubscribe() {
 
           <div className="pt-1">
             <StadiumButton variant="primary" size="md" iconLeft={<ArrowRight className="h-4 w-4" />} onClick={() => setStep(3)}>
-              Далее
+              {t("cabinet.onboarding.next")}
             </StadiumButton>
           </div>
         </div>
@@ -401,9 +403,9 @@ export function StealthSubscribe() {
           <div className="pt-4"><ConcentricRings icon={Key} /></div>
 
           <div className="text-center space-y-1.5">
-            <h2 className="text-2xl font-bold">Добавление подписки</h2>
+            <h2 className="text-2xl font-bold">{t("cabinet.subscribe.add_subscription")}</h2>
             <p className="text-sm text-zinc-400 px-2">
-              Откройте deeplink ниже — приложение {currentApp?.name ?? "клиент"} автоматически добавит подписку.
+              {t("cabinet.subscribe.add_subscription_desc", { app: currentApp?.name ?? t("cabinet.subscribe.client") })}
             </p>
           </div>
 
@@ -425,21 +427,21 @@ export function StealthSubscribe() {
                     openDeeplink(buildDeeplinkHref(btn.link, subUrl, publicAppUrl, isMiniapp));
                   }}
                 >
-                  {getText(btn.text, "ru") || `Открыть в ${currentApp?.name}`}
+                  {getText(btn.text, lang) || t("cabinet.subscribe.open_in_app", { app: currentApp?.name })}
                 </StadiumButton>
               ))
             ) : (
               <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-center text-xs text-amber-200">
-                Deeplink для добавления подписки не настроен — добавьте ссылку вручную в приложении.
+                {t("cabinet.subscribe.deeplink_empty")}
               </div>
             )}
 
             <StadiumButton variant="outline" size="md" iconLeft={copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />} onClick={copyUrl} disabled={!subUrl}>
-              {copied ? "Скопировано" : "Скопировать ссылку с ключом"}
+              {copied ? t("cabinet.subscribe.copied") : t("cabinet.subscribe.copy_key_link")}
             </StadiumButton>
 
             <StadiumButton variant="ghost" size="md" iconLeft={<ArrowRight className="h-4 w-4" />} onClick={() => navigate("/cabinet/dashboard")}>
-              Завершить
+              {t("cabinet.onboarding.done")}
             </StadiumButton>
           </div>
         </div>
