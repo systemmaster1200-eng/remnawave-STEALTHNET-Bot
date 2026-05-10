@@ -11,6 +11,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Plus, Mail, ChevronRight, Loader2 } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
 import { api } from "@/lib/api";
@@ -32,17 +33,18 @@ function statusColors(status: string): string {
   if (status === "closed") return "bg-zinc-700/60 text-zinc-400 border-white/10";
   return "bg-amber-500/15 text-amber-400 border-amber-500/30";
 }
-function statusLabel(status: string): string {
-  if (status === "open") return "Открыт";
-  if (status === "closed") return "Закрыт";
+function statusLabel(status: string, t: (key: string) => string): string {
+  if (status === "open") return t("cabinet.tickets.status_open");
+  if (status === "closed") return t("cabinet.tickets.status_closed");
   return status;
 }
-function fmtDate(iso: string): string {
-  try { return new Date(iso).toLocaleDateString("ru-RU", { day: "2-digit", month: "short" }); }
+function fmtDate(iso: string, locale: string): string {
+  try { return new Date(iso).toLocaleDateString(locale, { day: "2-digit", month: "short" }); }
   catch { return iso; }
 }
 
 export function StealthTickets() {
+  const { t, i18n } = useTranslation();
   const { state } = useClientAuth();
   const [items, setItems] = useState<TicketItem[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -56,7 +58,7 @@ export function StealthTickets() {
     setErr(null);
     api.getTickets(state.token)
       .then((r) => setItems(r.items ?? []))
-      .catch((e) => setErr(e instanceof Error ? e.message : "Не удалось загрузить обращения"))
+      .catch((e) => setErr(e instanceof Error ? e.message : t("cabinet.common.error_loading")))
       .finally(() => setLoading(false));
   }
 
@@ -69,7 +71,7 @@ export function StealthTickets() {
     <div className="px-4 pt-2 space-y-4 pb-2">
       {/* Top action — outline pill */}
       <StadiumButton variant="outline" size="md" iconLeft={<Plus className="h-4 w-4" />} onClick={goNew}>
-        Новое обращение
+        {t("cabinet.tickets.new_ticket")}
       </StadiumButton>
 
       {loading ? (
@@ -87,8 +89,8 @@ export function StealthTickets() {
             <Mail className="h-6 w-6 text-zinc-300" />
           </div>
           <div>
-            <h3 className="text-base font-bold">У вас пока нет обращений в поддержку</h3>
-            <p className="text-xs text-zinc-500 mt-1">Нажмите «Новое обращение», чтобы связаться с нами</p>
+            <h3 className="text-base font-bold">{t("cabinet.tickets.empty")}</h3>
+            <p className="text-xs text-zinc-500 mt-1">{t("cabinet.tickets.empty_hint")}</p>
           </div>
         </div>
       ) : (
@@ -104,13 +106,13 @@ export function StealthTickets() {
               </div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-0.5">
-                  <span className="font-semibold text-sm truncate">{t.subject || "Без темы"}</span>
+                  <span className="font-semibold text-sm truncate">{t.subject || i18n.t("cabinet.tickets.no_subject")}</span>
                 </div>
                 <div className="flex items-center gap-2 text-[10px]">
                   <span className={cn("rounded-md border px-1.5 py-0.5 font-bold uppercase tracking-wider", statusColors(t.status))}>
-                    {statusLabel(t.status)}
+                    {statusLabel(t.status, i18n.t)}
                   </span>
-                  <span className="text-zinc-500">{fmtDate(t.updatedAt)}</span>
+                  <span className="text-zinc-500">{fmtDate(t.updatedAt, i18n.resolvedLanguage?.startsWith("en") ? "en-US" : "ru-RU")}</span>
                 </div>
               </div>
               <ChevronRight className="h-4 w-4 text-zinc-500 shrink-0" />

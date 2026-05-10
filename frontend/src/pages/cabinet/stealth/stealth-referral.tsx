@@ -10,6 +10,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Gift, Send, Copy, Check, Users, ChevronDown, Award, Repeat, AlertTriangle, ChevronRight } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
 import { api, type ClientReferralStats, type PublicConfig } from "@/lib/api";
@@ -23,6 +24,7 @@ function fmtMoney(n: number, currency: string) {
 }
 
 export function StealthReferral() {
+  const { t } = useTranslation();
   const { state } = useClientAuth();
   const [stats, setStats] = useState<ClientReferralStats | null>(null);
   const [config, setConfig] = useState<PublicConfig | null>(null);
@@ -68,7 +70,7 @@ export function StealthReferral() {
   function share() {
     if (!link) return;
     if (typeof navigator !== "undefined" && "share" in navigator) {
-      navigator.share({ url: link, title: "Присоединяйся!" }).catch(() => {});
+      navigator.share({ url: link, title: t("cabinet.referral.share_title") }).catch(() => {});
     } else {
       copy();
     }
@@ -82,8 +84,8 @@ export function StealthReferral() {
           <Gift className="h-5 w-5 text-rose-400" />
         </div>
         <div>
-          <h2 className="text-lg font-bold tracking-tight">Реферальная система</h2>
-          <p className="text-xs text-zinc-500">Приглашай друзей — получай бонусы</p>
+          <h2 className="text-lg font-bold tracking-tight">{t("cabinet.referral.title")}</h2>
+          <p className="text-xs text-zinc-500">{t("cabinet.referral.web_subtitle")}</p>
         </div>
       </div>
 
@@ -99,32 +101,32 @@ export function StealthReferral() {
 
         <div className="relative grid grid-cols-2 gap-4">
           <div>
-            <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-rose-400/80">Накоплено</p>
+            <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-rose-400/80">{t("cabinet.referral.earned_total")}</p>
             <div className="mt-1.5 flex items-baseline gap-1.5">
               <span className="text-4xl font-bold tabular-nums">{stats ? fmtMoney(stats.totalEarnings, currency) : (loading ? "…" : "0")}</span>
             </div>
           </div>
           <div className="text-right">
-            <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-zinc-400">Друзей</p>
+            <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-zinc-400">{t("cabinet.referral.friends")}</p>
             <div className="mt-1.5 text-4xl font-bold tabular-nums">{stats?.referralCount ?? 0}</div>
           </div>
         </div>
 
-        <p className="relative text-xs text-zinc-400 mt-3">Приглашай друзей — получай бонусы за каждого</p>
+        <p className="relative text-xs text-zinc-400 mt-3">{t("cabinet.referral.web_subtitle")}</p>
       </div>
 
       {/* Your link */}
       <div className="rounded-2xl border border-white/[0.08] bg-zinc-900/40 p-4 space-y-3">
-        <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-zinc-500">Твоя ссылка</p>
+        <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-zinc-500">{t("cabinet.referral.your_link")}</p>
         <div className="rounded-xl border border-white/[0.06] bg-zinc-950/60 p-3">
-          <p className="font-mono text-xs text-zinc-200 break-all">{link ?? "Ссылка появится после привязки"}</p>
+          <p className="font-mono text-xs text-zinc-200 break-all">{link ?? t("cabinet.referral.link_after_binding")}</p>
         </div>
         <div className="grid grid-cols-2 gap-2.5">
           <StadiumButton variant="ghost" size="md" iconLeft={copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />} onClick={copy} disabled={!link}>
-            {copied ? "Скопировано" : "Скопировать"}
+            {copied ? t("cabinet.subscribe.copied") : t("cabinet.common.copy")}
           </StadiumButton>
           <StadiumButton variant="primary" size="md" iconLeft={<Send className="h-4 w-4" />} onClick={share} disabled={!link}>
-            Поделиться
+            {t("cabinet.referral.share")}
           </StadiumButton>
         </div>
       </div>
@@ -138,8 +140,8 @@ export function StealthReferral() {
           <Users className="h-5 w-5 text-rose-400" />
         </div>
         <div className="flex-1 min-w-0">
-          <h4 className="font-semibold text-sm">Твои друзья</h4>
-          <p className="text-xs text-zinc-500">Поделись ссылкой, чтобы получать бонусы</p>
+          <h4 className="font-semibold text-sm">{t("cabinet.referral.your_friends")}</h4>
+          <p className="text-xs text-zinc-500">{t("cabinet.referral.copy_share")}</p>
         </div>
         <ChevronRight className="h-4 w-4 text-zinc-500 shrink-0" />
       </button>
@@ -154,7 +156,7 @@ export function StealthReferral() {
           <div className="h-9 w-9 rounded-lg bg-zinc-800/80 border border-white/10 flex items-center justify-center">
             <Award className="h-4 w-4 text-zinc-300" />
           </div>
-          <span className="flex-1 text-left font-semibold text-sm">Правила и бонусы</span>
+          <span className="flex-1 text-left font-semibold text-sm">{t("cabinet.referral.rules_and_bonuses")}</span>
           <ChevronDown className={cn("h-4 w-4 text-zinc-500 transition-transform", rulesOpen && "rotate-180")} />
         </button>
 
@@ -163,24 +165,24 @@ export function StealthReferral() {
             <TipCard
               tone="emerald"
               icon={Gift}
-              title="За регистрацию друга"
+              title={t("cabinet.referral.friend_registration")}
             >
-              Друг получает свой welcome-бонус сразу после регистрации по твоей ссылке.
+              {t("cabinet.referral.friend_registration_desc")}
             </TipCard>
 
             <TipCard
               tone="rose"
               icon={Repeat}
-              title="За каждую оплату друга"
+              title={t("cabinet.referral.friend_payment")}
               chip={`${Math.round(stats.referralPercent)}%`}
             >
               <ul className="space-y-1">
-                <li>• 1-й уровень — <strong>{Math.round(stats.referralPercent)}%</strong> от каждой оплаты твоих рефералов</li>
+                <li>• {t("cabinet.referral.level", { level: 1 })} — <strong>{Math.round(stats.referralPercent)}%</strong> {t("cabinet.referral.from_each_payment")}</li>
                 {stats.referralPercentLevel2 > 0 && (
-                  <li>• 2-й уровень — <strong>{Math.round(stats.referralPercentLevel2)}%</strong> от оплат рефералов 2-го уровня</li>
+                  <li>• {t("cabinet.referral.level", { level: 2 })} — <strong>{Math.round(stats.referralPercentLevel2)}%</strong> {t("cabinet.referral.from_level_2_payments")}</li>
                 )}
                 {stats.referralPercentLevel3 > 0 && (
-                  <li>• 3-й уровень — <strong>{Math.round(stats.referralPercentLevel3)}%</strong> от оплат рефералов 3-го уровня</li>
+                  <li>• {t("cabinet.referral.level", { level: 3 })} — <strong>{Math.round(stats.referralPercentLevel3)}%</strong> {t("cabinet.referral.from_level_3_payments")}</li>
                 )}
               </ul>
             </TipCard>
@@ -188,10 +190,9 @@ export function StealthReferral() {
             <TipCard
               tone="amber"
               icon={AlertTriangle}
-              title="Условия"
+              title={t("cabinet.referral.terms")}
             >
-              Бонусы начисляются автоматически на твой баланс после успешной оплаты другом.
-              С баланса можно оплачивать любые тарифы и услуги внутри сервиса.
+              {t("cabinet.referral.terms_desc")}
             </TipCard>
           </div>
         )}
