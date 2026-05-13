@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { Wifi, Smartphone, Server, CreditCard, Loader2, Wallet, Layers, Shield, Zap, ArrowLeft } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
@@ -17,6 +18,7 @@ import {
 import { useCabinetMiniapp } from "@/pages/cabinet/cabinet-layout";
 import { PayNowPanel } from "@/components/payment/pay-now-panel";
 import { cn } from "@/lib/utils";
+import { localizePaymentProviderLabel, localizePlategaMethodLabel } from "@/lib/payment-labels";
 
 function formatMoney(amount: number, currency: string) {
   return new Intl.NumberFormat("ru-RU", {
@@ -44,6 +46,7 @@ function optionIcon(o: PublicSellOption) {
 }
 
 export function ClientExtraOptionsPage() {
+  const { t } = useTranslation();
   const { state, refreshProfile } = useClientAuth();
   const token = state.token;
   const balance = state.client?.balance ?? 0;
@@ -303,7 +306,10 @@ export function ClientExtraOptionsPage() {
             </Button>
 
             {(() => {
-              const providerLabel = (id: string, fallback: string) => paymentProviders.find((p) => p.id === id)?.label || fallback;
+              const providerLabel = (id: string, fallback: string) => {
+                const label = paymentProviders.find((p) => p.id === id)?.label || fallback;
+                return localizePaymentProviderLabel(t, id, label);
+              };
               const btnCls = cn("w-full", isMobileOrMiniapp ? "justify-start gap-4 px-6 h-16 rounded-2xl border-white/5 bg-card/40 hover:bg-card/60" : "gap-3 hover:bg-background/80 hover:shadow-md hover:-translate-y-0.5 transition-all duration-300 rounded-xl h-14 border-border/50 group justify-center px-6 relative");
 
               const colorMap: Record<string, { bg10: string; bg20: string; text: string }> = {
@@ -360,14 +366,14 @@ export function ClientExtraOptionsPage() {
                           <div className="p-2 rounded-xl bg-green-500/10">
                             {payLoading ? <Loader2 className="h-6 w-6 animate-spin text-green-500" /> : <CreditCard className="h-6 w-6 text-green-500" />}
                           </div>
-                          <span className="text-base font-bold">{m.label}</span>
+                          <span className="text-base font-bold">{localizePlategaMethodLabel(t, m)}</span>
                         </>
                       ) : (
                         <>
                           <div className="absolute left-6 p-1.5 rounded-lg bg-green-500/10 group-hover:bg-green-500/20 transition-colors">
                             {payLoading ? <Loader2 className="h-5 w-5 animate-spin text-green-500" /> : <CreditCard className="h-5 w-5 text-green-500" />}
                           </div>
-                          <span className="text-base font-medium">💳 {m.label}</span>
+                          <span className="text-base font-medium">💳 {localizePlategaMethodLabel(t, m)}</span>
                         </>
                       )}
                     </Button>

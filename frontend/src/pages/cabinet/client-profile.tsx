@@ -9,6 +9,7 @@ import { useClientAuth } from "@/contexts/client-auth";
 import { useCabinetMiniapp } from "@/pages/cabinet/cabinet-layout";
 import { PayNowPanel } from "@/components/payment/pay-now-panel";
 import { cn } from "@/lib/utils";
+import { localizePaymentProviderLabel, localizePlategaMethodLabel } from "@/lib/payment-labels";
 import { api } from "@/lib/api";
 import type { ClientPayment } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -48,7 +49,7 @@ export function ClientProfilePage() {
 }
 
 function ClassicProfilePage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { state, refreshProfile } = useClientAuth();
   const [payments, setPayments] = useState<ClientPayment[]>([]);
   const [copiedRef, setCopiedRef] = useState<"site" | "bot" | null>(null);
@@ -717,7 +718,7 @@ function ClassicProfilePage() {
                   </div>
                   <div className="min-w-0">
                     <p className="text-xs text-muted-foreground mb-0.5">{t("cabinet.profile.registration_date")}</p>
-                    <p className="text-sm font-medium">{new Date(client.createdAt).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long', year: 'numeric' })}</p>
+                    <p className="text-sm font-medium">{new Date(client.createdAt).toLocaleDateString(i18n.resolvedLanguage?.startsWith("en") ? "en-US" : "ru-RU", { day: 'numeric', month: 'long', year: 'numeric' })}</p>
                   </div>
                 </div>
               )}
@@ -1172,7 +1173,10 @@ function ClassicProfilePage() {
           ) : (
           <div className="flex flex-col gap-3">
             {(() => {
-              const providerLabel = (id: string, fallback: string) => paymentProviders.find((p) => p.id === id)?.label || fallback;
+              const providerLabel = (id: string, fallback: string) => {
+                const label = paymentProviders.find((p) => p.id === id)?.label || fallback;
+                return localizePaymentProviderLabel(t, id, label);
+              };
               const btnCls = cn("w-full", isMiniapp ? "justify-start gap-4 px-6 h-16 rounded-2xl border-white/5 bg-card/40 hover:bg-card/60" : "gap-3 hover:bg-background/80 hover:shadow-md hover:-translate-y-0.5 transition-all duration-300 rounded-xl h-14 border-border/50 group justify-center px-6 relative");
 
               const colorMap: Record<string, { bg10: string; bg20: string; text: string }> = {
@@ -1230,14 +1234,14 @@ function ClassicProfilePage() {
                           <div className="p-2 rounded-xl bg-green-500/10">
                             {topUpLoading ? <Loader2 className="h-6 w-6 animate-spin text-green-500" /> : <CreditCard className="h-6 w-6 text-green-500" />}
                           </div>
-                          <span className="text-base font-bold">{m.label}</span>
+                          <span className="text-base font-bold">{localizePlategaMethodLabel(t, m)}</span>
                         </>
                       ) : (
                         <>
                           <div className="absolute left-6 p-1.5 rounded-lg bg-green-500/10 group-hover:bg-green-500/20 transition-colors">
                             {topUpLoading ? <Loader2 className="h-5 w-5 animate-spin text-green-500" /> : <CreditCard className="h-5 w-5 text-green-500" />}
                           </div>
-                          <span className="text-base font-medium">💳 {m.label}</span>
+                          <span className="text-base font-medium">💳 {localizePlategaMethodLabel(t, m)}</span>
                         </>
                       )}
                     </Button>

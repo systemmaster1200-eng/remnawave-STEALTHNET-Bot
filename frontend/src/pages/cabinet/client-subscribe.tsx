@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { useCabinetDesign } from "@/lib/use-cabinet-design";
@@ -202,6 +203,7 @@ export function ClientSubscribePage() {
 }
 
 function ClassicSubscribePage() {
+  const { t } = useTranslation();
   const { state } = useClientAuth();
   const isMiniapp = useCabinetMiniapp();
   const token = state.token ?? null;
@@ -267,7 +269,7 @@ function ClassicSubscribePage() {
     macos: "macOS",
     windows: "Windows",
     linux: "Linux",
-    other: "Другое",
+    other: t("cabinet.subscribe.other_platform"),
   };
   const platformLabel = PLATFORM_LABELS[platform] ?? platform;
   const showQrNextToAddButton = isMiniapp || isMobileView;
@@ -279,7 +281,7 @@ function ClassicSubscribePage() {
           <div className="absolute inset-0 rounded-full blur-xl bg-primary/20 animate-pulse" />
           <Loader2 className="h-10 w-10 animate-spin text-primary relative z-10" />
         </div>
-        <p className="text-sm font-medium text-slate-600 dark:text-muted-foreground animate-pulse">Подготовка конфигурации…</p>
+        <p className="text-sm font-medium text-slate-600 dark:text-muted-foreground animate-pulse">{t("cabinet.subscribe.loading")}</p>
       </div>
     );
   }
@@ -290,7 +292,7 @@ function ClassicSubscribePage() {
         <Button variant="ghost" size="sm" className="gap-2 -ml-2 hover:bg-slate-100 dark:hover:bg-white/5 text-slate-600 dark:text-muted-foreground hover:text-slate-900 dark:hover:text-foreground transition-colors" asChild>
           <Link to="/cabinet/dashboard">
             <ArrowLeft className="h-4 w-4" />
-            Назад
+            {t("cabinet.subscribe.back")}
           </Link>
         </Button>
         <motion.div
@@ -305,16 +307,16 @@ function ClassicSubscribePage() {
                 <div className="p-2.5 rounded-xl bg-primary/20 text-primary ring-1 ring-primary/30">
                   <Wifi className="h-5 w-5" />
                 </div>
-                Подключение к VPN
+                {t("cabinet.subscribe.connect_vpn")}
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-5 relative z-10">
               <p className="text-slate-600 dark:text-muted-foreground leading-relaxed">
-                Ссылка на подписку появится после оплаты тарифа. Выберите тариф и оплатите — затем здесь можно будет скачать приложение и добавить подписку.
+                {t("cabinet.subscribe.no_link_desc")}
               </p>
               <Button asChild className="w-full gap-2 h-12 text-base font-medium shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] hover:shadow-primary/30">
                 <Link to="/cabinet/tariffs">
-                  Выбрать тариф
+                  {t("cabinet.subscribe.choose_tariff")}
                 </Link>
               </Button>
             </CardContent>
@@ -324,8 +326,8 @@ function ClassicSubscribePage() {
     );
   }
 
-  const linkCardRef = "Скопируйте ссылку и вставьте в приложение VPN или нажмите «Добавить подписку» в выбранном приложении ниже!";
-  const linkCardRefMiniapp = "Скопируйте ссылку и вставьте в приложение VPN выше или нажмите «Добавить подписку» в выбранном приложении.";
+  const linkCardRef = t("cabinet.subscribe.link_hint");
+  const linkCardRefMiniapp = t("cabinet.subscribe.link_hint_miniapp");
 
   const appsBlock = apps.length === 0 ? (
     <motion.div
@@ -340,7 +342,7 @@ function ClassicSubscribePage() {
               <Info className="h-6 w-6 text-muted-foreground" />
             </div>
             <p className="text-sm text-slate-600 dark:text-muted-foreground max-w-sm">
-              {isMiniapp ? "Список приложений пуст. Скопируйте ссылку ниже и вставьте её в любое приложение VPN (Happ, Stash, v2rayNG и др.)" : "Список приложений пуст. Скопируйте ссылку выше и вставьте её в любое приложение VPN (Happ, Stash, v2rayNG и др.)"} или настройте страницу подписки в админке (Настройки → Страница подписки).
+              {isMiniapp ? t("cabinet.subscribe.empty_apps_miniapp") : t("cabinet.subscribe.empty_apps")} {t("cabinet.subscribe.empty_apps_admin_hint")}
             </p>
           </div>
         </CardContent>
@@ -355,7 +357,7 @@ function ClassicSubscribePage() {
       >
         <div className="h-8 w-1 rounded-full bg-primary" />
         <h2 className="text-xl font-semibold tracking-tight text-slate-900 dark:text-white">
-          Приложения для {platformData?.displayName ? getText(platformData.displayName, locale) : platformLabel}
+          {t("cabinet.subscribe.apps_for", { platform: platformData?.displayName ? getText(platformData.displayName, locale) : platformLabel })}
         </h2>
       </motion.div>
       
@@ -495,11 +497,11 @@ function ClassicSubscribePage() {
                 <div className="p-1.5 rounded-md bg-primary/20 text-primary">
                   <Zap className="h-5 w-5" />
                 </div>
-                Ваша подписка
+                {t("cabinet.subscribe.title")}
               </h1>
               {!isMiniapp && (
                 <p className="text-sm text-slate-600 dark:text-muted-foreground/80">
-                  Единая ссылка для всех ваших устройств
+                  {t("cabinet.subscribe.single_link")}
                 </p>
               )}
             </div>
@@ -513,7 +515,7 @@ function ClassicSubscribePage() {
 
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-medium text-slate-700 dark:text-white/80">Ссылка конфигурации</h2>
+              <h2 className="text-sm font-medium text-slate-700 dark:text-white/80">{t("cabinet.subscribe.config_link")}</h2>
               <p className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-muted-foreground font-semibold">
                 Auto-update
               </p>
@@ -548,7 +550,7 @@ function ClassicSubscribePage() {
                         className="flex items-center gap-2"
                       >
                         <Check className="h-4 w-4" />
-                        Скопировано
+                        {t("cabinet.subscribe.copied")}
                       </motion.div>
                     ) : (
                       <motion.div
@@ -559,7 +561,7 @@ function ClassicSubscribePage() {
                         className="flex items-center gap-2"
                       >
                         <Copy className="h-4 w-4" />
-                        Копировать ссылку
+                        {t("cabinet.subscribe.copy_link")}
                       </motion.div>
                     )}
                   </AnimatePresence>
@@ -573,7 +575,7 @@ function ClassicSubscribePage() {
                   className="sm:w-auto w-full gap-2 h-11 border-slate-200/50 dark:border-white/10 bg-white/50 dark:bg-white/5 hover:bg-white/80 dark:hover:bg-white/10 transition-colors"
                 >
                   <QrCode className="h-4 w-4" />
-                  Показать QR
+                  {t("cabinet.subscribe.show_qr")}
                 </Button>
               )}
             </div>
@@ -599,10 +601,10 @@ function ClassicSubscribePage() {
       </div>
       <div className="space-y-1">
         <h2 className="text-sm font-semibold text-slate-900 dark:text-white/90">
-          Как подключиться?
+          {t("cabinet.subscribe.how_to_connect")}
         </h2>
         <p className="text-sm text-slate-600 dark:text-muted-foreground leading-relaxed">
-          Ниже представлены приложения для вашей платформы ({platformLabel}). Сначала скачайте приложение по ссылке, затем нажмите «Добавить подписку» — откроется диплинк с вашей ссылкой подписки.
+          {t("cabinet.subscribe.how_to_connect_desc", { platform: platformLabel })}
         </p>
       </div>
     </motion.section>
@@ -617,7 +619,7 @@ function ClassicSubscribePage() {
         <Button variant="ghost" size="sm" className="gap-2 -ml-2 hover:bg-slate-100 dark:hover:bg-white/5 text-slate-600 dark:text-muted-foreground hover:text-slate-900 dark:hover:text-foreground transition-colors" asChild>
           <Link to="/cabinet/dashboard">
             <ArrowLeft className="h-4 w-4" />
-            Назад в кабинет
+            {t("cabinet.subscribe.back_to_cabinet")}
           </Link>
         </Button>
       </motion.div>
@@ -642,10 +644,10 @@ function ClassicSubscribePage() {
               <div className="p-1.5 rounded-md bg-primary/20 text-primary">
                 <QrCode className="h-5 w-5" />
               </div>
-              QR-код подписки
+              {t("cabinet.subscribe.qr_title")}
             </DialogTitle>
             <DialogDescription className="text-slate-600 dark:text-muted-foreground/80">
-              Отсканируйте камерой телефона — в вашем приложении VPN. Например (Happ, Stash, v2rayNG и др.).
+              {t("cabinet.subscribe.qr_desc")}
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col items-center gap-5 py-4">
@@ -657,7 +659,7 @@ function ClassicSubscribePage() {
             </div>
             <div className="flex items-center gap-2 text-xs text-slate-600 dark:text-muted-foreground bg-slate-100/80 dark:bg-white/5 px-3 py-1.5 rounded-full border border-slate-200/50 dark:border-white/5">
               <ShieldCheck className="h-3.5 w-3.5 text-primary" />
-              Ссылка ведёт на конфигурацию VPN
+              {t("cabinet.subscribe.qr_safe_hint")}
             </div>
           </div>
         </DialogContent>

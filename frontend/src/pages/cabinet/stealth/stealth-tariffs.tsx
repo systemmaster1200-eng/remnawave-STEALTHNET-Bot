@@ -24,12 +24,14 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { Wallet, Bitcoin, Check, AlertCircle, Loader2, Sparkles } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
 import { api, type PublicTariffCategory, type PublicConfig } from "@/lib/api";
 import { StadiumButton } from "@/components/stealth/stadium-button";
 import { cn } from "@/lib/utils";
+import { localizePlategaMethodLabel } from "@/lib/payment-labels";
 
 interface PriceOption {
   id: string;
@@ -63,6 +65,7 @@ function fmtPrice(n: number, currency: string) {
 }
 
 export function StealthTariffs() {
+  const { t } = useTranslation();
   const { state, refreshProfile } = useClientAuth();
   const navigate = useNavigate();
 
@@ -126,7 +129,7 @@ export function StealthTariffs() {
     if (!config) return [];
     const list: PayMethod[] = [];
     (config.plategaMethods ?? []).forEach((m) => {
-      list.push({ kind: "platega", id: m.id, label: m.label, icon: Wallet });
+      list.push({ kind: "platega", id: m.id, label: localizePlategaMethodLabel(t, m), icon: Wallet });
     });
     if (config.yookassaEnabled) list.push({ kind: "yookassa", label: "YooKassa", icon: Wallet });
     if (config.yoomoneyEnabled) list.push({ kind: "yoomoney", label: "YooMoney", icon: Wallet });
@@ -134,7 +137,7 @@ export function StealthTariffs() {
     if (config.heleketEnabled) list.push({ kind: "heleket", label: "Heleket", icon: Bitcoin });
     if (config.lavaEnabled) list.push({ kind: "lava", label: "Lava", icon: Wallet });
     return list;
-  }, [config]);
+  }, [config, t]);
 
   // Auto-select first method when methods load
   useEffect(() => {

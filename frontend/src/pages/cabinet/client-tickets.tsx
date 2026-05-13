@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { MessageSquarePlus, Inbox, Loader2, Send, ArrowLeft, CircleDot, CircleCheck, User, Paperclip, X as XIcon, ImageIcon } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
 import { api, type TicketAttachmentDto, type TicketMessageDto } from "@/lib/api";
@@ -49,6 +50,7 @@ export function ClientTicketsPage() {
 }
 
 function ClassicTicketsPage() {
+  const { t, i18n } = useTranslation();
   const { state } = useClientAuth();
   const token = state.token ?? null;
 
@@ -88,15 +90,15 @@ function ClassicTicketsPage() {
     const next: File[] = [...current];
     for (const f of Array.from(incoming)) {
       if (next.length >= MAX_FILES) {
-        setUploadError(`Не больше ${MAX_FILES} файлов`);
+        setUploadError(t("cabinet.tickets.max_files", { count: MAX_FILES }));
         break;
       }
       if (!f.type.startsWith("image/")) {
-        setUploadError("Можно прикладывать только изображения");
+        setUploadError(t("cabinet.tickets.images_only"));
         continue;
       }
       if (f.size > MAX_FILE_BYTES) {
-        setUploadError(`Файл больше ${MAX_FILE_MB} MB`);
+        setUploadError(t("cabinet.tickets.file_too_large", { size: MAX_FILE_MB }));
         continue;
       }
       next.push(f);
@@ -114,7 +116,7 @@ function ClassicTicketsPage() {
         setLoading(false);
       })
       .catch((e) => {
-        setError(e instanceof Error ? e.message : "Ошибка загрузки");
+        setError(e instanceof Error ? e.message : t("cabinet.common.error_loading"));
         setLoading(false);
       });
   };
@@ -163,7 +165,7 @@ function ClassicTicketsPage() {
         setReplyFiles([]);
         if (replyInputRef.current) replyInputRef.current.value = "";
       })
-      .catch((e) => setUploadError(e instanceof Error ? e.message : "Не удалось отправить"))
+      .catch((e) => setUploadError(e instanceof Error ? e.message : t("cabinet.tickets.send_error")))
       .finally(() => setReplySending(false));
   };
 
@@ -184,7 +186,7 @@ function ClassicTicketsPage() {
         setNewFiles([]);
         if (newInputRef.current) newInputRef.current.value = "";
       })
-      .catch((e) => setUploadError(e instanceof Error ? e.message : "Не удалось создать тикет"))
+      .catch((e) => setUploadError(e instanceof Error ? e.message : t("cabinet.tickets.create_error")))
       .finally(() => setCreateSending(false));
   };
 
@@ -193,9 +195,9 @@ function ClassicTicketsPage() {
       const d = new Date(s);
       const isToday = new Date().toDateString() === d.toDateString();
       if (isToday) {
-        return "Сегодня, " + d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+        return t("cabinet.tickets.today_time", { time: d.toLocaleTimeString(i18n.resolvedLanguage?.startsWith("en") ? "en-US" : "ru-RU", { hour: "2-digit", minute: "2-digit" }) });
       }
-      return d.toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+      return d.toLocaleString(i18n.resolvedLanguage?.startsWith("en") ? "en-US" : "ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
     } catch {
       return s;
     }
@@ -205,7 +207,7 @@ function ClassicTicketsPage() {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
         <Loader2 className="h-8 w-8 animate-spin text-primary/60" />
-        <p className="text-sm font-medium text-muted-foreground animate-pulse">Загрузка обращений…</p>
+        <p className="text-sm font-medium text-muted-foreground animate-pulse">{t("cabinet.tickets.loading")}</p>
       </div>
     );
   }
@@ -217,7 +219,7 @@ function ClassicTicketsPage() {
           <MessageSquarePlus className="h-6 w-6 opacity-80" />
         </div>
         <p className="text-sm font-medium text-destructive">{error}</p>
-        <Button variant="outline" onClick={loadList} className="mt-2 rounded-xl">Повторить попытку</Button>
+        <Button variant="outline" onClick={loadList} className="mt-2 rounded-xl">{t("cabinet.tickets.retry")}</Button>
       </div>
     );
   }
@@ -235,9 +237,9 @@ function ClassicTicketsPage() {
               <div className="flex items-center gap-2 mt-0.5">
                 <span className={cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider", detail.status === "open" ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" : "bg-muted text-muted-foreground")}>
                   {detail.status === "open" ? <CircleDot className="h-3 w-3" /> : <CircleCheck className="h-3 w-3" />}
-                  {detail.status === "open" ? "Открыт" : "Закрыт"}
+                  {detail.status === "open" ? t("cabinet.tickets.status_open") : t("cabinet.tickets.status_closed")}
                 </span>
-                <span className="text-[10px] text-muted-foreground font-medium">Обновлён: {formatDate(detail.updatedAt)}</span>
+                <span className="text-[10px] text-muted-foreground font-medium">{t("cabinet.tickets.updated")}: {formatDate(detail.updatedAt)}</span>
               </div>
             </div>
           </div>
@@ -245,7 +247,7 @@ function ClassicTicketsPage() {
 
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 scroll-smooth">
           {detail.messages.length === 0 ? (
-            <div className="flex h-full items-center justify-center text-muted-foreground text-sm font-medium">Нет сообщений</div>
+            <div className="flex h-full items-center justify-center text-muted-foreground text-sm font-medium">{t("cabinet.tickets.no_messages")}</div>
           ) : (
             detail.messages.map((m) => {
               const isSupport = m.authorType === "support";
@@ -302,7 +304,7 @@ function ClassicTicketsPage() {
                       type="button"
                       onClick={() => setReplyFiles((prev) => prev.filter((_, idx) => idx !== i))}
                       className="flex h-5 w-5 items-center justify-center rounded-full bg-background/80 text-muted-foreground hover:text-foreground hover:bg-background transition-colors"
-                      aria-label="Удалить"
+                      aria-label={t("cabinet.common.delete")}
                     >
                       <XIcon className="h-3 w-3" />
                     </button>
@@ -329,13 +331,13 @@ function ClassicTicketsPage() {
                 onClick={() => replyInputRef.current?.click()}
                 disabled={replyFiles.length >= MAX_FILES}
                 className="h-[50px] w-[50px] rounded-[1.2rem] shrink-0 bg-background/60 hover:bg-background/80 text-muted-foreground"
-                aria-label="Прикрепить фото"
-                title="Прикрепить фото"
+                aria-label={t("cabinet.tickets.attach_photo")}
+                title={t("cabinet.tickets.attach_photo")}
               >
                 <Paperclip className="h-5 w-5" />
               </Button>
               <Textarea
-                placeholder="Сообщение..."
+                placeholder={t("cabinet.tickets.message_placeholder")}
                 value={replyText}
                 onChange={(e) => setReplyText(e.target.value)}
                 className="resize-none min-h-[50px] max-h-[120px] rounded-[1.5rem] bg-background/60 border-white/10 dark:border-white/5 focus-visible:ring-1 focus-visible:ring-primary shadow-inner text-sm font-medium py-3.5 px-4"
@@ -356,7 +358,7 @@ function ClassicTicketsPage() {
                 {replySending ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5 ml-1" />}
               </Button>
             </div>
-            <p className="hidden sm:block text-center text-[10px] text-muted-foreground mt-2 font-medium">Enter — отправить · Shift+Enter — перенос · 📎 — до {MAX_FILES} фото</p>
+            <p className="hidden sm:block text-center text-[10px] text-muted-foreground mt-2 font-medium">{t("cabinet.tickets.enter_hint", { count: MAX_FILES })}</p>
           </div>
         )}
       </div>
@@ -367,7 +369,7 @@ function ClassicTicketsPage() {
     return (
       <div className="flex flex-col h-[500px] items-center justify-center w-full rounded-[2.5rem] border border-white/10 dark:border-white/5 bg-slate-50/60 dark:bg-slate-950/60 backdrop-blur-[32px] gap-4">
         <Loader2 className="h-8 w-8 animate-spin text-primary/60" />
-        <Button variant="ghost" className="rounded-xl" onClick={() => setDetailId(null)}>Отменить загрузку</Button>
+        <Button variant="ghost" className="rounded-xl" onClick={() => setDetailId(null)}>{t("cabinet.tickets.cancel_loading")}</Button>
       </div>
     );
   }
@@ -376,8 +378,8 @@ function ClassicTicketsPage() {
     <div className="space-y-6 sm:space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight text-foreground">Поддержка</h2>
-          <p className="text-sm text-muted-foreground mt-1 font-medium">Создавайте тикеты для связи с администрацией.</p>
+          <h2 className="text-2xl font-bold tracking-tight text-foreground">{t("cabinet.tickets.title")}</h2>
+          <p className="text-sm text-muted-foreground mt-1 font-medium">{t("cabinet.tickets.subtitle")}</p>
         </div>
         {!showNewForm && (
           <Button
@@ -385,7 +387,7 @@ function ClassicTicketsPage() {
             className="rounded-xl shadow-lg bg-primary hover:bg-primary/90 text-primary-foreground transition-all hover:scale-105 h-11 px-5"
           >
             <MessageSquarePlus className="h-4 w-4 mr-2" />
-            <span className="font-semibold text-[13px] tracking-wide">СОЗДАТЬ ТИКЕТ</span>
+            <span className="font-semibold text-[13px] tracking-wide">{t("cabinet.tickets.create")}</span>
           </Button>
         )}
       </div>
@@ -396,14 +398,14 @@ function ClassicTicketsPage() {
           <div className="p-5 sm:p-7 relative z-10">
             <h3 className="text-lg font-bold mb-5 flex items-center gap-2">
               <MessageSquarePlus className="h-5 w-5 text-primary" />
-              Новое обращение
+              {t("cabinet.tickets.new_ticket")}
             </h3>
             <div className="space-y-5">
               <div className="space-y-2">
-                <Label htmlFor="new-subject" className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground ml-1">Заголовок проблемы</Label>
+                <Label htmlFor="new-subject" className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground ml-1">{t("cabinet.tickets.subject_label")}</Label>
                 <Input
                   id="new-subject"
-                  placeholder="О чем пойдет речь?"
+                  placeholder={t("cabinet.tickets.subject_placeholder")}
                   value={newSubject}
                   onChange={(e) => setNewSubject(e.target.value)}
                   maxLength={500}
@@ -411,10 +413,10 @@ function ClassicTicketsPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="new-message" className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground ml-1">Детальное описание</Label>
+                <Label htmlFor="new-message" className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground ml-1">{t("cabinet.tickets.description_label")}</Label>
                 <Textarea
                   id="new-message"
-                  placeholder="Опишите проблему или задайте вопрос..."
+                  placeholder={t("cabinet.tickets.description_placeholder")}
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
                   rows={5}
@@ -422,7 +424,7 @@ function ClassicTicketsPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground ml-1">Вложения</Label>
+                <Label className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground ml-1">{t("cabinet.tickets.attachments")}</Label>
                 <div className="flex flex-wrap gap-2 items-center">
                   <input
                     ref={newInputRef}
@@ -440,7 +442,7 @@ function ClassicTicketsPage() {
                     className="rounded-xl h-10 gap-2 px-4 text-xs font-semibold"
                   >
                     <ImageIcon className="h-4 w-4" />
-                    Добавить фото ({newFiles.length}/{MAX_FILES})
+                    {t("cabinet.tickets.add_photo")} ({newFiles.length}/{MAX_FILES})
                   </Button>
                   {newFiles.map((f, i) => (
                     <div
@@ -458,14 +460,14 @@ function ClassicTicketsPage() {
                         type="button"
                         onClick={() => setNewFiles((prev) => prev.filter((_, idx) => idx !== i))}
                         className="flex h-5 w-5 items-center justify-center rounded-full bg-background/80 text-muted-foreground hover:text-foreground hover:bg-background transition-colors"
-                        aria-label="Удалить"
+                        aria-label={t("cabinet.common.delete")}
                       >
                         <XIcon className="h-3 w-3" />
                       </button>
                     </div>
                   ))}
                 </div>
-                <p className="text-[10px] text-muted-foreground ml-1 font-medium">До {MAX_FILES} изображений, каждое не больше {MAX_FILE_MB} MB</p>
+                <p className="text-[10px] text-muted-foreground ml-1 font-medium">{t("cabinet.tickets.attachments_hint", { count: MAX_FILES, size: MAX_FILE_MB })}</p>
               </div>
               {uploadError && (
                 <p className="text-[11px] text-destructive font-semibold ml-1">{uploadError}</p>
@@ -477,14 +479,14 @@ function ClassicTicketsPage() {
                   className="rounded-xl h-11 w-full sm:w-auto px-8 font-semibold tracking-wide"
                 >
                   {createSending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Send className="h-4 w-4 mr-2" />}
-                  Отправить
+                  {t("cabinet.tickets.send")}
                 </Button>
                 <Button
                   variant="ghost"
                   onClick={() => { setShowNewForm(false); setNewSubject(""); setNewMessage(""); setNewFiles([]); }}
                   className="rounded-xl h-11 w-full sm:w-auto bg-background/30 hover:bg-background/50 font-semibold"
                 >
-                  Отмена
+                  {t("cabinet.tickets.cancel")}
                 </Button>
               </div>
             </div>
@@ -497,24 +499,24 @@ function ClassicTicketsPage() {
           <div className="flex h-16 w-16 items-center justify-center rounded-[1.5rem] bg-primary/10 text-primary mb-4 border border-primary/20">
             <Inbox className="h-8 w-8 opacity-80" />
           </div>
-          <h3 className="text-lg font-bold text-foreground">У вас нет обращений</h3>
-          <p className="text-sm text-muted-foreground mt-1 max-w-sm font-medium">Здесь будет отображаться история ваших тикетов в службу поддержки.</p>
+          <h3 className="text-lg font-bold text-foreground">{t("cabinet.tickets.empty")}</h3>
+          <p className="text-sm text-muted-foreground mt-1 max-w-sm font-medium">{t("cabinet.tickets.empty_hint")}</p>
         </div>
       ) : !showNewForm ? (
         <div className="grid gap-3 sm:gap-4">
-          {list.map((t) => {
-            const isOpen = t.status === "open";
+          {list.map((ticket) => {
+            const isOpen = ticket.status === "open";
             return (
               <div
-                key={t.id}
-                onClick={() => setDetailId(t.id)}
+                key={ticket.id}
+                onClick={() => setDetailId(ticket.id)}
                 className="group relative flex flex-col sm:flex-row sm:items-center justify-between gap-4 overflow-hidden rounded-[2rem] border border-white/20 dark:border-white/10 bg-[hsl(var(--card)/0.8)] dark:bg-[hsl(var(--card)/0.5)] backdrop-blur-[32px] p-5 sm:p-6 transition-all duration-300 hover:bg-card/90 dark:hover:bg-card/70 hover:shadow-[0_10px_40px_rgba(0,0,0,0.1)] hover:-translate-y-0.5 cursor-pointer"
               >
                 {isOpen && (
                   <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]" />
                 )}
                 <div className="min-w-0 flex-1 pl-1">
-                  <h4 className="font-bold text-base sm:text-lg text-foreground truncate group-hover:text-primary transition-colors">{t.subject}</h4>
+                  <h4 className="font-bold text-base sm:text-lg text-foreground truncate group-hover:text-primary transition-colors">{ticket.subject}</h4>
                   <div className="flex flex-wrap items-center gap-2 md:gap-3 mt-2">
                     <span
                       className={cn(
@@ -523,9 +525,9 @@ function ClassicTicketsPage() {
                       )}
                     >
                       {isOpen ? <CircleDot className="h-3 w-3" /> : <CircleCheck className="h-3 w-3" />}
-                      {isOpen ? "Открыт" : "Закрыт"}
+                      {isOpen ? t("cabinet.tickets.status_open") : t("cabinet.tickets.status_closed")}
                     </span>
-                    <span className="text-xs font-semibold text-muted-foreground">Последнее сообщение: {formatDate(t.updatedAt)}</span>
+                    <span className="text-xs font-semibold text-muted-foreground">{t("cabinet.tickets.last_message")}: {formatDate(ticket.updatedAt)}</span>
                   </div>
                 </div>
                 <div className="hidden sm:flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-background/50 border border-white/10 text-muted-foreground transition-all duration-300 group-hover:translate-x-1 group-hover:bg-primary group-hover:border-primary/50 group-hover:text-primary-foreground group-hover:shadow-md">
