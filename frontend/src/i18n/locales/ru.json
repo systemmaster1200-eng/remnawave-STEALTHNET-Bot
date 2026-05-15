@@ -1390,7 +1390,7 @@
       "landing_section_faq": "Блок FAQ",
       "landing_section_cta": "Финальный CTA (Ready to connect)",
       "landing_contacts": "Контакты (текст или HTML)",
-      "landing_offer_link": "Ссылка на оферту",
+      "landing_offer_link": "Ссылка на политику конфиденциальности",
       "landing_offer_hint": "Если пусто — используется общая настройка «Политика конфиденциальности» из раздела Поддержка.",
       "landing_privacy_link": "Ссылка на политику конфиденциальности",
       "landing_privacy_hint": "Если пусто — используется «Соглашение» из раздела Поддержка.",

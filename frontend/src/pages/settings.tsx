@@ -2201,9 +2201,9 @@ export function SettingsPage() {
                         <div className="space-y-1.5 p-4 rounded-xl border border-white/10 bg-card/40">
                           <div className="flex items-center gap-2 mb-1">
                             <FileText className="h-4 w-4 text-fuchsia-500" />
-                            <Label className="text-sm font-medium">Публичная оферта</Label>
+                            <Label className="text-sm font-medium">Политика конфиденциальности</Label>
                           </div>
-                          <p className="text-[11px] text-muted-foreground mb-2">Юридическая оферта (особенно нужна при работе через ИП/самозанятость).</p>
+                          <p className="text-[11px] text-muted-foreground mb-2">Политика конфиденциальности (особенно нужна при работе через ИП/самозанятость).</p>
                           <Input
                             value={settings.offerLink ?? ""}
                             onChange={(e) => setSettings((s) => (s ? { ...s, offerLink: e.target.value || undefined } : s))}

@@ -89,7 +89,7 @@ export function StealthProfile() {
     // Telegram-чат поддержки = admin's supportLink (поле «Поддержка» в админке).
     // Если не задан — пункт меню не показываем (вместо ссылки на бота, как было раньше).
     const supportTgUrl = (config as { supportLink?: string | null })?.supportLink?.trim() || null;
-    // Из админки: agreementLink → пользовательское соглашение, offerLink → оферта, instructionsLink → инструкции.
+    // Из админки: agreementLink → пользовательское соглашение, offerLink → политика конфиденциальности, instructionsLink → инструкции.
     // Если ссылка пустая — пункт меню не показываем.
     const agreementUrl = (config as { agreementLink?: string | null })?.agreementLink?.trim() || null;
     const offerUrl = (config as { offerLink?: string | null })?.offerLink?.trim() || null;
@@ -122,7 +122,7 @@ export function StealthProfile() {
           }] : []),
           ...(offerUrl ? [{
             id: "offer",
-            label: "Публичная оферта",
+            label: "Политика конфиденциальности",
             icon: Lock,
             onClick: () => window.open(offerUrl, "_blank", "noopener,noreferrer"),
           }] : []),

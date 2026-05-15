@@ -333,7 +333,7 @@ const EN: Record<string, string> = {
   "support.title": "🆘 Support\n\nChoose a section:",
   "support.btn_tech": "👤 Tech Support",
   "support.btn_agreement": "📜 Agreements",
-  "support.btn_offer": "📄 Terms of Service",
+  "support.btn_offer": "📄 Privacy Policy",
   "support.btn_instructions": "📋 Instructions",
   "support.btn_video_instructions": "📹 Video Instructions",
   "support.video_not_added": "Instructions not added yet.",

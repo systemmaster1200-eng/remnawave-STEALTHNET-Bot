@@ -362,7 +362,7 @@ export const CUSTOM_VARIANT_SCHEMAS: Record<string, { propsFields: FieldSchema[]
   },
   footer: {
     propsFields: [
-      { key: "offerLink", label: "Ссылка на оферту", type: "url" },
+      { key: "offerLink", label: "Ссылка на политику конфиденциальности", type: "url" },
       { key: "privacyLink", label: "Ссылка на политику", type: "url" },
     ],
     i18nFields: [
