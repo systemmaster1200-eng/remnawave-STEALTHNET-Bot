@@ -18,7 +18,7 @@ export function CustomFooter({ block, serviceName }: { block: LandingApiBlock; s
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
           {offerLink ? (
             <a href={offerLink} target="_blank" rel="noreferrer noopener" className="transition-colors hover:text-slate-950 dark:hover:text-white">
-              Оферта
+              Политика конфиденциальности
             </a>
           ) : null}
           {privacyLink ? (
