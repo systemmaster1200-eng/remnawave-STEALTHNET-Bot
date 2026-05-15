@@ -867,9 +867,11 @@ bot.command("start", async (ctx) => {
 
   // Определяем тип deeplink
   const isPromo = /^promo_/i.test(payload);
+  const isCode = /^code_/i.test(payload);
   const promoCode = isPromo ? payload.replace(/^promo_/i, "") : undefined;
+  const codeValue = isCode ? payload.replace(/^code_/i, "") : undefined;
   const parsed = parseStartPayload(payload);
-  const refCode = !isPromo ? (parsed.refCode ?? (payload.replace(/^ref_?/i, "").trim() || undefined)) : undefined;
+  const refCode = (!isPromo && !isCode) ? (parsed.refCode ?? (payload.replace(/^ref_?/i, "").trim() || undefined)) : undefined;
 
   try {
     const config = await api.getPublicConfig();
@@ -893,7 +895,7 @@ bot.command("start", async (ctx) => {
     const client = auth.client;
     if (client?.preferredLang) setUserLang(from.id, client.preferredLang);
 
-    // Если это промо-ссылка — активируем промокод
+    // Если это промо-ссылка — активируем промо-группу
     if (promoCode) {
       try {
         const result = await api.activatePromo(auth.token, promoCode);
@@ -904,6 +906,31 @@ bot.command("start", async (ctx) => {
         await ctx.reply(`❌ ${promoMsg}\n\nНажмите /start чтобы открыть меню.`);
         return;
       }
+    }
+
+    // Если это deep link с промокодом — активируем промокод
+    if (codeValue) {
+      const lang = getUserLang(from.id);
+      const menuKb = { reply_markup: { inline_keyboard: [[{ text: config?.botBackLabel ?? _t("back_to_menu", lang), callback_data: "menu:main" }]] } };
+      try {
+        const checkResult = await api.checkPromoCode(auth.token, codeValue);
+        if (checkResult.type === "FREE_DAYS") {
+          const activateResult = await api.activatePromoCode(auth.token, codeValue);
+          await ctx.reply(`✅ ${activateResult.message}`, menuKb);
+        } else if (checkResult.type === "DISCOUNT") {
+          const desc = checkResult.discountPercent
+            ? `скидка ${checkResult.discountPercent}%`
+            : checkResult.discountFixed
+              ? `скидка ${checkResult.discountFixed}`
+              : "скидка";
+          activeDiscountCode.set(from.id, { code: codeValue, discountPercent: checkResult.discountPercent, discountFixed: checkResult.discountFixed });
+          await ctx.reply(`✅ Промокод «${checkResult.name}» принят! ${desc}.\n\n${_t("promo.discount_applied", lang)}`, menuKb);
+        }
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : _t("error_generic", lang);
+        await ctx.reply(`❌ ${msg}`, menuKb);
+      }
+      return;
     }
 
     // Проверка подписки на канал
