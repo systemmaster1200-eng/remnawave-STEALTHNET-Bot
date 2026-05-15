@@ -1,0 +1,1224 @@
+// STEALTHNET 3.0 — PostgreSQL schema
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Admin {
+  id                 String         @id @default(cuid())
+  email              String         @unique
+  passwordHash       String         @map("password_hash")
+  mustChangePassword Boolean        @default(true) @map("must_change_password")
+  role               String         @default("ADMIN")
+  allowedSections    String?        @map("allowed_sections") @db.Text
+  totpSecret         String?        @map("totp_secret")
+  totpEnabled        Boolean        @default(false) @map("totp_enabled")
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime       @updatedAt @map("updated_at")
+  refreshTokens      RefreshToken[]
+
+  @@map("admins")
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  adminId   String   @map("admin_id")
+  token     String   @unique
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  admin Admin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+  @@index([token])
+  @@map("refresh_tokens")
+}
+
+model SystemSetting {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String @db.Text
+
+  @@map("system_settings")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Боты-клоны: «1:1 копия» основного бота, отличается только Telegram-токеном
+// и наценкой (markupPercent). Витрина (тарифы, бренд, тексты) — общая.
+// База клиентов изолирована: один TG-юзер в каждом клоне = разный Client.
+// Деньги от наценки копятся как долг перед владельцем клона (см. BotPayout).
+// ─────────────────────────────────────────────────────────────────────────────
+model Bot {
+  id              String   @id @default(cuid())
+  /// Telegram Bot API token. Уникальный — один токен = один клон.
+  token           String   @unique
+  /// Username бота без @ (заполняется при первом успешном getMe).
+  username        String?
+  /// Наценка в процентах (0..1000). Применяется к итоговой цене перед скидками.
+  /// Сохраняется snapshot'ом в Payment.botMarkupPercent на момент платежа.
+  markupPercent   Float    @default(0) @map("markup_percent")
+  /// Telegram-ID владельца клона (для отчёта «к выплате»). Может быть null —
+  /// тогда клон считается «платформенным», markup всё равно идёт в отчёт.
+  ownerTelegramId String?  @map("owner_telegram_id")
+  /// Имя/название владельца — отображается в админке.
+  ownerName       String?  @map("owner_name")
+  /// Бот активен — обработчики поднимаются на старте/hot-reload.
+  isActive        Boolean  @default(true) @map("is_active")
+  /// Главный бот инсталляции (создаётся миграцией из исходного BOT_TOKEN).
+  /// Используется как fallback botId для legacy-данных и для broadcast-default.
+  isPrimary       Boolean  @default(false) @map("is_primary")
+  /// Свободные заметки админа.
+  notes           String?  @db.Text
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  clients  Client[]
+  payments Payment[]
+  payouts  BotPayout[]
+
+  @@index([isActive])
+  @@map("bots")
+}
+
+// Ручная выплата владельцу клона (root-админ → партнёр).
+// Заработано клоном = SUM(payments.botMarkupAmount). К выплате = заработано − SUM(payouts).
+model BotPayout {
+  id        String   @id @default(cuid())
+  botId     String   @map("bot_id")
+  amount    Float
+  currency  String   @default("rub")
+  comment   String?  @db.Text
+  /// Фактическая дата выплаты (может отличаться от createdAt, если задним числом).
+  paidAt    DateTime @default(now()) @map("paid_at")
+  /// Email/id админа, оформившего выплату — для аудита.
+  createdBy String   @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@index([botId])
+  @@index([paidAt])
+  @@map("bot_payouts")
+}
+
+model AdminNotificationPreference {
+  id                  String   @id @default(cuid())
+  telegramId          String   @unique @map("telegram_id")
+  notifyBalanceTopup  Boolean  @default(true) @map("notify_balance_topup")
+  notifyTariffPayment Boolean  @default(true) @map("notify_tariff_payment")
+  notifyNewClient     Boolean  @default(true) @map("notify_new_client")
+  notifyNewTicket     Boolean  @default(true) @map("notify_new_ticket")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@map("admin_notification_preferences")
+}
+
+// Клиент панели (покупатель подписок): сайт, бот, mini app
+// Дополнительные подписки хранятся в отдельной таблице SecondarySubscription
+model Client {
+  id                         String    @id @default(cuid())
+  email                      String?   @unique
+  passwordHash               String?   @map("password_hash")
+  role                       String    @default("CLIENT")
+  remnawaveUuid              String?   @map("remnawave_uuid")
+  referralCode               String?   @unique @map("referral_code")
+  referrerId                 String?   @map("referrer_id")
+  balance                    Float     @default(0)
+  preferredLang              String    @default("ru") @map("preferred_lang")
+  preferredCurrency          String    @default("usd") @map("preferred_currency")
+  /// FK на Bot (клон, через который пользователь зарегистрировался).
+  /// Все legacy-клиенты при миграции получают botId = primary bot.
+  /// Один TG-юзер может быть в нескольких клонах — это РАЗНЫЕ Client (разный balance, история, рефералка).
+  botId                      String    @map("bot_id")
+  telegramId                 String?   @map("telegram_id")
+  telegramUsername           String?   @map("telegram_username")
+  isBlocked                  Boolean   @default(false) @map("is_blocked")
+  blockReason                String?   @map("block_reason")
+  /// Telegram-бот для этого клиента недоступен (заблокирован пользователем, аккаунт удалён и т.п.).
+  /// Выставляется автоматически при ошибках вида "bot was blocked" / "user is deactivated"
+  /// в рассылках. Клиент исключается из массовых рассылок до тех пор, пока флаг не снят
+  /// (например, при следующем /start от пользователя или вручную в админке).
+  telegramUnreachable        Boolean   @default(false) @map("telegram_unreachable")
+  referralPercent            Float?    @map("referral_percent")
+  /// Персональная скидка, % (0–100). Применяется админом выборочно; работает на все продуктовые
+  /// оплаты (тариф, прокси, singbox, кастомный билд, доп-опции) и стэкается с промокодом.
+  /// На пополнение баланса и на отправку поощрений рефералам не влияет.
+  personalDiscountPercent    Float?    @map("personal_discount_percent")
+  trialUsed                  Boolean   @default(false) @map("trial_used")
+  yoomoneyAccessToken        String?   @map("yoomoney_access_token")
+  utmSource                  String?   @map("utm_source")
+  utmMedium                  String?   @map("utm_medium")
+  utmCampaign                String?   @map("utm_campaign")
+  utmContent                 String?   @map("utm_content")
+  utmTerm                    String?   @map("utm_term")
+  totpSecret                 String?   @map("totp_secret")
+  totpEnabled                Boolean   @default(false) @map("totp_enabled")
+  onboardingCompleted        Boolean   @default(true) @map("onboarding_completed")
+  googleId                   String?   @unique @map("google_id")
+  appleId                    String?   @unique @map("apple_id")
+  autoRenewEnabled           Boolean   @default(false) @map("auto_renew_enabled")
+  autoRenewTariffId          String?   @map("auto_renew_tariff_id")
+  autoRenewPriceOptionId     String?   @map("auto_renew_price_option_id") // Конкретная опция длительности для авто-продления
+  autoRenewExtraDevices      Int       @default(0) @map("auto_renew_extra_devices") // Сколько доп. устройств продлевать
+  autoRenewRetryCount        Int       @default(0) @map("auto_renew_retry_count")
+  autoRenewNotifiedAt        DateTime? @map("auto_renew_notified_at")
+  autoRenewPromoCode         String?   @map("auto_renew_promo_code")
+  currentTariffId            String?   @map("current_tariff_id")
+  currentPricePerDay         Float?    @map("current_price_per_day")
+  yookassaPaymentMethodId    String?   @map("yookassa_payment_method_id")
+  yookassaPaymentMethodTitle String?   @map("yookassa_payment_method_title")
+  createdAt                  DateTime  @default(now()) @map("created_at")
+  updatedAt                  DateTime  @updatedAt @map("updated_at")
+
+  referrer              Client?                 @relation("ClientReferrer", fields: [referrerId], references: [id])
+  referrals             Client[]                @relation("ClientReferrer")
+  payments              Payment[]
+  autoRenewTariff       Tariff?                 @relation("ClientAutoRenewTariff", fields: [autoRenewTariffId], references: [id], onDelete: SetNull)
+  currentTariff         Tariff?                 @relation("ClientCurrentTariff", fields: [currentTariffId], references: [id], onDelete: SetNull)
+  referralCredits       ReferralCredit[]
+  promoActivations      PromoActivation[]
+  promoCodeUsages       PromoCodeUsage[]
+  autoBroadcastLogs     AutoBroadcastLog[]
+  proxySlots            ProxySlot[]
+  singboxSlots          SingboxSlot[]
+  tickets               Ticket[]
+  contestWinners        ContestWinner[]
+  giftCodesCreated      GiftCode[]              @relation("GiftCodeCreator")
+  giftCodesRedeemed     GiftCode[]              @relation("GiftCodeRedeemer")
+  ownedSubscriptions    SecondarySubscription[] @relation("OwnerSubscriptions")
+  receivedSubscriptions SecondarySubscription[] @relation("ReceivedSubscriptions")
+  giftHistory           GiftHistory[]
+  bot                   Bot                     @relation(fields: [botId], references: [id])
+
+  // Один TG-юзер = один Client в каждом клоне (но разные клоны — разные Client).
+  // Email/google/apple/referralCode остаются глобально-уникальными (см. поля выше),
+  // потому что веб-регистрация и cross-bot-логин по email должен находить клиента однозначно.
+  @@unique([botId, telegramId], map: "clients_bot_id_telegram_id_unique")
+  @@index([telegramId])
+  @@index([email])
+  @@index([utmSource])
+  @@index([botId])
+  @@map("clients")
+}
+
+// Тикет поддержки (включается/выключается в настройках)
+model Ticket {
+  id        String   @id @default(cuid())
+  clientId  String   @map("client_id")
+  subject   String   @db.VarChar(500)
+  status    String   @default("open") @db.VarChar(20) // open | closed
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  client   Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  messages TicketMessage[]
+
+  @@index([clientId])
+  @@index([status])
+  @@map("tickets")
+}
+
+model TicketMessage {
+  id          String   @id @default(cuid())
+  ticketId    String   @map("ticket_id")
+  authorType  String   @map("author_type") @db.VarChar(20) // client | support
+  content     String   @db.Text
+  /// JSON-массив прикреплённых файлов (фото). Формат: [{ "url": string, "mime": string, "size": number, "name"?: string }].
+  /// NULL/пустая строка = нет вложений. Храним строкой в TEXT, чтобы не ломать читателей, которые ждут
+  /// json-null (см. Payment.metadata).
+  attachments String?  @db.Text
+  isRead      Boolean  @default(false) @map("is_read")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@index([isRead])
+  @@map("ticket_messages")
+}
+
+// Одноразовый код для привязки Telegram к аккаунту (сайт → бот)
+model PendingTelegramLink {
+  id        String   @id @default(cuid())
+  clientId  String   @map("client_id")
+  code      String   @unique // 6 символов
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([code])
+  @@index([expiresAt])
+  @@map("pending_telegram_links")
+}
+
+// Ожидание подтверждения привязки email к аккаунту (письмо со ссылкой)
+model PendingEmailLink {
+  id                String   @id @default(cuid())
+  clientId          String   @map("client_id")
+  email             String
+  verificationToken String   @unique @map("verification_token")
+  expiresAt         DateTime @map("expires_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([verificationToken])
+  @@index([expiresAt])
+  @@map("pending_email_links")
+}
+
+// Ожидание подтверждения email при регистрации (ссылка из письма)
+model PendingEmailRegistration {
+  id                String   @id @default(cuid())
+  email             String
+  passwordHash      String   @map("password_hash")
+  preferredLang     String   @default("ru") @map("preferred_lang")
+  preferredCurrency String   @default("usd") @map("preferred_currency")
+  referralCode      String?  @map("referral_code")
+  utmSource         String?  @map("utm_source")
+  utmMedium         String?  @map("utm_medium")
+  utmCampaign       String?  @map("utm_campaign")
+  utmContent        String?  @map("utm_content")
+  utmTerm           String?  @map("utm_term")
+  verificationToken String   @unique @map("verification_token")
+  expiresAt         DateTime @map("expires_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([verificationToken])
+  @@index([email])
+  @@map("pending_email_registrations")
+}
+
+model Payment {
+  id                    String    @id @default(cuid())
+  clientId              String    @map("client_id")
+  /// FK на Bot — какому клону принадлежит платёж. Snapshot на момент создания
+  /// (если позже клиента «переселят» в другой бот, этот платёж останется с прежним botId).
+  /// Заполняется при миграции: для legacy-Payment берётся botId из связанного Client.
+  botId                 String?   @map("bot_id")
+  orderId               String    @unique @map("order_id")
+  /// Итоговая сумма платежа = baseAmount × (1 + botMarkupPercent/100) − discount.
+  /// Это то, что списывается с баланса/выставляется в платёжном провайдере.
+  amount                Float
+  /// Базовая цена БЕЗ наценки клона. Используется реферальным расчётом
+  /// (рефералка считается от базы, наценка не размывается выплатами рефералам).
+  /// Для legacy-Payment = amount (наценки не было).
+  baseAmount            Float?    @map("base_amount")
+  /// Snapshot наценки клона на момент создания платежа (%). Не меняется,
+  /// даже если позже Bot.markupPercent поменяют.
+  botMarkupPercent      Float?    @map("bot_markup_percent")
+  /// Сумма наценки клона = amount − baseAmount (в валюте платежа).
+  /// Для отчёта «заработано клоном за период».
+  botMarkupAmount       Float?    @map("bot_markup_amount")
+  currency              String
+  status                String    @default("PENDING") // PENDING, PAID, FAILED, REFUNDED
+  provider              String? // yookassa, cryptobot, etc.
+  externalId            String?   @map("external_id")
+  tariffId              String?   @map("tariff_id")
+  tariffPriceOptionId   String?   @map("tariff_price_option_id")
+  deviceCount           Int?      @map("device_count") // сколько устройств куплено в этом платеже (1..tariff.maxDevices)
+  proxyTariffId         String?   @map("proxy_tariff_id")
+  singboxTariffId       String?   @map("singbox_tariff_id")
+  remnawaveUserId       String?   @map("remnawave_user_id")
+  metadata              String?   @db.Text // JSON
+  createdAt             DateTime  @default(now()) @map("created_at")
+  paidAt                DateTime? @map("paid_at")
+  referralDistributedAt DateTime? @map("referral_distributed_at")
+
+  client            Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  bot               Bot?               @relation(fields: [botId], references: [id], onDelete: SetNull)
+  tariff            Tariff?            @relation(fields: [tariffId], references: [id], onDelete: SetNull)
+  tariffPriceOption TariffPriceOption? @relation(fields: [tariffPriceOptionId], references: [id], onDelete: SetNull)
+  proxyTariff       ProxyTariff?       @relation(fields: [proxyTariffId], references: [id], onDelete: SetNull)
+  singboxTariff     SingboxTariff?     @relation(fields: [singboxTariffId], references: [id], onDelete: SetNull)
+  referralCredits   ReferralCredit[]
+
+  @@index([clientId])
+  @@index([botId])
+  @@index([status])
+  @@index([tariffId])
+  @@index([tariffPriceOptionId])
+  @@index([proxyTariffId])
+  @@index([singboxTariffId])
+  @@map("payments")
+}
+
+// Начисление реферального бонуса (для отчёта «заработок с рефералов»)
+model ReferralCredit {
+  id         String   @id @default(cuid())
+  referrerId String   @map("referrer_id")
+  paymentId  String   @map("payment_id")
+  amount     Float
+  level      Int // 1, 2 или 3
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  referrer Client  @relation(fields: [referrerId], references: [id], onDelete: Cascade)
+  payment  Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([referrerId])
+  @@index([paymentId])
+  @@map("referral_credits")
+}
+
+// ——— Промо-группы и активации ———
+model PromoGroup {
+  id                String   @id @default(cuid())
+  name              String // Название промо-группы
+  code              String   @unique // Уникальный код (используется в ссылке /start promo_<code>)
+  squadUuid         String   @map("squad_uuid") // UUID сквада в Remnawave
+  trafficLimitBytes BigInt   @default(0) @map("traffic_limit_bytes")
+  deviceLimit       Int?     @map("device_limit")
+  durationDays      Int      @map("duration_days") // На сколько дней даётся подписка
+  maxActivations    Int      @map("max_activations") // Макс. кол-во активаций (0 = без лимита)
+  isActive          Boolean  @default(true) @map("is_active")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  activations PromoActivation[]
+
+  @@map("promo_groups")
+}
+
+model PromoActivation {
+  id           String   @id @default(cuid())
+  promoGroupId String   @map("promo_group_id")
+  clientId     String   @map("client_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  promoGroup PromoGroup @relation(fields: [promoGroupId], references: [id], onDelete: Cascade)
+  client     Client     @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([promoGroupId, clientId])
+  @@index([promoGroupId])
+  @@index([clientId])
+  @@map("promo_activations")
+}
+
+// ——— Промокоды (скидки и бесплатные дни) ———
+model PromoCode {
+  id                String    @id @default(cuid())
+  code              String    @unique // Уникальный промокод (вводится вручную)
+  name              String // Описание / название
+  type              String // DISCOUNT | FREE_DAYS
+  // Для DISCOUNT:
+  discountPercent   Float?    @map("discount_percent") // Скидка в %
+  discountFixed     Float?    @map("discount_fixed") // Или фикс. скидка в валюте
+  // Для FREE_DAYS:
+  squadUuid         String?   @map("squad_uuid")
+  trafficLimitBytes BigInt?   @map("traffic_limit_bytes")
+  deviceLimit       Int?      @map("device_limit")
+  durationDays      Int?      @map("duration_days")
+  // Общие:
+  maxUses           Int       @default(0) @map("max_uses") // 0 = без лимита
+  maxUsesPerClient  Int       @default(1) @map("max_uses_per_client")
+  isActive          Boolean   @default(true) @map("is_active")
+  expiresAt         DateTime? @map("expires_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  usages PromoCodeUsage[]
+
+  @@map("promo_codes")
+}
+
+model PromoCodeUsage {
+  id          String   @id @default(cuid())
+  promoCodeId String   @map("promo_code_id")
+  clientId    String   @map("client_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  promoCode PromoCode @relation(fields: [promoCodeId], references: [id], onDelete: Cascade)
+  client    Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([promoCodeId])
+  @@index([clientId])
+  @@map("promo_code_usages")
+}
+
+// Категория тарифов (например «Базовый», «Премиум»). emojiKey — код из админки (ordinary, premium) для подстановки эмодзи.
+model TariffCategory {
+  id        String   @id @default(cuid())
+  name      String
+  emojiKey  String?  @map("emoji_key") // ordinary | premium — подставляется эмодзи из настройки category_emojis
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tariffs Tariff[]
+
+  @@map("tariff_categories")
+}
+
+// Тариф внутри категории: название, описание (опционально), срок, сквады, лимиты, цена
+// trafficResetMode: no_reset (по умолчанию), on_purchase (сброс при покупке), monthly (ежемесячный сброс через Remna MONTH-стратегию)
+model Tariff {
+  id                  String   @id @default(cuid())
+  categoryId          String   @map("category_id")
+  name                String
+  description         String?  @db.Text
+  durationDays        Int      @map("duration_days")
+  internalSquadUuids  String[] @map("internal_squad_uuids")
+  trafficLimitBytes   BigInt?  @map("traffic_limit_bytes")
+  trafficResetMode    String   @default("no_reset") @map("traffic_reset_mode")
+  deviceLimit         Int?     @map("device_limit") // legacy: «фиксированный лимит». Не используется в новой модели.
+  // Новая модель устройств:
+  //   priceOption.price = базовая цена тарифа, в которую УЖЕ включено `includedDevices` устройств.
+  //   Клиент может докупить до `maxExtraDevices` доп. устройств по цене `pricePerExtraDevice` за штуку.
+  //   К количеству доп. устройств применяется лесенка скидок `deviceDiscountTiers`.
+  //   HWID лимит на Remna = includedDevices + extraDevices (выбранных клиентом).
+  includedDevices     Int      @default(1) @map("included_devices")
+  pricePerExtraDevice Float    @default(0) @map("price_per_extra_device")
+  maxExtraDevices     Int      @default(0) @map("max_extra_devices")
+  deviceDiscountTiers Json?    @map("device_discount_tiers") // [{ minExtraDevices: number, discountPercent: number }]
+  price               Float    @default(0)
+  currency            String   @default("usd") @map("currency")
+  sortOrder           Int      @default(0) @map("sort_order")
+  /// UUID оффера в Lava.top для этого тарифа. Если null — используется system_settings.lavatop_default_offer_id.
+  /// При оплате через Lava.top инвойс выписывается с periodicity=MONTHLY (subscription с авто-списанием).
+  lavatopOfferId      String?  @map("lavatop_offer_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  category               TariffCategory          @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  payments               Payment[]
+  autoRenewClients       Client[]                @relation("ClientAutoRenewTariff")
+  currentTariffClients   Client[]                @relation("ClientCurrentTariff")
+  secondarySubscriptions SecondarySubscription[]
+  priceOptions           TariffPriceOption[]
+
+  @@index([categoryId])
+  @@map("tariffs")
+}
+
+// Опции цен в тарифе: например (30 дней — $50), (90 дней — $130), (180 дней — $240).
+// При покупке клиент выбирает конкретную опцию. У тарифа должна быть минимум одна опция.
+// Поля Tariff.price и Tariff.durationDays оставлены для обратной совместимости
+// (синхронизируются с минимальной опцией) — но активация и платежи идут через priceOption.
+model TariffPriceOption {
+  id           String   @id @default(cuid())
+  tariffId     String   @map("tariff_id")
+  durationDays Int      @map("duration_days")
+  price        Float
+  sortOrder    Int      @default(0) @map("sort_order")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  tariff   Tariff    @relation(fields: [tariffId], references: [id], onDelete: Cascade)
+  payments Payment[]
+
+  @@index([tariffId])
+  @@index([sortOrder])
+  @@map("tariff_price_options")
+}
+
+// ——— Авто-рассылка (настраиваемые правила для удержания клиентов) ———
+model AutoBroadcastRule {
+  id          String   @id @default(cuid())
+  name        String   @map("name") // Название правила для админки
+  triggerType String   @map("trigger_type") // after_registration | inactivity | no_payment | trial_not_connected | trial_used_never_paid | no_traffic | subscription_expired
+  delayDays   Int      @map("delay_days") // Дней после триггера (для after_registration / no_payment) или без платежа (inactivity)
+  channel     String   @map("channel") // telegram | email | both
+  subject     String?  @map("subject") // Тема письма (для email)
+  message     String   @db.Text // Текст (до 4096)
+  buttonText  String?  @map("button_text") // Текст кнопки под сообщением
+  buttonUrl   String?  @map("button_url") // URL кнопки
+  enabled     Boolean  @default(true) @map("enabled")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  logs AutoBroadcastLog[]
+
+  @@map("auto_broadcast_rules")
+}
+
+model AutoBroadcastLog {
+  id       String   @id @default(cuid())
+  ruleId   String   @map("rule_id")
+  clientId String   @map("client_id")
+  sentAt   DateTime @default(now()) @map("sent_at")
+
+  rule   AutoBroadcastRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  client Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([ruleId, clientId])
+  @@index([ruleId])
+  @@index([clientId])
+  @@index([sentAt])
+  @@map("auto_broadcast_logs")
+}
+
+// История ручных рассылок: сохраняем дату, контент и результаты для аудита.
+model BroadcastHistory {
+  id             String    @id @default(cuid())
+  startedAt      DateTime  @default(now()) @map("started_at")
+  finishedAt     DateTime? @map("finished_at")
+  status         String    @default("running") // running | completed | error
+  channel        String // telegram | email | both
+  subject        String    @default("")
+  message        String    @db.Text
+  buttonText     String?   @map("button_text")
+  buttonUrl      String?   @map("button_url")
+  attachmentName String?   @map("attachment_name")
+  totalTelegram  Int       @default(0) @map("total_telegram")
+  sentTelegram   Int       @default(0) @map("sent_telegram")
+  failedTelegram Int       @default(0) @map("failed_telegram")
+  totalEmail     Int       @default(0) @map("total_email")
+  sentEmail      Int       @default(0) @map("sent_email")
+  failedEmail    Int       @default(0) @map("failed_email")
+  errors         Json?
+  error          String?   @db.Text
+  startedByAdmin String?   @map("started_by_admin") // admin id, без FK чтобы запись пережила удаление админа
+
+  @@index([startedAt(sort: Desc)])
+  @@index([status])
+  @@map("broadcast_history")
+}
+
+// ——— Прокси-ноды и продажа прокси ———
+model ProxyNode {
+  id                 String    @id @default(cuid())
+  name               String    @default("") // Название (админ или нода при регистрации)
+  token              String    @unique // Токен для регистрации и heartbeat
+  status             String    @default("OFFLINE") // ONLINE | OFFLINE | DISABLED
+  lastSeenAt         DateTime? @map("last_seen_at")
+  publicHost         String?   @map("public_host") // IP или домен (из регистрации/heartbeat)
+  socksPort          Int       @default(1080) @map("socks_port")
+  httpPort           Int       @default(8080) @map("http_port")
+  capacity           Int? // Макс. слотов (опционально)
+  currentConnections Int       @default(0) @map("current_connections")
+  trafficInBytes     BigInt    @default(0) @map("traffic_in_bytes")
+  trafficOutBytes    BigInt    @default(0) @map("traffic_out_bytes")
+  metadata           String?   @db.Text // JSON от агента (CPU, RAM, версия)
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  slots             ProxySlot[]
+  tariffAssignments ProxyTariffNode[]
+
+  @@map("proxy_nodes")
+}
+
+model ProxyCategory {
+  id        String   @id @default(cuid())
+  name      String
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tariffs ProxyTariff[]
+
+  @@map("proxy_categories")
+}
+
+model ProxyTariff {
+  id                String   @id @default(cuid())
+  categoryId        String   @map("category_id")
+  name              String // «1 прокси 30 дней»
+  proxyCount        Int      @map("proxy_count") // Кол-во прокси в пакете
+  durationDays      Int      @map("duration_days")
+  trafficLimitBytes BigInt?  @map("traffic_limit_bytes") // На один слот (null = без лимита)
+  connectionLimit   Int?     @map("connection_limit") // На один слот
+  price             Float    @default(0)
+  currency          String   @default("usd")
+  sortOrder         Int      @default(0) @map("sort_order")
+  enabled           Boolean  @default(true)
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  category      ProxyCategory     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  payments      Payment[]
+  slots         ProxySlot[]
+  assignedNodes ProxyTariffNode[]
+
+  @@index([categoryId])
+  @@map("proxy_tariffs")
+}
+
+model ProxyTariffNode {
+  id       String @id @default(cuid())
+  tariffId String @map("tariff_id")
+  nodeId   String @map("node_id")
+
+  tariff ProxyTariff @relation(fields: [tariffId], references: [id], onDelete: Cascade)
+  node   ProxyNode   @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@unique([tariffId, nodeId])
+  @@index([tariffId])
+  @@index([nodeId])
+  @@map("proxy_tariff_nodes")
+}
+
+model ProxySlot {
+  id                 String   @id @default(cuid())
+  nodeId             String   @map("node_id")
+  clientId           String   @map("client_id")
+  proxyTariffId      String?  @map("proxy_tariff_id")
+  login              String // Уникален в рамках ноды
+  password           String // В открытом виде для выдачи и конфига на ноде
+  expiresAt          DateTime @map("expires_at")
+  trafficLimitBytes  BigInt?  @map("traffic_limit_bytes")
+  connectionLimit    Int?     @map("connection_limit")
+  trafficUsedBytes   BigInt   @default(0) @map("traffic_used_bytes")
+  currentConnections Int      @default(0) @map("current_connections")
+  status             String   @default("ACTIVE") // ACTIVE | EXPIRED | REVOKED
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  node        ProxyNode    @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  client      Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  proxyTariff ProxyTariff? @relation(fields: [proxyTariffId], references: [id], onDelete: SetNull)
+
+  @@unique([nodeId, login])
+  @@index([nodeId])
+  @@index([clientId])
+  @@index([proxyTariffId])
+  @@index([status])
+  @@map("proxy_slots")
+}
+
+// ——— Sing-box ноды и продажа доступов (VLESS / SS / Trojan / Hysteria2) ———
+model SingboxNode {
+  id                 String    @id @default(cuid())
+  name               String    @default("")
+  token              String    @unique
+  status             String    @default("OFFLINE") // ONLINE | OFFLINE | DISABLED
+  lastSeenAt         DateTime? @map("last_seen_at")
+  publicHost         String?   @map("public_host")
+  port               Int       @default(443) @map("port")
+  protocol           String    @default("VLESS") // VLESS | SHADOWSOCKS | TROJAN | HYSTERIA2
+  tlsEnabled         Boolean   @default(true) @map("tls_enabled")
+  capacity           Int?
+  currentConnections Int       @default(0) @map("current_connections")
+  trafficInBytes     BigInt    @default(0) @map("traffic_in_bytes")
+  trafficOutBytes    BigInt    @default(0) @map("traffic_out_bytes")
+  metadata           String?   @db.Text
+  customConfigJson   String?   @map("custom_config_json") @db.Text
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  slots SingboxSlot[]
+
+  @@map("singbox_nodes")
+}
+
+model SingboxCategory {
+  id        String   @id @default(cuid())
+  name      String
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tariffs SingboxTariff[]
+
+  @@map("singbox_categories")
+}
+
+model SingboxTariff {
+  id                String   @id @default(cuid())
+  categoryId        String   @map("category_id")
+  name              String
+  slotCount         Int      @map("slot_count")
+  durationDays      Int      @map("duration_days")
+  trafficLimitBytes BigInt?  @map("traffic_limit_bytes")
+  price             Float    @default(0)
+  currency          String   @default("usd")
+  sortOrder         Int      @default(0) @map("sort_order")
+  enabled           Boolean  @default(true)
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  category SingboxCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  payments Payment[]
+  slots    SingboxSlot[]
+
+  @@index([categoryId])
+  @@map("singbox_tariffs")
+}
+
+model SingboxSlot {
+  id                 String   @id @default(cuid())
+  nodeId             String   @map("node_id")
+  clientId           String   @map("client_id")
+  singboxTariffId    String?  @map("singbox_tariff_id")
+  userIdentifier     String   @map("user_identifier") // UUID (VLESS/Trojan) или логин (SS/Hy2)
+  secret             String?  @db.Text // пароль для SS/Hy2
+  expiresAt          DateTime @map("expires_at")
+  trafficLimitBytes  BigInt?  @map("traffic_limit_bytes")
+  trafficUsedBytes   BigInt   @default(0) @map("traffic_used_bytes")
+  currentConnections Int      @default(0) @map("current_connections")
+  status             String   @default("ACTIVE") // ACTIVE | EXPIRED | REVOKED
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  node          SingboxNode    @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  client        Client         @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  singboxTariff SingboxTariff? @relation(fields: [singboxTariffId], references: [id], onDelete: SetNull)
+
+  @@unique([nodeId, userIdentifier])
+  @@index([nodeId])
+  @@index([clientId])
+  @@index([singboxTariffId])
+  @@index([status])
+  @@map("singbox_slots")
+}
+
+// ——— Конкурсы / розыгрыши ———
+model Contest {
+  id                          String    @id @default(cuid())
+  name                        String    @map("name")
+  startAt                     DateTime  @map("start_at")
+  endAt                       DateTime  @map("end_at")
+  prize1Type                  String    @map("prize1_type") // custom | balance | vpn_days
+  prize1Value                 String    @map("prize1_value") @db.Text // текст, сумма или кол-во дней
+  prize2Type                  String    @map("prize2_type")
+  prize2Value                 String    @map("prize2_value") @db.Text
+  prize3Type                  String    @map("prize3_type")
+  prize3Value                 String    @map("prize3_value") @db.Text
+  conditionsJson              String?   @map("conditions_json") @db.Text // { "minTariffDays": 30, "minPaymentsCount": 1 }
+  drawType                    String    @map("draw_type") // random | by_days_bought | by_payments_count | by_referrals_count
+  status                      String    @default("draft") // draft | active | ended | drawn
+  dailyMessage                String?   @map("daily_message") @db.Text
+  startNotificationSentAt     DateTime? @map("start_notification_sent_at")
+  lastDailyReminderAt         DateTime? @map("last_daily_reminder_at")
+  buttonText                  String?   @map("button_text") @db.Text
+  buttonUrl                   String?   @map("button_url") @db.Text
+  // Конфиг напоминаний (issue #35). Если null/default — поведение как раньше (1 раз в день).
+  reminderEnabled             Boolean   @default(true) @map("reminder_enabled")
+  reminderIntervalHours       Int       @default(24) @map("reminder_interval_hours") // 0 = выкл периодических, >0 = каждые N часов
+  reminderDeadlineHoursBefore String    @default("") @map("reminder_deadline_hours_before") @db.Text // CSV "24,1" — отправить за N часов до endAt
+  reminderDeadlineSentJson    String?   @map("reminder_deadline_sent_json") @db.Text // {"24":"2026-01-01T...","1":"..."} — какие deadline-напоминания уже отправлены
+  /// Валюта для призов типа `balance` (RUB | USD | EUR …). Если null — fallback на default_currency
+  /// из system_settings или RUB. Раньше валюта хранилась только в client.preferredCurrency и приз
+  /// 100 «попадал» в текущую валюту победителя — расхождение между админом и победителем.
+  prizeBalanceCurrency        String?   @map("prize_balance_currency") @db.VarChar(8)
+  /// Снапшот участников на момент розыгрыша — сохраняется в runDraw, чтобы зафиксировать
+  /// состояние и позволить undo. Формат: [{ clientId, totalDays, count, refs }, ...].
+  participantsSnapshotJson    String?   @map("participants_snapshot_json") @db.Text
+  createdAt                   DateTime  @default(now()) @map("created_at")
+  updatedAt                   DateTime  @updatedAt @map("updated_at")
+
+  winners ContestWinner[]
+  events  ContestEvent[]
+
+  @@map("contests")
+}
+
+/// Аудит-лог конкурса: кто и когда что сделал. Заполняется в admin-рутах (launch, draw,
+/// undo-draw, manual winner add/remove, prize apply). Не критичен для логики, но важен
+/// для расследования инцидентов (типа "почему этот клиент в победителях?").
+model ContestEvent {
+  id        String   @id @default(cuid())
+  contestId String   @map("contest_id")
+  /// Тип события: launched | drew | undid_draw | winner_added | winner_removed | prize_applied | …
+  kind      String   @db.VarChar(40)
+  /// Email/id админа, выполнившего действие.
+  actorId   String?  @map("actor_id") @db.VarChar(120)
+  /// Дополнительные данные события (kind-specific).
+  payload   Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  contest Contest @relation(fields: [contestId], references: [id], onDelete: Cascade)
+
+  @@index([contestId, createdAt(sort: Desc)])
+  @@map("contest_events")
+}
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  name        String
+  description String?
+  keyHash     String    @unique @map("key_hash")
+  prefix      String    @map("prefix")
+  isActive    Boolean   @default(true) @map("is_active")
+  lastUsedAt  DateTime? @map("last_used_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([keyHash], map: "api_keys_key_hash_idx")
+  @@index([prefix], map: "api_keys_prefix_idx")
+  @@map("api_keys")
+}
+
+model ContestWinner {
+  id         String    @id @default(cuid())
+  contestId  String    @map("contest_id")
+  clientId   String    @map("client_id")
+  place      Int // 1, 2, 3
+  prizeType  String    @map("prize_type")
+  prizeValue String    @map("prize_value") @db.Text
+  appliedAt  DateTime? @map("applied_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  contest Contest @relation(fields: [contestId], references: [id], onDelete: Cascade)
+  client  Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([contestId, place])
+  @@index([contestId])
+  @@map("contest_winners")
+}
+
+// Дополнительная подписка: отдельная VPN-подписка, привязанная к root-клиенту
+// Используется для подарков и дополнительных аккаунтов (другой пул серверов)
+model SecondarySubscription {
+  id                String   @id @default(cuid())
+  ownerId           String   @map("owner_id")
+  remnawaveUuid     String?  @map("remnawave_uuid")
+  subscriptionIndex Int      @map("subscription_index") // 1, 2, 3...
+  tariffId          String?  @map("tariff_id")
+  giftStatus        String?  @map("gift_status") // null = owned | GIFT_RESERVED | GIFT_CODE_ACTIVE | GIFTED
+  giftedToClientId  String?  @map("gifted_to_client_id") // если подарено — кому
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  owner          Client     @relation("OwnerSubscriptions", fields: [ownerId], references: [id], onDelete: Cascade)
+  giftedToClient Client?    @relation("ReceivedSubscriptions", fields: [giftedToClientId], references: [id], onDelete: SetNull)
+  tariff         Tariff?    @relation(fields: [tariffId], references: [id], onDelete: SetNull)
+  giftCodes      GiftCode[] @relation("GiftCodeSubscription")
+
+  @@unique([ownerId, subscriptionIndex])
+  @@index([ownerId])
+  @@index([remnawaveUuid])
+  @@index([giftStatus])
+  @@map("secondary_subscriptions")
+}
+
+// Лог событий подарочной системы (аудит)
+model GiftHistory {
+  id                      String   @id @default(cuid())
+  clientId                String   @map("client_id")
+  secondarySubscriptionId String?  @map("secondary_subscription_id")
+  eventType               String   @map("event_type") // PURCHASED | ACTIVATED_SELF | CODE_CREATED | GIFT_SENT | GIFT_RECEIVED | CODE_CANCELLED | CODE_EXPIRED | DELETED
+  metadata                Json?    @map("metadata")
+  createdAt               DateTime @default(now()) @map("created_at")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId])
+  @@index([secondarySubscriptionId])
+  @@index([createdAt])
+  @@map("gift_history")
+}
+
+// Код подарка подписки: создаётся при нажатии «Подарить», погашается получателем
+model GiftCode {
+  id                      String    @id @default(cuid())
+  code                    String    @unique // 12-символьный код XXXX-XXXX-XXXX
+  creatorId               String    @map("creator_id") // root-клиент, создавший подарок
+  secondarySubscriptionId String    @map("secondary_subscription_id") // FK → SecondarySubscription
+  redeemedById            String?   @map("redeemed_by_id") // root-клиент, активировавший подарок
+  status                  String    @default("ACTIVE") // ACTIVE | REDEEMED | EXPIRED | CANCELLED
+  giftMessage             String?   @map("gift_message") // персональное сообщение (макс 200 символов)
+  expiresAt               DateTime  @map("expires_at")
+  redeemedAt              DateTime? @map("redeemed_at")
+  expiryNotifiedAt        DateTime? @map("expiry_notified_at") // когда отправлено уведомление об истечении
+  createdAt               DateTime  @default(now()) @map("created_at")
+
+  creator               Client                @relation("GiftCodeCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  redeemedBy            Client?               @relation("GiftCodeRedeemer", fields: [redeemedById], references: [id], onDelete: SetNull)
+  secondarySubscription SecondarySubscription @relation("GiftCodeSubscription", fields: [secondarySubscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([code])
+  @@index([creatorId])
+  @@index([secondarySubscriptionId])
+  @@index([status])
+  @@map("gift_codes")
+}
+
+model TelegramAuthToken {
+  id                  String   @id @default(cuid())
+  token               String   @unique
+  confirmedTelegramId String?  @map("confirmed_telegram_id")
+  confirmedUsername   String?  @map("confirmed_username")
+  /// Какой клон-бот подтвердил токен (то есть в каком клоне юзер нажал /start auth_TOKEN).
+  /// Записывается на шаге POST /telegram-login-confirm. Затем GET /telegram-login-check
+  /// использует этот botId при создании/поиске Client. Null = legacy-token до миграции
+  /// или ещё не подтверждён.
+  confirmedBotId      String?  @map("confirmed_bot_id")
+  expiresAt           DateTime @map("expires_at")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  @@index([token])
+  @@index([expiresAt])
+  @@map("telegram_auth_tokens")
+}
+
+model TourStep {
+  id          String   @id @default(cuid())
+  target      String // CSS selector: '[data-tour="subscription"]' or 'body'
+  targetLabel String   @map("target_label") // Human-readable: "Подписка", "Баланс"
+  title       String // Tooltip title: "Ваша подписка"
+  content     String   @db.Text // Tooltip body text
+  videoUrl    String?  @map("video_url") @db.VarChar(1000) // YouTube URL or /api/uploads/videos/xxx.mp4
+  placement   String   @default("bottom") // top | bottom | left | right | center
+  route       String?  @db.VarChar(255) // Cabinet route: "/cabinet/dashboard", "/cabinet/tariffs", null = current page
+  mascotId    String?  @map("mascot_id") // FK to TourMascot or null
+  mood        String   @default("point") // wave | point | happy | think
+  sortOrder   Int      @default(0) @map("sort_order")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  mascot TourMascot? @relation(fields: [mascotId], references: [id], onDelete: SetNull)
+
+  @@map("tour_steps")
+}
+
+model TourMascot {
+  id        String   @id @default(cuid())
+  name      String   @db.VarChar(100) // "AEGIS", "Техно-тян", "Custom 1"
+  imageUrl  String   @map("image_url") @db.VarChar(500) // /api/uploads/mascots/xxx.png — дефолтное изображение
+  isBuiltIn Boolean  @default(false) @map("is_built_in") // true = нельзя удалить
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tourSteps TourStep[]
+  emotions  MascotEmotion[]
+
+  @@map("tour_mascots")
+}
+
+model MascotEmotion {
+  id       String @id @default(cuid())
+  mascotId String @map("mascot_id")
+  mood     String @db.VarChar(50) // wave | point | happy | think
+  imageUrl String @map("image_url") @db.VarChar(500) // /api/uploads/mascots/{hash}.png
+
+  mascot TourMascot @relation(fields: [mascotId], references: [id], onDelete: Cascade)
+
+  @@unique([mascotId, mood]) // Одна эмоция на перса = один PNG
+  @@map("mascot_emotions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Маркетплейс между админами разных инсталляций STEALTHNET-Bot.
+// На сервере с ролью HUB живут все три таблицы и принимают вызовы клиентов
+// (других инсталляций) по X-Marketplace-Key. На клиентских инсталляциях
+// эти таблицы остаются пустыми — данные тянутся с хаба через прокси.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model MarketplaceInstallation {
+  id                String   @id @default(cuid())
+  apiKeyHash        String   @unique @map("api_key_hash")
+  apiKeyPrefix      String   @map("api_key_prefix") @db.VarChar(16) // первые 8 символов ключа для отладки/идентификации
+  domain            String   @unique // нормализованный publicAppUrl без схемы и trailing slash
+  displayName       String?  @map("display_name") @db.VarChar(200)
+  contactUsername   String   @map("contact_username") @db.VarChar(64) // Telegram username без @
+  contactTelegramId String?  @map("contact_telegram_id") @db.VarChar(32)
+  logoUrl           String?  @map("logo_url") @db.VarChar(2000)
+  description       String?  @db.Text
+  isBanned          Boolean  @default(false) @map("is_banned")
+  banReason         String?  @map("ban_reason") @db.Text
+  totalListings     Int      @default(0) @map("total_listings")
+  lastSeenAt        DateTime @default(now()) @map("last_seen_at")
+  lastIp            String?  @map("last_ip") @db.VarChar(64)
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  listings MarketplaceListing[]
+  reports  MarketplaceReport[]  @relation("MarketplaceReporter")
+
+  @@index([isBanned])
+  @@index([lastSeenAt])
+  @@map("marketplace_installations")
+}
+
+model MarketplaceCategory {
+  id        String   @id @default(cuid())
+  slug      String   @unique @db.VarChar(64)
+  labelRu   String   @map("label_ru") @db.VarChar(120)
+  labelEn   String   @map("label_en") @db.VarChar(120)
+  icon      String?  @db.VarChar(64) // имя иконки lucide-react
+  sortOrder Int      @default(0) @map("sort_order")
+  isEnabled Boolean  @default(true) @map("is_enabled")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  listings MarketplaceListing[]
+
+  @@map("marketplace_categories")
+}
+
+model MarketplaceListing {
+  id             String   @id @default(cuid())
+  installationId String   @map("installation_id")
+  categoryId     String   @map("category_id")
+  title          String   @db.VarChar(200)
+  description    String   @db.Text
+  priceCents     Int      @map("price_cents") // цена в минимальных единицах (центах/копейках)
+  currency       String   @db.VarChar(8) // USD | RUB | EUR | USDT
+  priceUnit      String   @default("one_time") @map("price_unit") @db.VarChar(20) // one_time | per_month | per_gb | per_device
+  country        String?  @db.VarChar(8) // ISO 3166-1 alpha-2
+  tags           String[] @default([])
+  coverImageUrl  String?  @map("cover_image_url") @db.VarChar(2000)
+  galleryJson    String?  @map("gallery_json") @db.Text // JSON-массив URL картинок
+  status         String   @default("active") @db.VarChar(16) // active | archived | auto_hidden
+  views          Int      @default(0)
+  reportsCount   Int      @default(0) @map("reports_count")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  installation MarketplaceInstallation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  category     MarketplaceCategory     @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  reports      MarketplaceReport[]
+
+  @@index([categoryId, status, createdAt(sort: Desc)])
+  @@index([installationId])
+  @@index([status, createdAt(sort: Desc)])
+  @@map("marketplace_listings")
+}
+
+model MarketplaceReport {
+  id                     String    @id @default(cuid())
+  listingId              String    @map("listing_id")
+  reporterInstallationId String    @map("reporter_installation_id")
+  reason                 String    @db.VarChar(64) // spam | scam | wrong_category | offensive | other
+  comment                String?   @db.Text
+  status                 String    @default("open") @db.VarChar(16) // open | resolved | dismissed
+  createdAt              DateTime  @default(now()) @map("created_at")
+  resolvedAt             DateTime? @map("resolved_at")
+
+  listing  MarketplaceListing      @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  reporter MarketplaceInstallation @relation("MarketplaceReporter", fields: [reporterInstallationId], references: [id], onDelete: Cascade)
+
+  @@unique([listingId, reporterInstallationId])
+  @@index([status])
+  @@index([listingId])
+  @@map("marketplace_reports")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Landing Editor (3.3.4+)
+// Блочный редактор лендинга. `props` — структурные данные (цвета, лейаут, картинки),
+// `i18n` — все переводимые тексты в виде { ru: {...}, en: {...} }.
+// `*Draft` хранит несохранённые изменения; публичный рендер всегда читает основные
+// поля, edit-режим читает draft ?? main.
+// ─────────────────────────────────────────────────────────────────────────────
+model LandingBlock {
+  id         String   @id @default(cuid())
+  /// Тип блока: hero | features | benefits | tariffs | devices | faq | cta | stats | logos | testimonials | video | spacer | custom
+  type       String   @db.VarChar(40)
+  /// Вариант дизайна внутри типа (split | centered | grid-3 | accordion | …).
+  variant    String   @default("default") @db.VarChar(60)
+  /// Позиция в стриме (целое, шаг 10 для удобной вставки между).
+  order      Int
+  visible    Boolean  @default(true)
+  /// Структурные поля блока: цвета, лейаут, картинки, ссылки.
+  props      Json     @default("{}")
+  /// Локализованные тексты: { ru: {…}, en: {…} } — ключи зависят от типа блока.
+  i18n       Json     @default("{}")
+  propsDraft Json?    @map("props_draft")
+  i18nDraft  Json?    @map("i18n_draft")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([order])
+  @@index([visible, order])
+  @@map("landing_blocks")
+}
+
+// Глобальная тема лендинга — один ряд (singleton, id = "default").
+model LandingTheme {
+  id             String   @id @default("default")
+  primaryColor   String?  @map("primary_color") @db.VarChar(20)
+  accentColor    String?  @map("accent_color") @db.VarChar(20)
+  backgroundColor String? @map("background_color") @db.VarChar(20)
+  textColor      String?  @map("text_color") @db.VarChar(20)
+  /// Активный шрифт (имя из fontPresets).
+  fontFamily     String?  @map("font_family") @db.VarChar(80)
+  /// Доступные шрифты: [{ name, url, previewText }] — Inter, Manrope, Onest, Space Grotesk и т.д.
+  fontPresets    Json     @default("[]") @map("font_presets")
+  borderRadius   String?  @map("border_radius") @db.VarChar(20)
+  containerWidth String?  @map("container_width") @db.VarChar(20)
+  customCss      String?  @map("custom_css") @db.Text
+  /// Целиком черновик темы (если есть несохранённые изменения).
+  draft          Json?    @map("draft")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@map("landing_theme")
+}
+
+// Снапшоты состояния лендинга для бэкап/восстановления.
+// Авто-снапшот перед каждым Publish + ручные снапшоты из редактора.
+model LandingSnapshot {
+  id        String   @id @default(cuid())
+  /// "auto-before-publish" | "manual" | произвольный.
+  label     String?  @db.VarChar(120)
+  /// { blocks: [...], theme: {...} } — полное состояние на момент снапшота.
+  data      Json
+  /// Email/ID админа, создавшего снапшот.
+  createdBy String?  @map("created_by") @db.VarChar(120)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt(sort: Desc)])
+  @@map("landing_snapshots")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin audit log (3.3.5+).
+// Универсальный журнал действий админов: кто, когда, над чем, какое действие,
+// с каким payload. ContestEvent остаётся отдельной таблицей (там история
+// контеста живёт вместе с самим контестом и каскадно удаляется); общий админ-
+// аудит сюда — для расследования инцидентов, споров, безопасности.
+// ─────────────────────────────────────────────────────────────────────────────
+model AdminEvent {
+  id         String   @id @default(cuid())
+  /// Тип события: client.block | client.unblock | payment.refund | settings.update | admin.login | …
+  kind       String   @db.VarChar(80)
+  /// Email/ID админа выполнившего действие (null для системных событий).
+  actorId    String?  @map("actor_id") @db.VarChar(120)
+  /// IP откуда пришёл запрос (X-Forwarded-For или req.ip).
+  actorIp    String?  @map("actor_ip") @db.VarChar(64)
+  /// Тип целевого объекта: client | payment | tariff | contest | settings | promo_group | gift_code | …
+  targetType String?  @map("target_type") @db.VarChar(40)
+  /// ID целевого объекта (cuid обычно).
+  targetId   String?  @map("target_id")
+  /// Свободные данные: diff, причина, before/after.
+  payload    Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt(sort: Desc)])
+  @@index([actorId, createdAt(sort: Desc)])
+  @@index([targetType, targetId, createdAt(sort: Desc)])
+  @@index([kind, createdAt(sort: Desc)])
+  @@map("admin_events")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Webhook inbox — все входящие webhook'и от платежных провайдеров сохраняются
+// сюда. Нужно для:
+//   - расследования "почему платёж завис" (видишь raw body что прислал провайдер),
+//   - replay'я (если webhook не обработался из-за временной проблемы),
+//   - аудита (видишь все попытки атаки на unsigned endpoint'ы).
+// ─────────────────────────────────────────────────────────────────────────────
+model WebhookEvent {
+  id            String    @id @default(cuid())
+  /// platega | yookassa | yoomoney | cryptopay | heleket | lava | overpay
+  provider      String    @db.VarChar(20)
+  /// Сырое тело запроса (как пришло — для HMAC verification и replay).
+  rawBody       String    @map("raw_body") @db.Text
+  /// Все relevant заголовки в JSON ({ "x-signature": "...", "authorization": "..." }).
+  headers       Json
+  /// IP отправителя (для IP-whitelist аудита).
+  remoteIp      String?   @map("remote_ip") @db.VarChar(64)
+  /// HTTP-статус, который мы вернули.
+  responseStatus Int      @map("response_status")
+  /// Результат обработки: accepted | rejected_signature | rejected_payload | payment_not_found | payment_already_paid | error
+  outcome       String    @db.VarChar(40)
+  /// Причина отказа / ошибки, если есть.
+  errorMessage  String?   @map("error_message") @db.Text
+  /// ID платежа, к которому привязали (если нашли).
+  paymentId     String?   @map("payment_id")
+  /// Длительность обработки в мс (для perf-мониторинга).
+  durationMs    Int?      @map("duration_ms")
+  /// Кто нажал «replay»: если null — оригинальный webhook от провайдера.
+  replayedBy    String?   @map("replayed_by") @db.VarChar(120)
+  /// FK на оригинальный webhook (если это replay).
+  replayOfId    String?   @map("replay_of_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  @@index([provider, createdAt(sort: Desc)])
+  @@index([paymentId])
+  @@index([outcome, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@map("webhook_events")
+}

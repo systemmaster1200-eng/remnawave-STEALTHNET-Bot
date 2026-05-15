@@ -1,0 +1,6 @@
+{
+  "name": "stealthnet-proxy-node",
+  "version": "1.0.0",
+  "description": "Agent for STEALTHNET proxy node",
+  "main": "agent.js"
+}

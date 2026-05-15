@@ -1,0 +1,26 @@
+{
+  "name": "stealthnet-bot",
+  "version": "4.2.1",
+  "description": "STEALTHNET 4.2.1 — Telegram-бот для продажи подписок",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "grammy": "^1.21.1",
+    "socks-proxy-agent": "^9.0.0",
+    "undici": "^7.24.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

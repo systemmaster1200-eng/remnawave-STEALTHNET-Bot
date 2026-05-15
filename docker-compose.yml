@@ -1,0 +1,153 @@
+###############################################################################
+#  STEALTHNET 3.2.7 — Docker Compose
+#  Репозиторий: https://github.com/STEALTHNET-APP/remnawave-STEALTHNET-Bot
+#  Запуск: docker compose up -d
+###############################################################################
+name: stealthnet
+
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: stealthnet-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-stealthnet}
+      POSTGRES_USER: ${POSTGRES_USER:-stealthnet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stealthnet_change_me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - stealthnet
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stealthnet} -d ${POSTGRES_DB:-stealthnet}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Backend API ─────────────────────────────────────────────────
+  # Порт 5000 на хосте нужен только когда nginx снаружи (USE_BUILTIN_NGINX=false):
+  # хост-nginx проксирует на 127.0.0.1:5000. Бинд только на localhost — чтобы
+  # API не был доступен с внешних интерфейсов.
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stealthnet-api
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:5000:5000"
+    environment:
+      NODE_ENV: production
+      PORT: "5000"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-stealthnet}:${POSTGRES_PASSWORD:-stealthnet_change_me}@postgres:5432/${POSTGRES_DB:-stealthnet}"
+      JWT_SECRET: "${JWT_SECRET}"
+      JWT_ACCESS_EXPIRES_IN: "${JWT_ACCESS_EXPIRES_IN:-15m}"
+      JWT_REFRESH_EXPIRES_IN: "${JWT_REFRESH_EXPIRES_IN:-7d}"
+      CORS_ORIGIN: "https://${DOMAIN:-localhost}"
+      REMNA_API_URL: "${REMNA_API_URL:-}"
+      REMNA_ADMIN_TOKEN: "${REMNA_ADMIN_TOKEN:-}"
+      REMNA_SECRET_KEY: "${REMNA_SECRET_KEY:-}"
+      INIT_ADMIN_EMAIL: "${INIT_ADMIN_EMAIL:-admin@stealthnet.local}"
+      INIT_ADMIN_PASSWORD: "${INIT_ADMIN_PASSWORD:-}"
+      BOT_TOKEN: "${BOT_TOKEN:-}"
+    volumes:
+      - /etc/ssh:/host-etc/ssh
+      - /proc:/host-proc:ro
+      - uploads_data:/app/uploads
+      # Read-only frontend bundle: модуль branding/spa-html.ts читает index.html
+      # отсюда чтобы инжектить per-bot брендинг в SPA-shell перед отдачей через nginx /_spa.
+      - frontend_dist:/var/www/stealthnet:ro
+    pid: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Первый старт: Prisma migrate / greenfield может занимать минуты — без этого nginx
+    # поднимается раньше Node и отдаёт 502 (upstream connection refused).
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'node -e "require(\"http\").get(\"http://127.0.0.1:5000/api/health\",(r)=>{r.resume();r.on(\"end\",()=>process.exit(r.statusCode===200?0:1));}).on(\"error\",()=>process.exit(1))"',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 600s
+    networks:
+      - stealthnet
+
+  # ── Telegram Bot ────────────────────────────────────────────────
+  bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    container_name: stealthnet-bot
+    restart: unless-stopped
+    environment:
+      BOT_TOKEN: "${BOT_TOKEN:-}"
+      API_URL: "http://api:5000"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - stealthnet
+
+  # ── Frontend Build ──────────────────────────────────────────────
+  # Одноразовый контейнер для сборки фронтенда в volume
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: stealthnet-frontend-build
+    volumes:
+      - frontend_dist:/out
+    entrypoint: ["sh", "-c", "rm -rf /out/* && cp -r /dist/* /out/ && echo 'Frontend copied to volume'"]
+
+  # ── Nginx (встроенный) ─────────────────────────────────────────
+  # Включается когда USE_BUILTIN_NGINX=true
+  nginx:
+    image: nginx:1.28-alpine
+    container_name: stealthnet-nginx
+    restart: unless-stopped
+    profiles:
+      - builtin-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - frontend_dist:/var/www/stealthnet:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - certbot_www:/var/www/certbot:ro
+      - certbot_certs:/etc/nginx/ssl:ro
+    depends_on:
+      frontend:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    networks:
+      - stealthnet
+
+  # ── Certbot (авто-SSL) ─────────────────────────────────────────
+  certbot:
+    image: certbot/certbot:latest
+    container_name: stealthnet-certbot
+    profiles:
+      - builtin-nginx
+    volumes:
+      - certbot_www:/var/www/certbot
+      - certbot_certs:/etc/letsencrypt
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    networks:
+      - stealthnet
+
+volumes:
+  postgres_data:
+  frontend_dist:
+  uploads_data:
+  certbot_www:
+  certbot_certs:
+
+networks:
+  stealthnet:
+    driver: bridge

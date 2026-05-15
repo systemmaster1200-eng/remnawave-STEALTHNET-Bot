@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>ProxySteal</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" class="icon"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+        <span>ProxySteal</span>
+      </div>
+      <div class="status-badge" id="statusBadge">Отключен</div>
+    </div>
+    
+    <div class="form-group">
+      <label>Протокол</label>
+      <select id="protocol">
+        <option value="http">HTTP</option>
+        <option value="https">HTTPS</option>
+        <option value="socks5">SOCKS5 (без авторизации)</option>
+      </select>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group" style="flex: 2;">
+        <label>IP / Хост</label>
+        <input type="text" id="host" placeholder="192.168.1.1" autocomplete="off">
+      </div>
+      <div class="form-group" style="flex: 1;">
+        <label>Порт</label>
+        <input type="number" id="port" placeholder="8080" autocomplete="off">
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>Логин</label>
+      <input type="text" id="username" placeholder="user" autocomplete="off">
+    </div>
+
+    <div class="form-group" style="margin-bottom: 4px;">
+      <label>Пароль</label>
+      <input type="password" id="password" placeholder="••••••••">
+    </div>
+
+    <button id="toggleBtn" class="btn">Подключить</button>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

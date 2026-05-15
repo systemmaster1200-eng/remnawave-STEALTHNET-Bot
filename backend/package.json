@@ -1,0 +1,55 @@
+{
+  "name": "stealthnet-api",
+  "version": "4.2.1",
+  "description": "STEALTHNET 4.2.1 — модульный Web API",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate deploy",
+    "db:studio": "prisma studio",
+    "seed": "tsx src/scripts/seed-admin.ts",
+    "db:loadtest-clients": "tsx src/scripts/seed-loadtest-clients.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.0.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "express-rate-limit": "^7.2.0",
+    "google-auth-library": "^10.6.1",
+    "helmet": "^7.1.0",
+    "jose": "^6.2.0",
+    "jsonwebtoken": "^9.0.2",
+    "lru-cache": "^11.2.7",
+    "maxmind": "^5.0.5",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^8.0.1",
+    "otplib": "^13.3.0",
+    "socks-proxy-agent": "^9.0.0",
+    "undici": "^7.24.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/nodemailer": "^7.0.9",
+    "prisma": "^6.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

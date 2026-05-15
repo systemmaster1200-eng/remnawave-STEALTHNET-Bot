@@ -1,0 +1,75 @@
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  STEALTHNET 3.0 — Пример конфигурации внешнего Nginx           ║
+# ╚══════════════════════════════════════════════════════════════════╝
+#
+# Используйте этот конфиг если вы выбрали USE_BUILTIN_NGINX=false
+# Скопируйте в /etc/nginx/sites-available/stealthnet.conf
+# и создайте симлинк: ln -s /etc/nginx/sites-available/stealthnet.conf /etc/nginx/sites-enabled/
+#
+# Замените YOUR_DOMAIN на ваш домен.
+# SSL-сертификат можно получить через: certbot --nginx -d YOUR_DOMAIN
+
+server {
+    listen 80;
+    server_name YOUR_DOMAIN;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name YOUR_DOMAIN;
+
+    # SSL — certbot автоматически подставит пути
+    ssl_certificate     /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+
+    client_max_body_size 20M;
+
+    # Gzip
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_min_length 256;
+    gzip_types application/javascript application/json text/css text/javascript text/plain image/svg+xml font/woff2;
+
+    # Frontend (собранный dist)
+    root /var/www/stealthnet;
+    index index.html;
+
+    # API → бэкенд на порту 5000 (обязательно 127.0.0.1, не IP контейнера 172.x.x.x!)
+    # ^~ гарантирует что regex-location для статики (.png, .jpg) не перехватит /api/uploads/
+    location ^~ /api/ {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+
+    # SPA — без этого /admin и другие маршруты дают 404
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # favicon: если нет favicon.ico — отдаём favicon.svg
+    location = /favicon.ico {
+        try_files /favicon.ico /favicon.svg =204;
+        add_header Cache-Control "public, max-age=86400";
+    }
+
+    # Кэш статики
+    location ~* \.(js|css|ico|png|jpg|jpeg|svg|woff2|woff|ttf|webp|gif)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+}
