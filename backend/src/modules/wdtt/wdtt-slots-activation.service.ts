@@ -67,7 +67,7 @@ export async function createWdttSlotsByPaymentId(paymentId: string): Promise<Cre
 
   const nodes = await prisma.wdttNode.findMany({
     where: nodeWhere,
-    select: { id: true, apiUrl: true, apiKey: true, publicHost: true, dtlsPort: true, wgPort: true, tunPort: true, capacity: true, currentSlots: true },
+    select: { id: true, name: true, apiUrl: true, apiKey: true, publicHost: true, dtlsPort: true, wgPort: true, tunPort: true, capacity: true, currentSlots: true },
     orderBy: { updatedAt: "asc" },
   });
   if (nodes.length === 0) {

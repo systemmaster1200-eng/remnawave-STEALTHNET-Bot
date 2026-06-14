@@ -59,8 +59,62 @@ model AdminNotificationPreference {
   @@map("admin_notification_preferences")
 }
 
+// ——— Боты-клоны (clone-bots) ———
+model Bot {
+  id              String   @id @default(cuid())
+  token           String   @unique
+  username        String?
+  markupPercent   Float    @default(0) @map("markup_percent")
+  ownerTelegramId String?  @map("owner_telegram_id")
+  ownerName       String?  @map("owner_name")
+  isActive        Boolean  @default(true) @map("is_active")
+  isPrimary       Boolean  @default(false) @map("is_primary")
+  notes           String?  @db.Text
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  clients         Client[]
+  payments        Payment[]
+  payouts         BotPayout[]
+  @@index([isActive])
+  @@map("bots")
+}
+
+model BotPayout {
+  id        String   @id @default(cuid())
+  botId     String   @map("bot_id")
+  amount    Float
+  currency  String   @default("rub")
+  comment   String?  @db.Text
+  paidAt    DateTime @default(now()) @map("paid_at")
+  createdBy String   @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  bot       Bot      @relation(fields: [botId], references: [id], onDelete: Cascade)
+  @@index([botId])
+  @@index([paidAt])
+  @@map("bot_payouts")
+}
+
+model SecondarySubscription {
+  id                String   @id @default(cuid())
+  ownerId           String   @map("owner_id")
+  remnawaveUuid     String?  @map("remnawave_uuid")
+  subscriptionIndex Int      @map("subscription_index")
+  tariffId          String?  @map("tariff_id")
+  giftStatus        String?  @map("gift_status")
+  giftedToClientId  String?  @map("gifted_to_client_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  owner             Client     @relation("OwnerSecondarySubscriptions", fields: [ownerId], references: [id], onDelete: Cascade)
+  giftedToClient    Client?    @relation("ReceivedSecondarySubscriptions", fields: [giftedToClientId], references: [id], onDelete: SetNull)
+  tariff            Tariff?    @relation(fields: [tariffId], references: [id], onDelete: SetNull)
+  @@unique([ownerId, subscriptionIndex])
+  @@index([ownerId])
+  @@index([remnawaveUuid])
+  @@index([giftStatus])
+  @@map("secondary_subscriptions")
+}
+
 // Клиент панели (покупатель подписок): сайт, бот, mini app
-// Дополнительные подписки хранятся в отдельной таблице SecondarySubscription
 model Client {
   id                         String    @id @default(cuid())
   email                      String?   @unique
@@ -158,6 +212,12 @@ model Client {
   wdttCreditsExpiresAt  DateTime? @map("wdtt_credits_expires_at")
   // WDTT слоты
   wdttSlots             WdttSlot[]
+
+  // ——— Боты-клоны (clone-bots) ———
+  botId                      String?                @map("bot_id")
+  bot                        Bot?                   @relation(fields: [botId], references: [id])
+  ownedSecondarySubscriptions   SecondarySubscription[] @relation("OwnerSecondarySubscriptions")
+  receivedSecondarySubscriptions SecondarySubscription[] @relation("ReceivedSecondarySubscriptions")
 
   // Email/google/apple/referralCode/telegramId глобально уникальны.
   @@index([email])
@@ -282,10 +342,16 @@ model Payment {
   tariffPriceOption TariffPriceOption? @relation(fields: [tariffPriceOptionId], references: [id], onDelete: SetNull)
   proxyTariff       ProxyTariff?       @relation(fields: [proxyTariffId], references: [id], onDelete: SetNull)
   singboxTariff     SingboxTariff?     @relation(fields: [singboxTariffId], references: [id], onDelete: SetNull)
-  wdttTariff        WdttTariff?        @relation("WdttTariffPayments", fields: [wdttTariffId], references: [id], onDelete: SetNull)
-  subscription      Subscription?      @relation("PaymentSubscription", fields: [subscriptionId], references: [id], onDelete: SetNull)
-  referralCredits   ReferralCredit[]
-  wdttSlots         WdttSlot[]
+  wdttTariff          WdttTariff?        @relation("WdttTariffPayments", fields: [wdttTariffId], references: [id], onDelete: SetNull)
+  // ——— Clone-bots поля ———
+  botId                 String?   @map("bot_id")
+  baseAmount            Float?    @map("base_amount")
+  botMarkupPercent      Float?    @map("bot_markup_percent")
+  botMarkupAmount       Float?    @map("bot_markup_amount")
+  bot                   Bot?      @relation(fields: [botId], references: [id])
+  subscription          Subscription?      @relation("PaymentSubscription", fields: [subscriptionId], references: [id], onDelete: SetNull)
+  referralCredits       ReferralCredit[]
+  wdttSlots             WdttSlot[]
 
   @@index([clientId])
   @@index([status])
@@ -1124,15 +1190,15 @@ model ClientTrialUsage {
 model GiftHistory {
   id             String   @id @default(cuid())
   clientId       String   @map("client_id")
-  subscriptionId String?  @map("secondary_subscription_id")
-  eventType      String   @map("event_type") // PURCHASED | ACTIVATED_SELF | CODE_CREATED | GIFT_SENT | GIFT_RECEIVED | CODE_CANCELLED | CODE_EXPIRED | DELETED | EDITED_BY_ADMIN
+  secondarySubscriptionId String?  @map("secondary_subscription_id")
+  eventType      String   @map("event_type")
   metadata       Json?    @map("metadata")
   createdAt      DateTime @default(now()) @map("created_at")
 
   client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
   @@index([clientId])
-  @@index([subscriptionId])
+  @@index([secondarySubscriptionId])
   @@index([createdAt])
   @@map("gift_history")
 }
@@ -1142,29 +1208,24 @@ model GiftCode {
   id               String    @id @default(cuid())
   code             String    @unique // 12-символьный код XXXX-XXXX-XXXX
   creatorId        String    @map("creator_id") // клиент, создавший подарок
-  /// T-unify (12.05.2026, WolfVPN): SQL-колонка остаётся secondary_subscription_id, в коде subscriptionId.
-  subscriptionId   String    @map("secondary_subscription_id") // FK → Subscription
+  secondarySubscriptionId   String    @map("secondary_subscription_id") // FK → SecondarySubscription
   redeemedById     String?   @map("redeemed_by_id") // клиент, активировавший подарок
   status           String    @default("ACTIVE") // ACTIVE | REDEEMED | EXPIRED | CANCELLED
   giftMessage      String?   @map("gift_message") // персональное сообщение (макс 200 символов)
   expiresAt        DateTime  @map("expires_at")
   redeemedAt       DateTime? @map("redeemed_at")
   expiryNotifiedAt DateTime? @map("expiry_notified_at") // когда отправлено уведомление об истечении
-  /// T-unify (12.05.2026, WolfVPN): true → код создан админом (а не клиентом). Используется чтобы
-  /// разрешить «активировать самому» если creatorId совпадает с recipient (админ выдаёт клиенту код).
   createdByAdmin   Boolean   @default(false) @map("created_by_admin")
-  /// T-promo (13.05.2026, WolfVPN): id админа/менеджера который создал код (если createdByAdmin=true).
-  /// В админ-списке подписок отображается имя этого админа в колонке «Отправитель».
   createdByAdminId String?   @map("created_by_admin_id")
   createdAt        DateTime  @default(now()) @map("created_at")
 
   creator      Client       @relation("GiftCodeCreator", fields: [creatorId], references: [id], onDelete: Cascade)
   redeemedBy   Client?      @relation("GiftCodeRedeemer", fields: [redeemedById], references: [id], onDelete: SetNull)
-  subscription Subscription @relation("GiftCodeSubscription", fields: [subscriptionId], references: [id], onDelete: Cascade)
+  secondarySubscription SecondarySubscription @relation("GiftCodeSubscription", fields: [secondarySubscriptionId], references: [id], onDelete: Cascade)
 
   @@index([code])
   @@index([creatorId])
-  @@index([subscriptionId])
+  @@index([secondarySubscriptionId])
   @@index([status])
   @@map("gift_codes")
 }

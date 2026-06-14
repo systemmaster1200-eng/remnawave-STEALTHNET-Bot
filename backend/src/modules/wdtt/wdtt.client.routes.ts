@@ -2,6 +2,8 @@ import express, { Router } from "express";
 import { prisma } from "../../db.js";
 import { requireClientAuth } from "../client/client.middleware.js";
 
+type AuthRequest = express.Request & { clientId: string };
+
 export const wdttClientRouter = Router();
 wdttClientRouter.use(requireClientAuth);
 
@@ -14,7 +16,7 @@ function asyncRoute(
 }
 
 wdttClientRouter.get("/slots", asyncRoute(async (req, res) => {
-  const clientId = req.clientId!;
+  const clientId = (req as AuthRequest).clientId;
   const slots = await prisma.wdttSlot.findMany({
     where: { clientId },
     include: {
