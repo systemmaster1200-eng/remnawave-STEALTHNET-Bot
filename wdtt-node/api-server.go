@@ -103,7 +103,7 @@ func saveDB() {
 func restartWdttServer() {
 	log.Println("[API] Restarting WDTT server to pick up new password...")
 	// pkill from procps package
-	exec.Command("pkill", "-SIGTERM", "wdtt-server").Run()
+	exec.Command("pkill", "-SIGKILL", "wdtt-server").Run()
 	// The watchdog in start.sh will restart it
 }
 
