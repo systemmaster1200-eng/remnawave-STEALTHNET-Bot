@@ -107,6 +107,7 @@ model SecondarySubscription {
   owner             Client     @relation("OwnerSecondarySubscriptions", fields: [ownerId], references: [id], onDelete: Cascade)
   giftedToClient    Client?    @relation("ReceivedSecondarySubscriptions", fields: [giftedToClientId], references: [id], onDelete: SetNull)
   tariff            Tariff?    @relation(fields: [tariffId], references: [id], onDelete: SetNull)
+  giftCodes         GiftCode[] @relation("GiftCodeSubscription")
   @@unique([ownerId, subscriptionIndex])
   @@index([ownerId])
   @@index([remnawaveUuid])
@@ -543,6 +544,7 @@ model Tariff {
   autoRenewClients       Client[]            @relation("ClientAutoRenewTariff")
   currentTariffClients   Client[]            @relation("ClientCurrentTariff")
   subscriptions          Subscription[]      @relation("SubscriptionTariff")
+  secondarySubscriptions SecondarySubscription[]
   /// T-unify: подписки, у которых этот тариф настроен на автопродление.
   autoRenewSubscriptions Subscription[]      @relation("SubscriptionAutoRenewTariff")
   priceOptions           TariffPriceOption[]
@@ -1123,7 +1125,7 @@ model Subscription {
   tariff          Tariff?    @relation("SubscriptionTariff", fields: [tariffId], references: [id], onDelete: SetNull)
   autoRenewTariff Tariff?    @relation("SubscriptionAutoRenewTariff", fields: [autoRenewTariffId], references: [id], onDelete: SetNull)
   trial           Trial?     @relation(fields: [trialId], references: [id], onDelete: SetNull)
-  giftCodes       GiftCode[] @relation("GiftCodeSubscription")
+  giftCodes       GiftCode[] @relation("SubscriptionGiftCodes")
   payments        Payment[]  @relation("PaymentSubscription")
 
   @@unique([ownerId, subscriptionIndex])
