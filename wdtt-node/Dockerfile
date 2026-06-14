@@ -12,7 +12,7 @@ RUN git clone https://github.com/amurcanov/proxy-turn-vk-android.git --depth=1 w
 
 # Build WDTT server
 WORKDIR /build/wdtt-source
-RUN go mod download && \
+RUN go mod tidy && \
     CGO_ENABLED=0 go build -o /wdtt-server -ldflags="-s -w" .
 
 # Build API wrapper
