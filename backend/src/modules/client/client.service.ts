@@ -247,6 +247,8 @@ const DEFAULT_BOT_BUTTONS: BotButtonConfig[] = [
   { id: "my_proxy", visible: true, label: "📋 Мои прокси", order: 0.6, style: "primary", emojiKey: "SERVERS" },
   { id: "singbox", visible: true, label: "🔑 Доступы", order: 0.55, style: "primary", emojiKey: "SERVERS" },
   { id: "my_singbox", visible: true, label: "📋 Мои доступы", order: 0.65, style: "primary", emojiKey: "SERVERS" },
+  { id: "wdtt", visible: true, label: "⚡ WDTT / Warp", order: 0.58, style: "primary", emojiKey: "SERVERS" },
+  { id: "my_wdtt", visible: true, label: "📋 Мои WDTT доступы", order: 0.68, style: "primary", emojiKey: "SERVERS" },
   { id: "profile", visible: true, label: "👤 Профиль", order: 1, style: "", emojiKey: "PUZZLE" },
   { id: "devices", visible: true, label: "📱 Устройства", order: 1.5, style: "primary", emojiKey: "DEVICES" },
   { id: "topup", visible: true, label: "💳 Пополнить баланс", order: 2, style: "success", emojiKey: "CARD" },
