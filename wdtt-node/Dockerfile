@@ -17,7 +17,7 @@ RUN go mod tidy && \
 
 # Build API wrapper
 WORKDIR /build/api
-COPY api-server.go .
+COPY api-server.go go.mod .
 RUN CGO_ENABLED=0 go build -o /api-server -ldflags="-s -w" .
 
 # Final image
