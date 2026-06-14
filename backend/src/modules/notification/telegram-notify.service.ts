@@ -739,21 +739,15 @@ export async function notifySingboxSlotsCreated(clientId: string, slotIds: strin
 export async function notifyWdttSlotsCreated(clientId: string, slotIds: string[], tariffName?: string): Promise<void> {
   const client = await prisma.client.findUnique({ where: { id: clientId }, select: { telegramId: true, id: true } });
   if (!client?.telegramId || slotIds.length === 0) return;
-
   const slots = await prisma.wdttSlot.findMany({
     where: { id: { in: slotIds } },
     select: { wdttLink: true, node: { select: { publicHost: true } } },
     orderBy: { createdAt: "asc" },
   });
-
   const name = tariffName?.trim() || "WDTT";
-  let text = `✅ <b>WDTT-доступ «${escapeHtml(name)}»</b> оплачен.\n\n`;
-  text += "Ссылка для подключения:\n\n";
-  for (const s of slots) {
-    text += `<code>${escapeHtml(s.wdttLink)}</code>\n\n`;
-  }
+  let text = `✅ <b>WDTT-доступ «${name}»</b> оплачен.\n\nСсылка для подключения:\n\n`;
+  for (const s of slots) text += `<code>${s.wdttLink}</code>\n\n`;
   text += "Скопируйте ссылку и откройте в приложении proxy-turn-vk-android-main.";
-
   const cfg = await getSystemConfig();
   await sendTelegramToUser(client.telegramId, text, null, backToMenuMarkup(cfg.botBackLabel), { clientIdForBotToken: client.id });
 }

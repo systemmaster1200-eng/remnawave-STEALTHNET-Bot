@@ -93,6 +93,8 @@ interface AbuserEntry {
   createdAt: string;
   expireAt: string;
   abuseScore: number;
+  /** Имена internal squads, к которым относится пользователь (для фильтра по squad/тарифу). */
+  squadNames: string[];
 }
 
 /**
@@ -222,6 +224,21 @@ trafficAbuseRouter.get("/analytics", async (req: Request, res: Response) => {
       if (limit > 0 && usagePercent < threshold * 100) continue;
       if (limit === 0 && abuseScore < 150) continue;
 
+      // Remnawave возвращает activeInternalSquads как массив объектов {uuid, name}
+      // (см. GET /api/users response). Если поле отсутствует или формат старый — пустой массив.
+      const rawSquads = (user as unknown as { activeInternalSquads?: unknown })?.activeInternalSquads;
+      const squadNames: string[] = Array.isArray(rawSquads)
+        ? rawSquads
+            .map((s: unknown) => {
+              if (typeof s === "object" && s !== null && "name" in s) {
+                const n = (s as { name?: unknown }).name;
+                return typeof n === "string" ? n.trim() : "";
+              }
+              return "";
+            })
+            .filter((n) => n.length > 0)
+        : [];
+
       abusers.push({
         uuid: user?.uuid ?? "",
         username,
@@ -240,6 +257,7 @@ trafficAbuseRouter.get("/analytics", async (req: Request, res: Response) => {
         createdAt: user?.createdAt ?? "",
         expireAt: user?.expireAt ?? "",
         abuseScore: Math.round(abuseScore * 100) / 100,
+        squadNames,
       });
     }
 

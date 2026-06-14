@@ -35,13 +35,6 @@ async function main() {
   const runId = randomBytes(4).toString("hex");
   console.log(`Создание ${count} клиентов (runId=${runId}, батчи по ${BATCH})...`);
 
-  // Все loadtest-клиенты прикрепляем к primary боту.
-  const primaryBot = await prisma.bot.findFirst({ where: { isPrimary: true } });
-  if (!primaryBot) {
-    console.error("Primary bot не найден — запустите миграции (npx prisma migrate deploy).");
-    process.exit(1);
-  }
-
   let created = 0;
   const t0 = Date.now();
 
@@ -52,7 +45,6 @@ async function main() {
       const n = offset + i;
       data.push({
         id: randomUUID(),
-        botId: primaryBot.id,
         email: `lt-${runId}-${n}@${EMAIL_DOMAIN}`,
         telegramId: `lt${runId}${String(n).padStart(6, "0")}`,
         referralCode: `REFLT${runId}${String(n).padStart(6, "0")}`,

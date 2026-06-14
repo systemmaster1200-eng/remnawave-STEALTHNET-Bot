@@ -10,7 +10,7 @@ import multer from "multer";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma, createPayment } from "../../db.js";
-import { requireAuth, requireAdminSection } from "../auth/middleware.js";
+import { requireAuth, requireAdminSection, requireAction } from "../auth/middleware.js";
 import { hashPassword } from "../auth/auth.service.js";
 import { hashPassword as hashClientPassword } from "../client/client.service.js";
 import {
@@ -40,15 +40,28 @@ import {
   remnaDeleteUserHwidDevice,
   remnaGetUserBandwidthStats,
 } from "../remna/remna.client.js";
-import { getSystemConfig } from "../client/client.service.js";
+import { getSystemConfig, invalidateSystemConfigCache } from "../client/client.service.js";
+import {
+  disableClient as bulkDisableClient,
+  enableClient as bulkEnableClient,
+  disableAllSubscriptionsInRemna,
+  enableAllSubscriptionsInRemna,
+  resetAllSubscriptionsTraffic,
+  revokeAllSubscriptionsUrls,
+  syncAllSubscriptionsToRemna,
+  syncAllSubscriptionsFromRemna,
+  wipeClientSubscriptions,
+  auditClientSubscriptions,
+} from "../client/client-bulk-ops.service.js";
 import { getServerStats, getSshConfig, updateSshConfig } from "../server/server.service.js";
 import { syncFromRemna, syncToRemna, createRemnaUsersForClientsWithoutUuid } from "../sync/sync.service.js";
 import { distributeReferralRewards } from "../referral/referral.service.js";
 import { markPaymentPaid } from "../payment/mark-paid.service.js";
-import { activateTariffForClient } from "../tariff/tariff-activation.service.js";
+// activateTariffForClient больше не используется в admin —
+// выдача подписки идёт через createAdditionalSubscription (создание новой Subscription).
 import { registerBackupRoutes } from "../backup/backup.routes.js";
 import { invalidateBrandCache } from "../branding/spa-html.js";
-import { getBroadcastRecipientsCount, startBroadcastJob, getBroadcastJob, listBroadcastHistory, getBroadcastHistoryItem } from "../broadcast/broadcast.service.js";
+import { getBroadcastRecipientsCount, startBroadcastJob, getBroadcastJob, cancelBroadcastJob, listBroadcastHistory, getBroadcastHistoryItem } from "../broadcast/broadcast.service.js";
 import { uploadMascotImage, uploadVideo, uploadTicketAttachment, mascotUrl, videoUploadUrl, removeUploadedFile } from "../../lib/upload.js";
 import {
   filesToAttachments,
@@ -422,6 +435,9 @@ function tariffToJson(t: {
   currency: string;
   sortOrder: number;
   lavatopOfferId?: string | null;
+  locations?: string | null; // T11+T12 (11.05.2026)
+  menuEmoji?: string | null; // T16 (12.05.2026) — эмодзи в главном меню бота
+  purchaseCooldownDays?: number | null; // T-cooldown (13.05.2026) — кулдаун покупки тарифа в днях
   createdAt: Date;
   updatedAt: Date;
   priceOptions?: { id: string; durationDays: number; price: number; sortOrder: number }[];
@@ -446,6 +462,12 @@ function tariffToJson(t: {
     currency: t.currency,
     sortOrder: t.sortOrder,
     lavatopOfferId: t.lavatopOfferId ?? null,
+    // T11+T12 (11.05.2026) — для админки чтобы загружать в textarea при редактировании.
+    locations: t.locations ?? null,
+    // T16 (12.05.2026) — эмодзи-префикс в главном меню бота перед названием подписки.
+    menuEmoji: t.menuEmoji ?? null,
+    // T-cooldown (13.05.2026) — кулдаун покупки тарифа в днях (null = без ограничения).
+    purchaseCooldownDays: t.purchaseCooldownDays ?? null,
     priceOptions: (t.priceOptions ?? []).map((o) => ({
       id: o.id,
       durationDays: o.durationDays,
@@ -559,7 +581,8 @@ adminRouter.delete("/tariff-categories/:id", async (req, res) => {
 
 // ——— Тарифы ———
 const tariffIdSchema = z.object({ id: z.string().min(1) });
-const TRAFFIC_RESET_MODES = ["no_reset", "on_purchase", "monthly", "monthly_rolling"] as const;
+// добавлен "carry_over" — перенос остатка трафика.
+const TRAFFIC_RESET_MODES = ["no_reset", "carry_over", "on_purchase", "monthly", "monthly_rolling"] as const;
 const priceOptionInputSchema = z.object({
   durationDays: z.number().int().min(1).max(3650),
   price: z.number().min(0),
@@ -587,6 +610,12 @@ const createTariffSchema = z.object({
   sortOrder: z.number().int().optional(),
   /** UUID оффера в Lava.top для этого тарифа. При оплате через Lava.top создаётся MONTHLY-подписка. */
   lavatopOfferId: z.string().max(200).nullable().optional(),
+  /** T11+T12 (11.05.2026) — rich-text список локаций тарифа (для бота кнопка «🌐 Локации»). */
+  locations: z.string().max(10000).nullable().optional(),
+  /** T16 (12.05.2026) — эмодзи в главном меню бота. */
+  menuEmoji: z.string().max(16).nullable().optional(),
+  /** T-cooldown (13.05.2026) — кулдаун покупки тарифа (дней). null/0 = без ограничения. */
+  purchaseCooldownDays: z.number().int().min(0).max(3650).nullable().optional(),
   priceOptions: z.array(priceOptionInputSchema).min(1).max(20).optional(),
 });
 const updateTariffSchema = z.object({
@@ -604,6 +633,12 @@ const updateTariffSchema = z.object({
   price: z.number().min(0).optional(),
   currency: z.string().max(10).optional(),
   lavatopOfferId: z.string().max(200).nullable().optional(),
+  /** T11+T12 (11.05.2026) — rich-text список локаций. */
+  locations: z.string().max(10000).nullable().optional(),
+  /** T16 (12.05.2026) — эмодзи в главном меню бота. */
+  menuEmoji: z.string().max(16).nullable().optional(),
+  /** T-cooldown (13.05.2026) — кулдаун покупки тарифа (дней). null/0 = без ограничения. */
+  purchaseCooldownDays: z.number().int().min(0).max(3650).nullable().optional(),
   sortOrder: z.number().int().optional(),
   priceOptions: z.array(priceOptionInputSchema).min(1).max(20).optional(),
 });
@@ -658,6 +693,14 @@ adminRouter.post("/tariffs", async (req, res) => {
       currency: (body.data.currency ?? "usd").toLowerCase(),
       sortOrder: body.data.sortOrder ?? 0,
       lavatopOfferId: body.data.lavatopOfferId?.trim() || null,
+      // T11+T12 (11.05.2026) — rich-text локаций тарифа.
+      locations: body.data.locations?.trim() || null,
+      // T16 (12.05.2026) — эмодзи в главном меню бота.
+      menuEmoji: body.data.menuEmoji?.trim() || null,
+      // T-cooldown (13.05.2026) — кулдаун покупки тарифа (null/0 = без ограничения).
+      purchaseCooldownDays: body.data.purchaseCooldownDays && body.data.purchaseCooldownDays > 0
+        ? body.data.purchaseCooldownDays
+        : null,
       priceOptions: body.data.priceOptions
         ? {
           create: body.data.priceOptions.map((o, idx) => ({
@@ -681,7 +724,7 @@ adminRouter.patch("/tariffs/:id", async (req, res) => {
   if (!idParse.success) return res.status(400).json({ message: "Invalid id" });
   const body = updateTariffSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ message: "Неверные данные", errors: body.error.flatten() });
-  const data: { name?: string; description?: string | null; durationDays?: number; internalSquadUuids?: string[]; trafficLimitBytes?: bigint | null; trafficResetMode?: string; deviceLimit?: number | null; includedDevices?: number; pricePerExtraDevice?: number; maxExtraDevices?: number; deviceDiscountTiers?: { minExtraDevices: number; discountPercent: number }[]; price?: number; currency?: string; sortOrder?: number; lavatopOfferId?: string | null } = {};
+  const data: { name?: string; description?: string | null; durationDays?: number; internalSquadUuids?: string[]; trafficLimitBytes?: bigint | null; trafficResetMode?: string; deviceLimit?: number | null; includedDevices?: number; pricePerExtraDevice?: number; maxExtraDevices?: number; deviceDiscountTiers?: { minExtraDevices: number; discountPercent: number }[]; price?: number; currency?: string; sortOrder?: number; lavatopOfferId?: string | null; locations?: string | null; menuEmoji?: string | null; purchaseCooldownDays?: number | null } = {};
   if (body.data.name != null) data.name = body.data.name;
   if (body.data.description !== undefined) data.description = body.data.description ?? null;
   if (body.data.internalSquadUuids != null) data.internalSquadUuids = body.data.internalSquadUuids;
@@ -695,6 +738,16 @@ adminRouter.patch("/tariffs/:id", async (req, res) => {
   if (body.data.currency !== undefined) data.currency = body.data.currency.toLowerCase();
   if (body.data.sortOrder != null) data.sortOrder = body.data.sortOrder;
   if (body.data.lavatopOfferId !== undefined) data.lavatopOfferId = body.data.lavatopOfferId?.trim() || null;
+  // T11+T12 (11.05.2026) — обновление локаций тарифа.
+  if (body.data.locations !== undefined) data.locations = body.data.locations?.trim() || null;
+  // T16 (12.05.2026) — обновление эмодзи в главном меню бота.
+  if (body.data.menuEmoji !== undefined) data.menuEmoji = body.data.menuEmoji?.trim() || null;
+  // T-cooldown (13.05.2026) — обновление кулдауна покупки (null/0 = без ограничения).
+  if (body.data.purchaseCooldownDays !== undefined) {
+    data.purchaseCooldownDays = body.data.purchaseCooldownDays && body.data.purchaseCooldownDays > 0
+      ? body.data.purchaseCooldownDays
+      : null;
+  }
   // Если priceOptions переданы — синхронизируем legacy поля с минимальной опцией.
   if (body.data.priceOptions && body.data.priceOptions.length > 0) {
     const sorted = [...body.data.priceOptions].sort((a, b) => a.price - b.price);
@@ -733,6 +786,251 @@ adminRouter.delete("/tariffs/:id", async (req, res) => {
   const idParse = tariffIdSchema.safeParse({ id: req.params.id });
   if (!idParse.success) return res.status(400).json({ message: "Invalid id" });
   await prisma.tariff.delete({ where: { id: idParse.data.id } });
+  return res.json({ success: true });
+});
+
+// ─── CRUD для Trial-пресетов ──────────────────
+// Каждый триал привязан к одному из тарифов (наследует squads/devices/traffic).
+// Длительность задаётся отдельно. Один клиент = одна активация каждого триала.
+
+const trialIdSchema = z.object({ id: z.string().min(1) });
+
+const createTrialSchema = z.object({
+  name: z.string().min(1).max(255),
+  tariffId: z.string().min(1),
+  durationDays: z.number().int().min(1).max(365),
+  /** опциональный лимит трафика триала в байтах (null = из тарифа). */
+  trafficLimitBytes: z.number().int().nonnegative().nullable().optional(),
+  enabled: z.boolean().optional(),
+  sortOrder: z.number().int().optional(),
+  description: z.string().max(2000).nullable().optional(),
+});
+
+const updateTrialSchema = z.object({
+  name: z.string().min(1).max(255).optional(),
+  tariffId: z.string().min(1).optional(),
+  durationDays: z.number().int().min(1).max(365).optional(),
+  /** опциональный лимит трафика триала в байтах (null = из тарифа). */
+  trafficLimitBytes: z.number().int().nonnegative().nullable().optional(),
+  enabled: z.boolean().optional(),
+  sortOrder: z.number().int().optional(),
+  description: z.string().max(2000).nullable().optional(),
+});
+
+function trialToJson(t: {
+  id: string;
+  name: string;
+  tariffId: string;
+  durationDays: number;
+  trafficLimitBytes?: bigint | null;
+  enabled: boolean;
+  sortOrder: number;
+  description: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  tariff?: { id: string; name: string } | null;
+}) {
+  return {
+    id: t.id,
+    name: t.name,
+    tariffId: t.tariffId,
+    durationDays: t.durationDays,
+    // T16 (12.05.2026) — BigInt → number для JSON; null = используется лимит тарифа.
+    trafficLimitBytes: t.trafficLimitBytes != null ? Number(t.trafficLimitBytes) : null,
+    enabled: t.enabled,
+    sortOrder: t.sortOrder,
+    description: t.description,
+    tariffName: t.tariff?.name ?? null,
+    createdAt: t.createdAt.toISOString(),
+    updatedAt: t.updatedAt.toISOString(),
+  };
+}
+
+// админ-эндпоинты для withdrawal_requests (USDT TRC20).
+// Approve → клиенту приходит уведомление в Telegram. Reject → возвращаем баланс.
+adminRouter.get("/withdrawals", async (req, res) => {
+  const status = typeof req.query.status === "string" ? req.query.status.toUpperCase() : null;
+  const where = status && ["PENDING", "APPROVED", "REJECTED"].includes(status) ? { status } : {};
+  const items = await prisma.withdrawalRequest.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    take: 200,
+    include: { client: { select: { id: true, email: true, telegramId: true, telegramUsername: true } } },
+  });
+  return res.json({ items });
+});
+
+adminRouter.post("/withdrawals/:id/approve", async (req, res) => {
+  const id = req.params.id;
+  const wr = await prisma.withdrawalRequest.findUnique({ where: { id } });
+  if (!wr) return res.status(404).json({ message: "Заявка не найдена" });
+  if (wr.status !== "PENDING") return res.status(400).json({ message: "Заявка уже обработана" });
+  await prisma.withdrawalRequest.update({
+    where: { id },
+    data: { status: "APPROVED", processedAt: new Date(), adminComment: typeof req.body?.comment === "string" ? req.body.comment.slice(0, 500) : null },
+  });
+  // Notify клиенту.
+  const { notifyClientAboutWithdrawalApproved } = await import("../notification/telegram-notify.service.js");
+  await notifyClientAboutWithdrawalApproved(id).catch(() => {});
+  return res.json({ message: "Заявка одобрена. Клиенту отправлено уведомление." });
+});
+
+adminRouter.post("/withdrawals/:id/reject", async (req, res) => {
+  const id = req.params.id;
+  const wr = await prisma.withdrawalRequest.findUnique({ where: { id } });
+  if (!wr) return res.status(404).json({ message: "Заявка не найдена" });
+  if (wr.status !== "PENDING") return res.status(400).json({ message: "Заявка уже обработана" });
+  // Возвращаем баланс клиенту.
+  await prisma.$transaction([
+    prisma.withdrawalRequest.update({
+      where: { id },
+      data: { status: "REJECTED", processedAt: new Date(), adminComment: typeof req.body?.comment === "string" ? req.body.comment.slice(0, 500) : null },
+    }),
+    prisma.client.update({ where: { id: wr.clientId }, data: { balance: { increment: wr.amount } } }),
+  ]);
+  return res.json({ message: "Заявка отклонена. Баланс возвращён клиенту." });
+});
+
+// CRUD для шаблонов уведомлений автосписания.
+// Cron `auto-renew.cron.ts` использует эти шаблоны при отправке нотификаций клиенту.
+const autoRenewNotifSchema = z.object({
+  name: z.string().min(1).max(120),
+  triggerType: z.enum(["UPCOMING", "SUCCESS", "FAILED", "RETRY", "EXPIRED"]),
+  offsetMinutes: z.number().int().min(0).max(60 * 24 * 30), // до 30 дней
+  messageText: z.string().min(1).max(4000),
+  enabled: z.boolean().optional(),
+  sortOrder: z.number().int().optional(),
+});
+
+adminRouter.get("/auto-renew-notifications", async (_req, res) => {
+  const list = await prisma.autoRenewNotification.findMany({
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+  });
+  return res.json({
+    items: list.map((n) => ({
+      id: n.id,
+      name: n.name,
+      triggerType: n.triggerType,
+      offsetMinutes: n.offsetMinutes,
+      messageText: n.messageText,
+      enabled: n.enabled,
+      sortOrder: n.sortOrder,
+      createdAt: n.createdAt.toISOString(),
+      updatedAt: n.updatedAt.toISOString(),
+    })),
+  });
+});
+
+adminRouter.post("/auto-renew-notifications", async (req, res) => {
+  const parsed = autoRenewNotifSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid input", errors: parsed.error.flatten() });
+  const created = await prisma.autoRenewNotification.create({
+    data: {
+      name: parsed.data.name,
+      triggerType: parsed.data.triggerType,
+      offsetMinutes: parsed.data.offsetMinutes,
+      messageText: parsed.data.messageText,
+      enabled: parsed.data.enabled ?? true,
+      sortOrder: parsed.data.sortOrder ?? 0,
+    },
+  });
+  return res.status(201).json({ id: created.id });
+});
+
+adminRouter.patch("/auto-renew-notifications/:id", async (req, res) => {
+  const parsed = autoRenewNotifSchema.partial().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid input", errors: parsed.error.flatten() });
+  try {
+    await prisma.autoRenewNotification.update({
+      where: { id: req.params.id },
+      data: parsed.data,
+    });
+    return res.json({ ok: true });
+  } catch {
+    return res.status(404).json({ message: "Шаблон не найден" });
+  }
+});
+
+adminRouter.delete("/auto-renew-notifications/:id", async (req, res) => {
+  try {
+    await prisma.autoRenewNotification.delete({ where: { id: req.params.id } });
+    return res.json({ ok: true });
+  } catch {
+    return res.status(404).json({ message: "Шаблон не найден" });
+  }
+});
+
+adminRouter.get("/trials", async (_req, res) => {
+  const list = await prisma.trial.findMany({
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+    include: { tariff: { select: { id: true, name: true } } },
+  });
+  return res.json({ items: list.map(trialToJson) });
+});
+
+adminRouter.post("/trials", async (req, res) => {
+  const body = createTrialSchema.safeParse(req.body);
+  if (!body.success) return res.status(400).json({ message: "Неверные данные", errors: body.error.flatten() });
+  const tariff = await prisma.tariff.findUnique({ where: { id: body.data.tariffId } });
+  if (!tariff) return res.status(400).json({ message: "Тариф не найден" });
+  const created = await prisma.trial.create({
+    data: {
+      name: body.data.name,
+      tariffId: body.data.tariffId,
+      durationDays: body.data.durationDays,
+      // T16 (12.05.2026) — отдельный лимит трафика триала (null = из тарифа).
+      trafficLimitBytes: body.data.trafficLimitBytes != null ? BigInt(body.data.trafficLimitBytes) : null,
+      enabled: body.data.enabled ?? true,
+      sortOrder: body.data.sortOrder ?? 0,
+      description: body.data.description ?? null,
+    },
+    include: { tariff: { select: { id: true, name: true } } },
+  });
+  return res.status(201).json(trialToJson(created));
+});
+
+adminRouter.patch("/trials/:id", async (req, res) => {
+  const idParse = trialIdSchema.safeParse({ id: req.params.id });
+  if (!idParse.success) return res.status(400).json({ message: "Invalid id" });
+  const body = updateTrialSchema.safeParse(req.body);
+  if (!body.success) return res.status(400).json({ message: "Неверные данные", errors: body.error.flatten() });
+  if (body.data.tariffId) {
+    const tariff = await prisma.tariff.findUnique({ where: { id: body.data.tariffId } });
+    if (!tariff) return res.status(400).json({ message: "Тариф не найден" });
+  }
+  // T16 (12.05.2026) — BigInt из number / null.
+  const updateData: {
+    name?: string;
+    tariffId?: string;
+    durationDays?: number;
+    trafficLimitBytes?: bigint | null;
+    enabled?: boolean;
+    sortOrder?: number;
+    description?: string | null;
+  } = {};
+  if (body.data.name !== undefined) updateData.name = body.data.name;
+  if (body.data.tariffId !== undefined) updateData.tariffId = body.data.tariffId;
+  if (body.data.durationDays !== undefined) updateData.durationDays = body.data.durationDays;
+  if (body.data.trafficLimitBytes !== undefined) {
+    updateData.trafficLimitBytes = body.data.trafficLimitBytes != null ? BigInt(body.data.trafficLimitBytes) : null;
+  }
+  if (body.data.enabled !== undefined) updateData.enabled = body.data.enabled;
+  if (body.data.sortOrder !== undefined) updateData.sortOrder = body.data.sortOrder;
+  if (body.data.description !== undefined) updateData.description = body.data.description ?? null;
+  const updated = await prisma.trial.update({
+    where: { id: idParse.data.id },
+    data: updateData,
+    include: { tariff: { select: { id: true, name: true } } },
+  });
+  return res.json(trialToJson(updated));
+});
+
+adminRouter.delete("/trials/:id", async (req, res) => {
+  const idParse = trialIdSchema.safeParse({ id: req.params.id });
+  if (!idParse.success) return res.status(400).json({ message: "Invalid id" });
+  // ON DELETE CASCADE на client_trial_usages — записи использования удалятся автоматически.
+  // SecondarySubscription.trial_id (ON DELETE SET NULL) — оставит подписки клиентов живыми.
+  await prisma.trial.delete({ where: { id: idParse.data.id } });
   return res.json({ success: true });
 });
 
@@ -787,6 +1085,7 @@ adminRouter.get("/clients", async (req, res) => {
           blockReason: true,
           referralPercent: true,
           personalDiscountPercent: true,
+          personalDiscountIsOneTime: true,
           createdAt: true,
           _count: { select: { referrals: true } },
         },
@@ -914,8 +1213,12 @@ adminRouter.get("/clients/:id", async (req, res) => {
       blockReason: true,
       referralPercent: true,
       personalDiscountPercent: true,
+      personalDiscountIsOneTime: true,
       createdAt: true,
       _count: { select: { referrals: true } },
+      // текущий реферер для inline-редактора в карточке клиента.
+      referrerId: true,
+      referrer: { select: { id: true, email: true, telegramUsername: true, telegramId: true, referralCode: true } },
     },
   });
   if (!client) return res.status(404).json({ message: "Клиент не найден" });
@@ -931,6 +1234,9 @@ const updateClientSchema = z.object({
   blockReason: z.string().nullable().optional(),
   referralPercent: z.number().min(0).max(100).nullable().optional(),
   personalDiscountPercent: z.number().min(0).max(100).nullable().optional(),
+  // флаг одноразовости персональной скидки.
+  // true → скидка сгорит после первой продуктовой покупки (mark-paid). false → бессрочно.
+  personalDiscountIsOneTime: z.boolean().optional(),
 });
 
 adminRouter.patch("/clients/:id", async (req, res) => {
@@ -949,6 +1255,7 @@ adminRouter.patch("/clients/:id", async (req, res) => {
   if (body.data.blockReason !== undefined) updates.blockReason = body.data.blockReason;
   if (body.data.referralPercent !== undefined) updates.referralPercent = body.data.referralPercent;
   if (body.data.personalDiscountPercent !== undefined) updates.personalDiscountPercent = body.data.personalDiscountPercent;
+  if (body.data.personalDiscountIsOneTime !== undefined) updates.personalDiscountIsOneTime = body.data.personalDiscountIsOneTime;
   const updated = await prisma.client.update({
     where: { id: parsed.data.id },
     data: updates,
@@ -967,6 +1274,7 @@ adminRouter.patch("/clients/:id", async (req, res) => {
       blockReason: true,
       referralPercent: true,
       personalDiscountPercent: true,
+      personalDiscountIsOneTime: true,
       createdAt: true,
       _count: { select: { referrals: true } },
     },
@@ -998,6 +1306,10 @@ adminRouter.delete("/clients/:id", async (req, res) => {
   if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
   const client = await prisma.client.findUnique({ where: { id: parsed.data.id }, select: { id: true, remnawaveUuid: true, telegramId: true, email: true } });
   if (!client) return res.status(404).json({ message: "Клиент не найден" });
+
+  // T (11.05.2026): удалять ВСЕ Remna-юзеры клиента,
+  // включая дополнительные подписки (secondary_subscriptions с собственным remnawave_uuid).
+  // Раньше удалялся только primary, secondary висели в Remna навсегда.
   if (isRemnaConfigured()) {
     let remnaUuid = client.remnawaveUuid;
 
@@ -1014,21 +1326,316 @@ adminRouter.delete("/clients/:id", async (req, res) => {
     if (remnaUuid) {
       const remnaRes = await remnaDeleteUser(remnaUuid);
       if (remnaRes.error) {
-        console.warn(`[admin delete client] Remna delete failed for ${remnaUuid}:`, remnaRes.error);
+        console.warn(`[admin delete client] Remna delete primary failed for ${remnaUuid}:`, remnaRes.error);
       }
     }
+
+    // Удаляем все secondary-subscriptions этого клиента из Remna.
+    // (БД-каскад удалит сами строки; но Remna-юзеров надо чистить через API).
+    const secondaries = await prisma.subscription.findMany({
+      where: { ownerId: parsed.data.id, remnawaveUuid: { not: null } },
+      select: { id: true, remnawaveUuid: true, subscriptionIndex: true },
+    });
+    let deletedCount = 0;
+    let failedCount = 0;
+    for (const sec of secondaries) {
+      if (!sec.remnawaveUuid) continue;
+      try {
+        const r = await remnaDeleteUser(sec.remnawaveUuid);
+        if (r.error) {
+          failedCount++;
+          console.warn(`[admin delete client] Remna delete secondary #${sec.subscriptionIndex} (${sec.remnawaveUuid}) failed:`, r.error);
+        } else {
+          deletedCount++;
+        }
+      } catch (e) {
+        failedCount++;
+        console.warn(`[admin delete client] Remna delete secondary #${sec.subscriptionIndex} threw:`, e);
+      }
+    }
+    if (secondaries.length > 0) {
+      console.log(`[admin delete client ${parsed.data.id}] Remna secondary cleanup: ${deletedCount} deleted, ${failedCount} failed (of ${secondaries.length})`);
+    }
   }
+
+  // Удаление из БД: cascade удалит secondary_subscriptions, payments (через FK), trial_usages и т.д.
   await prisma.client.delete({ where: { id: parsed.data.id } });
   return res.json({ success: true });
 });
 
+// сначала смотрим primary-подписку (subscriptionIndex=0),
+// fallback на legacy Client.remnawaveUuid. После унификации UUID у новых клиентов живёт в
+// Subscription, legacy field остался ради старых юзеров до бэкфилла.
 async function getClientRemnaUuid(clientId: string): Promise<string | null> {
+  const primary = await prisma.subscription.findUnique({
+    where: { ownerId_subscriptionIndex: { ownerId: clientId, subscriptionIndex: 0 } },
+    select: { remnawaveUuid: true },
+  });
+  if (primary?.remnawaveUuid) return primary.remnawaveUuid;
   const client = await prisma.client.findUnique({
     where: { id: clientId },
     select: { remnawaveUuid: true },
   });
   return client?.remnawaveUuid ?? null;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Массовые операции над клиентом.
+// Работают по всем подпискам клиента (Subscription[*]) — после унификации.
+// Возвращают структурированный отчёт { ok, skipped, failed, items[] }.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Composite «Отключить клиента»: бан в боте + disable VPN на всех подписках + autoRenew off. */
+adminRouter.post("/clients/:id/disable", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+  const report = await bulkDisableClient(parsed.data.id);
+  return res.json(report);
+}));
+
+/** Composite «Включить клиента»: разбан + Enable Remna для неистёкших подписок. */
+adminRouter.post("/clients/:id/enable", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+  const report = await bulkEnableClient(parsed.data.id);
+  return res.json(report);
+}));
+
+/** Только Remna: disable всех подписок клиента (бан в боте не трогаем). */
+adminRouter.post("/clients/:id/disable-all", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+  return res.json(await disableAllSubscriptionsInRemna(parsed.data.id));
+}));
+
+adminRouter.post("/clients/:id/enable-all", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+  return res.json(await enableAllSubscriptionsInRemna(parsed.data.id));
+}));
+
+/** Сбросить трафик на всех подписках клиента. */
+adminRouter.post("/clients/:id/reset-all-traffic", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+  return res.json(await resetAllSubscriptionsTraffic(parsed.data.id));
+}));
+
+/** Перевыпустить subscription URL на всех подписках клиента. */
+adminRouter.post("/clients/:id/revoke-all-subscriptions", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+  return res.json(await revokeAllSubscriptionsUrls(parsed.data.id));
+}));
+
+/** Push БД → Remna для всех подписок (выровнять лимиты/сквады по тарифу). */
+adminRouter.post("/clients/:id/sync-push", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+  return res.json(await syncAllSubscriptionsToRemna(parsed.data.id));
+}));
+
+/** Pull Remna → БД (выровнять кеш в БД + найти лишних в Remna). */
+adminRouter.post("/clients/:id/sync-pull", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+  return res.json(await syncAllSubscriptionsFromRemna(parsed.data.id));
+}));
+
+/** Полный sync = Pull + Push (Remna → БД, потом БД → Remna). */
+adminRouter.post("/clients/:id/sync", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+  const pullReport = await syncAllSubscriptionsFromRemna(parsed.data.id);
+  const pushReport = await syncAllSubscriptionsToRemna(parsed.data.id);
+  return res.json({ pull: pullReport, push: pushReport });
+}));
+
+/** Удалить все подписки клиента (DB + Remna). Клиент остаётся. */
+adminRouter.post("/clients/:id/wipe-subscriptions", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+  return res.json(await wipeClientSubscriptions(parsed.data.id));
+}));
+
+/** Audit (read-only): diff БД vs Remna. */
+adminRouter.get("/clients/:id/audit", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+  return res.json(await auditClientSubscriptions(parsed.data.id));
+}));
+
+/**
+ * устройства со ВСЕХ подписок клиента.
+ * Каждая `Subscription[*]` имеет свой Remna-юзер → свой набор HWID-устройств.
+ * Возвращаем плоский список устройств с пометкой откуда (subscriptionIndex + tariff).
+ */
+adminRouter.get("/clients/:id/all-devices", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+
+  // УНИФИЦИРОВАНО — ВСЕ устройства берутся только
+  // из таблицы Subscription. client.remnawaveUuid — legacy, не учитывается (миграция:
+  // root-подписка должна иметь Subscription-запись с subscriptionIndex=0).
+  // Дедуп по UUID — на случай если две Subscription указывают на один Remna-юзер.
+  const subs = await prisma.subscription.findMany({
+    where: { ownerId: parsed.data.id },
+    orderBy: { subscriptionIndex: "asc" },
+    select: {
+      id: true,
+      subscriptionIndex: true,
+      remnawaveUuid: true,
+      tariff: { select: { name: true, menuEmoji: true } },
+    },
+  });
+
+  const groups: Array<{
+    subscriptionId: string;
+    subscriptionIndex: number;
+    tariffName: string | null;
+    tariffEmoji: string | null;
+    remnawaveUuid: string | null;
+    devices: unknown[];
+    deviceLimit: number | null;
+  }> = [];
+  let totalDevices = 0;
+  const seenUuids = new Set<string>();
+
+  for (const sub of subs) {
+    if (!sub.remnawaveUuid) {
+      groups.push({
+        subscriptionId: sub.id,
+        subscriptionIndex: sub.subscriptionIndex,
+        tariffName: sub.tariff?.name ?? null,
+        tariffEmoji: sub.tariff?.menuEmoji ?? null,
+        remnawaveUuid: null,
+        devices: [],
+        deviceLimit: null,
+      });
+      continue;
+    }
+    if (seenUuids.has(sub.remnawaveUuid)) continue; // дедуп
+    seenUuids.add(sub.remnawaveUuid);
+    const r = await remnaGetUserHwidDevices(sub.remnawaveUuid);
+    const d = (r.data as Record<string, unknown> | null)?.response as Record<string, unknown> | undefined;
+    const devices = Array.isArray(d?.devices) ? (d.devices as unknown[]) : [];
+    totalDevices += devices.length;
+
+    let deviceLimit: number | null = null;
+    const userRes = await remnaGetUser(sub.remnawaveUuid);
+    const u = (userRes.data as Record<string, unknown> | null);
+    const inner = (u?.response ?? u) as Record<string, unknown> | undefined;
+    if (typeof inner?.hwidDeviceLimit === "number") deviceLimit = inner.hwidDeviceLimit;
+
+    groups.push({
+      subscriptionId: sub.id,
+      subscriptionIndex: sub.subscriptionIndex,
+      tariffName: sub.tariff?.name ?? null,
+      tariffEmoji: sub.tariff?.menuEmoji ?? null,
+      remnawaveUuid: sub.remnawaveUuid,
+      devices,
+      deviceLimit,
+    });
+  }
+  return res.json({ groups, total: totalDevices });
+}));
+
+/**
+ * сводка по всем подпискам клиента + Remna-данные.
+ * Используется во вкладке «Remna» — показывает таблицу со всеми подписками клиента и
+ * параметрами их Remna-юзеров: expireAt, traffic used/limit, deviceLimit, статус, squads.
+ */
+adminRouter.get("/clients/:id/subscriptions-overview", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+
+  const subs = await prisma.subscription.findMany({
+    where: { ownerId: parsed.data.id },
+    orderBy: { subscriptionIndex: "asc" },
+    select: {
+      id: true,
+      subscriptionIndex: true,
+      remnawaveUuid: true,
+      tariffId: true,
+      trialId: true,
+      purchasedAsGift: true,
+      giftStatus: true,
+      autoRenewEnabled: true,
+      customPrice: true,
+      tariff: { select: { name: true, menuEmoji: true, durationDays: true } },
+      trial: { select: { name: true, durationDays: true } },
+    },
+  });
+
+  const items = [] as Array<{
+    subscriptionId: string;
+    subscriptionIndex: number;
+    tariffName: string | null;
+    tariffEmoji: string | null;
+    isTrial: boolean;
+    trialName: string | null;
+    purchasedAsGift: boolean;
+    giftStatus: string | null;
+    autoRenewEnabled: boolean;
+    customPrice: number | null;
+    remnawaveUuid: string | null;
+    remna: {
+      username: string | null;
+      status: string | null;
+      expireAt: string | null;
+      trafficLimitBytes: number | null;
+      trafficUsedBytes: number | null;
+      hwidDeviceLimit: number | null;
+      deviceCount: number;
+      activeSquadsCount: number;
+      subscriptionUrl: string | null;
+      onlineAt: string | null;
+    } | null;
+  }>;
+
+  for (const sub of subs) {
+    let remna: typeof items[number]["remna"] = null;
+    if (sub.remnawaveUuid) {
+      const r = await remnaGetUser(sub.remnawaveUuid);
+      const u = (r.data as Record<string, unknown> | null);
+      const inner = (u?.response ?? u) as Record<string, unknown> | undefined;
+      const traffic = (inner?.userTraffic ?? {}) as Record<string, unknown>;
+      const squads = Array.isArray(inner?.activeInternalSquads) ? (inner.activeInternalSquads as unknown[]) : [];
+      const devicesRes = await remnaGetUserHwidDevices(sub.remnawaveUuid).catch(() => ({ data: null }));
+      const d = (devicesRes.data as Record<string, unknown> | null)?.response as Record<string, unknown> | undefined;
+      const devices = Array.isArray(d?.devices) ? (d.devices as unknown[]) : [];
+      remna = {
+        username: typeof inner?.username === "string" ? inner.username : null,
+        status: typeof inner?.status === "string" ? inner.status : null,
+        expireAt: typeof inner?.expireAt === "string" ? inner.expireAt : null,
+        trafficLimitBytes: typeof inner?.trafficLimitBytes === "number" ? inner.trafficLimitBytes : null,
+        trafficUsedBytes: typeof traffic?.usedTrafficBytes === "number" ? traffic.usedTrafficBytes : null,
+        hwidDeviceLimit: typeof inner?.hwidDeviceLimit === "number" ? inner.hwidDeviceLimit : null,
+        deviceCount: devices.length,
+        activeSquadsCount: squads.length,
+        subscriptionUrl: typeof inner?.subscriptionUrl === "string" ? inner.subscriptionUrl : null,
+        onlineAt: typeof inner?.onlineAt === "string" ? inner.onlineAt : null,
+      };
+    }
+    items.push({
+      subscriptionId: sub.id,
+      subscriptionIndex: sub.subscriptionIndex,
+      tariffName: sub.tariff?.name ?? null,
+      tariffEmoji: sub.tariff?.menuEmoji ?? null,
+      isTrial: sub.trialId != null,
+      trialName: sub.trial?.name ?? null,
+      purchasedAsGift: sub.purchasedAsGift,
+      giftStatus: sub.giftStatus,
+      autoRenewEnabled: sub.autoRenewEnabled,
+      customPrice: sub.customPrice,
+      remnawaveUuid: sub.remnawaveUuid,
+      remna,
+    });
+  }
+  return res.json({ items });
+}));
+
+
 
 adminRouter.get("/clients/:id/remna", async (req, res) => {
   const parsed = clientIdParam.safeParse(req.params);
@@ -1088,6 +1695,19 @@ adminRouter.patch("/clients/:id/remna", async (req, res) => {
   Object.assign(patchBody, body.data);
   const result = await remnaUpdateUser(patchBody);
   if (result.error) return res.status(result.status >= 400 ? result.status : 500).json({ message: result.error });
+  // после успешного PATCH в Remna зеркалим expireAt
+  // в БД (Subscription.expireAt у любой подписки с этим uuid). Раньше изменения
+  // через admin UI расходились с БД.
+  if (body.data.expireAt) {
+    try {
+      await prisma.subscription.updateMany({
+        where: { ownerId: parsed.data.id, remnawaveUuid: remnaUuid },
+        data: { expireAt: new Date(body.data.expireAt) },
+      });
+    } catch (e) {
+      console.error("[admin/clients/remna] expireAt DB sync failed:", e);
+    }
+  }
   return res.json(result.data ?? {});
 });
 
@@ -1161,6 +1781,15 @@ const grantTariffSchema = z.object({
   deviceCount: z.number().int().min(0).max(100).optional(),
   note: z.string().max(500).optional(),
   createPaymentRecord: z.boolean().optional(),
+  // override лимита трафика в БАЙТАХ.
+  // Применяется только если у тарифа НЕ безлимит (tariff.trafficLimitBytes > 0).
+  // null/undefined → используется лимит тарифа. 0 → безлимит (можно сделать безлимит из лимитного).
+  trafficLimitBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+  // override длительности в днях. Если задано, перебивает
+  // selectedOption.durationDays / tariff.durationDays. Используется админом для
+  // выдачи нестандартной длительности (например, компенсация = 7 дней).
+  // Диапазон 1..3650 (10 лет максимум, sanity-cap).
+  customDurationDays: z.number().int().min(1).max(3650).optional(),
 });
 
 /**
@@ -1176,7 +1805,7 @@ adminRouter.post("/clients/:id/grant-tariff", async (req, res) => {
   if (!body.success) return res.status(400).json({ message: "Invalid input" });
 
   const clientId = parsed.data.id;
-  const { tariffId, tariffPriceOptionId, deviceCount, note, createPaymentRecord = true } = body.data;
+  const { tariffId, tariffPriceOptionId, deviceCount, note, createPaymentRecord = true, trafficLimitBytes: trafficLimitOverride, customDurationDays } = body.data;
 
   const client = await prisma.client.findUnique({
     where: { id: clientId },
@@ -1235,42 +1864,70 @@ adminRouter.post("/clients/:id/grant-tariff", async (req, res) => {
     }
   }
 
-  const activation = await activateTariffForClient(
-    client,
-    {
-      id: tariff.id,
-      durationDays: selectedOption?.durationDays ?? tariff.durationDays,
-      trafficLimitBytes: tariff.trafficLimitBytes,
-      deviceLimit: tariff.deviceLimit,
-      includedDevices: tariff.includedDevices,
-      pricePerExtraDevice: tariff.pricePerExtraDevice,
-      maxExtraDevices: tariff.maxExtraDevices,
-      deviceDiscountTiers: tariff.deviceDiscountTiers,
-      internalSquadUuids: tariff.internalSquadUuids,
-      trafficResetMode: tariff.trafficResetMode ?? undefined,
-      price: selectedOption?.price ?? tariff.price,
-    },
-    selectedOption ? { id: selectedOption.id, durationDays: selectedOption.durationDays, price: selectedOption.price } : undefined,
-    effectiveExtras,
-  );
+  // админская выдача = НОВАЯ подписка клиенту (НЕ подарок).
+  // можно переопределить trafficLimitBytes (только если у тарифа не безлимит).
+  // Применяется ТОЛЬКО для лимитных тарифов: если у тарифа уже безлимит — override игнорируем.
+  const hasTariffLimit = tariff.trafficLimitBytes != null && Number(tariff.trafficLimitBytes) > 0;
+  const effectiveTrafficLimit: bigint | null =
+    hasTariffLimit && trafficLimitOverride !== undefined && trafficLimitOverride !== null
+      ? BigInt(trafficLimitOverride)
+      : tariff.trafficLimitBytes;
 
-  if (!activation.ok) {
+  // customDurationDays перебивает выбор опции / legacy fallback.
+  // Полезно если админ хочет выдать нестандартный срок (например, 7 дн. компенсации).
+  const effectiveDurationDays = customDurationDays ?? selectedOption?.durationDays ?? tariff.durationDays;
+
+  const { createAdditionalSubscription } = await import("../gift/gift.service.js");
+  const subResult = await createAdditionalSubscription(clientId, {
+    id: tariff.id,
+    name: tariff.name,
+    price: selectedOption?.price ?? tariff.price,
+    durationDays: effectiveDurationDays,
+    trafficLimitBytes: effectiveTrafficLimit,
+    deviceLimit: tariff.deviceLimit,
+    includedDevices: tariff.includedDevices,
+    internalSquadUuids: tariff.internalSquadUuids,
+    trafficResetMode: tariff.trafficResetMode ?? undefined,
+  }, { skipConfigCheck: true, extraDevices: effectiveExtras, purchasedAsGift: false });
+
+  if (!subResult.ok) {
     if (paymentId) {
       await prisma.payment.update({
         where: { id: paymentId },
-        data: { status: "FAILED", metadata: JSON.stringify({ grantedBy: adminId, note: note ?? null, kind: "admin_grant", error: activation.error }) },
+        data: { status: "FAILED", metadata: JSON.stringify({ grantedBy: adminId, note: note ?? null, kind: "admin_grant", error: subResult.error }) },
       }).catch(() => { /* ignore */ });
     }
-    return res.status(activation.status && activation.status >= 400 ? activation.status : 500).json({
+    return res.status(subResult.status && subResult.status >= 400 ? subResult.status : 500).json({
       ok: false,
-      message: activation.error ?? "Ошибка активации тарифа",
+      message: subResult.error ?? "Ошибка активации тарифа",
     });
+  }
+
+  // T-unify: привязываем Payment к созданной Subscription (для аналитики + auto-renew).
+  if (paymentId) {
+    await prisma.payment.update({
+      where: { id: paymentId },
+      data: { subscriptionId: subResult.data.subscriptionId },
+    }).catch(() => { /* ignore */ });
+    // отправляем клиенту уведомление в Telegram о выдаче подписки
+    // (тот же поток что после обычной оплаты — текст с ссылкой подписки и кнопками).
+    try {
+      const { notifyTariffActivated } = await import("../notification/telegram-notify.service.js");
+      await notifyTariffActivated(clientId, paymentId);
+    } catch (e) {
+      console.error("[admin/grant-tariff] notify client failed:", e);
+    }
   }
 
   return res.json({
     ok: true,
     paymentId,
-    tariff: { id: tariff.id, name: tariff.name, durationDays: tariff.durationDays },
+    subscriptionId: subResult.data.subscriptionId,
+    subscriptionIndex: subResult.data.subscriptionIndex,
+    // возвращаем выбранную опцию длительности,
+    // а не tariff.durationDays (legacy минимум). Раньше success-сообщение всегда показывало 30 дн.
+    // если был customDurationDays, возвращаем именно его.
+    tariff: { id: tariff.id, name: tariff.name, durationDays: effectiveDurationDays },
   });
 });
 
@@ -1332,7 +1989,7 @@ adminRouter.get("/clients/:id/remna/devices", async (req, res) => {
 
 const deleteDeviceSchema = z.object({ hwid: z.string().min(1) });
 
-adminRouter.post("/clients/:id/remna/devices/delete", async (req, res) => {
+adminRouter.post("/clients/:id/remna/devices/delete", requireAction("delete_device"), async (req, res) => {
   const parsed = clientIdParam.safeParse(req.params);
   if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
   const remnaUuid = await getClientRemnaUuid(parsed.data.id);
@@ -1362,6 +2019,11 @@ adminRouter.get("/clients/:id/remna/usage", async (req, res) => {
 adminRouter.get("/settings", asyncRoute(async (_req, res) => {
   const config = await getSystemConfig();
   return res.json(config);
+}));
+
+/** Версия панели — для мониторинга. Под auth, чтобы не светить наружу. */
+adminRouter.get("/version", asyncRoute(async (_req, res) => {
+  return res.json({ version: "5.0.0" });
 }));
 
 /**
@@ -1442,28 +2104,61 @@ adminRouter.get("/lavatop/products", asyncRoute(async (_req, res) => {
   }
 }));
 
-/** Базовый конфиг страницы подписки (subpage-00000000-0000-0000-0000-000000000000.json) для визуального редактора */
-adminRouter.get("/default-subscription-page-config", asyncRoute(async (_req, res) => {
+/**
+ * Базовый конфиг страницы подписки (subpage-00000000-0000-0000-0000-000000000000.json)
+ * для визуального редактора. В Docker файл подмонтирован как volume
+ * (см. docker-compose.yml), поэтому изменения файла на хосте подхватываются
+ * без пересборки контейнера.
+ *
+ * Логика поиска (по убыванию приоритета):
+ *   1. /app/subpage-...json (volume-mount или COPY из образа) — primary
+ *   2. process.cwd()-варианты для dev-окружения (npm run dev из backend/)
+ *   3. /app/defaults/subpage-...json — fallback из образа, если primary
+ *      сломан (пустой каталог при отсутствии файла на хосте, битый JSON и т.п.)
+ *
+ * Кэш на 30 секунд в памяти, чтобы не читать файл при каждом GET.
+ * `?fresh=1` сбрасывает кэш — используется кнопкой «Перезагрузить с сервера» в UI.
+ */
+let _defaultSubpageCache: { data: unknown; ts: number } | null = null;
+const SUBPAGE_CACHE_TTL_MS = 30_000;
+
+async function tryReadJsonFile(filePath: string): Promise<unknown | null> {
+  try {
+    const raw = await readFile(filePath, "utf-8");
+    return JSON.parse(raw) as unknown;
+  } catch {
+    // ENOENT, EISDIR (volume на отсутствующий файл монтируется как пустой каталог),
+    // невалидный JSON — все случаи прозрачно скипаем и идём к следующему кандидату.
+    return null;
+  }
+}
+
+adminRouter.get("/default-subscription-page-config", asyncRoute(async (req, res) => {
+  // ?fresh=1 — принудительный сброс кэша (используется при ручной перезагрузке)
+  const fresh = req.query.fresh === "1" || req.query.fresh === "true";
+  if (!fresh && _defaultSubpageCache && Date.now() - _defaultSubpageCache.ts < SUBPAGE_CACHE_TTL_MS) {
+    return res.json(_defaultSubpageCache.data);
+  }
+
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const fileName = "subpage-00000000-0000-0000-0000-000000000000.json";
   const candidates = [
+    // 1. Primary: /app/subpage-...json (Docker volume-mount или COPY из образа)
     path.join(process.cwd(), fileName),
+    // 2. Dev: запуск из backend/ (npm run dev)
     path.join(process.cwd(), "..", fileName),
     path.join(__dirname, "..", "..", "..", "..", fileName),
     path.join(__dirname, "..", "..", "..", "..", "..", fileName),
+    // 3. Fallback из образа (всегда валидный snapshot версии на момент сборки)
+    path.join(process.cwd(), "defaults", fileName),
+    "/app/defaults/" + fileName,
   ];
-  let lastErr: unknown;
+
   for (const configPath of candidates) {
-    try {
-      const raw = await readFile(configPath, "utf-8");
-      const data = JSON.parse(raw) as unknown;
+    const data = await tryReadJsonFile(configPath);
+    if (data !== null) {
+      _defaultSubpageCache = { data, ts: Date.now() };
       return res.json(data);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException)?.code === "ENOENT") {
-        lastErr = e;
-        continue;
-      }
-      throw e;
     }
   }
   return res.status(404).json({ message: "Default config file not found" });
@@ -1500,6 +2195,8 @@ const updateSettingsSchema = z.object({
   telegramBotUsername: z.string().max(100).nullable().optional(),
   botAdminTelegramIds: z.union([z.string().max(2000), z.array(z.string())]).nullable().optional(),
   notificationTelegramGroupId: z.string().max(100).nullable().optional(),
+  notificationManagersGroupId: z.string().max(100).nullable().optional(),
+  notificationManagersTopicTickets: z.string().max(50).nullable().optional(),
   notificationTopicNewClients: z.string().max(50).nullable().optional(),
   notificationTopicPayments: z.string().max(50).nullable().optional(),
   notificationTopicTickets: z.string().max(50).nullable().optional(),
@@ -1551,6 +2248,8 @@ const updateSettingsSchema = z.object({
   botButtonsPerRow: z.union([z.literal(1), z.literal(2), z.number().int().min(1).max(2)]).optional(),
   botEmojis: z.union([z.string().max(15000), z.record(z.object({ unicode: z.string().max(20).optional(), tgEmojiId: z.string().max(50).optional() }))]).nullable().optional(),
   botBackLabel: z.string().max(200).nullable().optional(),
+  // редактируемый текст шапки «📱 Мои устройства».
+  botDevicesText: z.string().max(8000).nullable().optional(),
   botMenuTexts: z.string().max(8000).nullable().optional(),
   botMenuLineVisibility: z.union([z.string().max(5000), z.record(z.boolean())]).nullable().optional(),
   botInnerButtonStyles: z.union([z.string().max(2000), z.record(z.string())]).nullable().optional(),
@@ -1562,6 +2261,24 @@ const updateSettingsSchema = z.object({
   agreementLink: z.string().max(2000).nullable().optional(),
   offerLink: z.string().max(2000).nullable().optional(),
   instructionsLink: z.string().max(2000).nullable().optional(),
+  // ссылка инструкции по рефералке.
+  referralInstructionsUrl: z.string().max(2000).nullable().optional(),
+  // T11+T13+T14 (11.05.2026) — кастомизация бота
+  refundLink: z.string().max(2000).nullable().optional(),
+  supportHoursFrom: z.string().max(20).nullable().optional(),
+  supportHoursTo: z.string().max(20).nullable().optional(),
+  tgProxyText: z.string().max(8000).nullable().optional(),
+  tgProxyUrlPrimary: z.string().max(2000).nullable().optional(),
+  tgProxyUrlBackup: z.string().max(2000).nullable().optional(),
+  // динамический список TG-прокси-серверов. Заменяет
+  // primary/backup на массив. Каждый элемент: {flag: "🇳🇱", name: "Нидерланды",
+  // url: "tg://proxy?..."}. Хранится как JSON-строка в system_settings.
+  // Старые поля primary/backup остаются для backward compat: бот их использует
+  // как fallback, если массив пуст.
+  tgProxyServers: z.string().max(16000).nullable().optional(),
+  reissueWarningText: z.string().max(4000).nullable().optional(),
+  installSecondDeviceText: z.string().max(8000).nullable().optional(),
+  helpIntroText: z.string().max(8000).nullable().optional(),
   ticketsEnabled: z.boolean().optional(),
   themeAccent: z.string().max(50).optional(),
   allowUserThemeChange: z.boolean().optional(),
@@ -1581,6 +2298,11 @@ const updateSettingsSchema = z.object({
   autoBroadcastCron: z.string().max(100).nullable().optional(),
   adminFrontNotificationsEnabled: z.boolean().optional(),
   skipEmailVerification: z.boolean().optional(),
+  signupProtectionEnabled: z.boolean().optional(),
+  emailDomainBlocklist: z.string().max(10000).optional(),
+  emailPatternBlocklist: z.string().max(10000).optional(),
+  signupMaxPerIpPerHour: z.number().int().min(1).max(1000).optional(),
+  happCryptEnabled: z.boolean().optional(),
   useRemnaSubscriptionPage: z.boolean().optional(),
   aiChatEnabled: z.boolean().optional(),
   customBuildEnabled: z.boolean().optional(),
@@ -1940,10 +2662,19 @@ adminRouter.patch("/settings", async (req, res) => {
       update: { value: val },
     });
   }
+  if (updates.notificationManagersGroupId !== undefined) {
+    const val = (updates.notificationManagersGroupId ?? "").trim() || "";
+    await prisma.systemSetting.upsert({
+      where: { key: "notification_managers_group_id" },
+      create: { key: "notification_managers_group_id", value: val },
+      update: { value: val },
+    });
+  }
   const topicKeys: [keyof typeof updates, string][] = [
     ["notificationTopicNewClients", "notification_topic_new_clients"],
     ["notificationTopicPayments", "notification_topic_payments"],
     ["notificationTopicTickets", "notification_topic_tickets"],
+    ["notificationManagersTopicTickets", "notification_managers_topic_tickets"],
     ["notificationTopicBackups", "notification_topic_backups"],
   ];
   for (const [key, dbKey] of topicKeys) {
@@ -2138,6 +2869,10 @@ adminRouter.patch("/settings", async (req, res) => {
     const val = updates.botBackLabel ?? "";
     await prisma.systemSetting.upsert({ where: { key: "bot_back_label" }, create: { key: "bot_back_label", value: val }, update: { value: val } });
   }
+  if (updates.botDevicesText !== undefined) {
+    const val = updates.botDevicesText ?? "";
+    await prisma.systemSetting.upsert({ where: { key: "bot_devices_text" }, create: { key: "bot_devices_text", value: val }, update: { value: val } });
+  }
   if (updates.botMenuTexts !== undefined) {
     const val = updates.botMenuTexts ?? "";
     await prisma.systemSetting.upsert({ where: { key: "bot_menu_texts" }, create: { key: "bot_menu_texts", value: val }, update: { value: val } });
@@ -2224,6 +2959,20 @@ adminRouter.patch("/settings", async (req, res) => {
     ["agreementLink", "agreement_link"],
     ["offerLink", "offer_link"],
     ["instructionsLink", "instructions_link"],
+    // T-ref-instructions (27.05.2026) — ссылка инструкции рефералки.
+    ["referralInstructionsUrl", "referral_instructions_url"],
+    // T11+T13+T14 (11.05.2026) — кастомизация бота.
+    ["refundLink", "refund_link"],
+    ["supportHoursFrom", "support_hours_from"],
+    ["supportHoursTo", "support_hours_to"],
+    ["tgProxyText", "tg_proxy_text"],
+    ["tgProxyUrlPrimary", "tg_proxy_url_primary"],
+    ["tgProxyUrlBackup", "tg_proxy_url_backup"],
+    // JSON-массив прокси-серверов (см. tgProxyServers выше).
+    ["tgProxyServers", "tg_proxy_servers"],
+    ["reissueWarningText", "reissue_warning_text"],
+    ["installSecondDeviceText", "install_second_device_text"],
+    ["helpIntroText", "help_intro_text"],
   ] as const) {
     if (updates[key] !== undefined) {
       const val = updates[key] ?? "";
@@ -2311,6 +3060,45 @@ adminRouter.patch("/settings", async (req, res) => {
     await prisma.systemSetting.upsert({
       where: { key: "skip_email_verification" },
       create: { key: "skip_email_verification", value: val },
+      update: { value: val },
+    });
+  }
+  // Антибот-защита регистраций
+  if (updates.signupProtectionEnabled !== undefined) {
+    const val = updates.signupProtectionEnabled ? "true" : "false";
+    await prisma.systemSetting.upsert({
+      where: { key: "signup_protection_enabled" },
+      create: { key: "signup_protection_enabled", value: val },
+      update: { value: val },
+    });
+  }
+  if (updates.emailDomainBlocklist !== undefined) {
+    await prisma.systemSetting.upsert({
+      where: { key: "email_domain_blocklist" },
+      create: { key: "email_domain_blocklist", value: updates.emailDomainBlocklist ?? "" },
+      update: { value: updates.emailDomainBlocklist ?? "" },
+    });
+  }
+  if (updates.emailPatternBlocklist !== undefined) {
+    await prisma.systemSetting.upsert({
+      where: { key: "email_pattern_blocklist" },
+      create: { key: "email_pattern_blocklist", value: updates.emailPatternBlocklist ?? "" },
+      update: { value: updates.emailPatternBlocklist ?? "" },
+    });
+  }
+  if (updates.signupMaxPerIpPerHour !== undefined) {
+    const val = String(Math.max(1, updates.signupMaxPerIpPerHour));
+    await prisma.systemSetting.upsert({
+      where: { key: "signup_max_per_ip_per_hour" },
+      create: { key: "signup_max_per_ip_per_hour", value: val },
+      update: { value: val },
+    });
+  }
+  if (updates.happCryptEnabled !== undefined) {
+    const val = updates.happCryptEnabled ? "true" : "false";
+    await prisma.systemSetting.upsert({
+      where: { key: "happ_crypt_enabled" },
+      create: { key: "happ_crypt_enabled", value: val },
       update: { value: val },
     });
   }
@@ -2588,6 +3376,8 @@ adminRouter.patch("/settings", async (req, res) => {
       update: { value: val },
     });
   }
+  // invalidate cache до возврата свежего config'а.
+  invalidateSystemConfigCache();
   const config = await getSystemConfig();
   return res.json(config);
 });
@@ -2794,11 +3584,25 @@ const broadcastSchema = z.object({
   message: z.string().min(1, "Текст сообщения обязателен").max(4096),
   buttonText: z.string().max(64).optional(),
   buttonUrl: z.string().max(500).optional(),
+  // фильтр получателей.
+  targetGroup: z.enum([
+    "all",
+    "active_subs",
+    "expired_subs",
+    "with_any_subs",
+    "without_subs",
+    "standard_subs",
+    "unblock_subs",
+    "unblock_unlimited",
+  ]).optional(),
 });
 
 const broadcastUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 },
+  // подняли с 20 MB до 50 MB ради видео (sendVideo через
+  // основной bot API лимит ~50 MB; для большего пришлось бы поднимать локальный
+  // bot-api server, чего у нас сейчас нет).
+  limits: { fileSize: 50 * 1024 * 1024 },
 });
 
 adminRouter.get("/broadcast/recipients-count", asyncRoute(async (_req, res) => {
@@ -2814,7 +3618,7 @@ adminRouter.post(
     if (!parsed.success) {
       return res.status(400).json({ message: "Invalid input", errors: parsed.error.flatten() });
     }
-    const { channel, subject, message, buttonText, buttonUrl } = parsed.data;
+    const { channel, subject, message, buttonText, buttonUrl, targetGroup } = parsed.data;
     const attachment =
       req.file && req.file.buffer
         ? { buffer: req.file.buffer, mimetype: req.file.mimetype || "application/octet-stream", originalname: req.file.originalname || "file" }
@@ -2822,23 +3626,100 @@ adminRouter.post(
     // Запускаем рассылку в фоне. Для больших баз синхронная отправка
     // упирается в таймаут nginx/браузера, хотя на бэкенде всё идёт успешно.
     const adminId = (req as unknown as { adminId?: string }).adminId;
-    const jobId = startBroadcastJob({
+    // startBroadcastJob теперь async (queue в DB + worker pickup).
+    const jobId = await startBroadcastJob({
       channel,
       subject: subject ?? "",
       message,
       attachment,
       buttonText,
       buttonUrl,
+      targetGroup,
       startedByAdmin: adminId,
     });
     return res.json({ jobId });
   })
 );
 
+// Возобновить ранее прерванную рассылку.
+// Берёт существующую запись broadcast_history, читает её text/buttons/channel/targetGroup,
+// принимает attachment (бинарь не хранится в БД, юзер переаплоадит тот же файл),
+// запускает с тем же broadcastId → runBroadcast подхватит broadcast_sent_log
+// и skip'нет уже отправленных. Дубли стремятся к нулю.
+adminRouter.post(
+  "/broadcast/:jobId/resume",
+  broadcastUpload.single("attachment"),
+  asyncRoute(async (req, res) => {
+    const oldJobId = req.params.jobId;
+    const old = await prisma.broadcastHistory.findUnique({ where: { id: oldJobId } });
+    if (!old) return res.status(404).json({ message: "Рассылка не найдена" });
+    if (old.status === "running") return res.status(409).json({ message: "Эта рассылка уже идёт" });
+
+    const attachment =
+      req.file && req.file.buffer
+        ? { buffer: req.file.buffer, mimetype: req.file.mimetype || "application/octet-stream", originalname: req.file.originalname || "file" }
+        : undefined;
+    if (old.attachmentName && !attachment) {
+      return res.status(400).json({
+        message: `Эта рассылка содержала вложение "${old.attachmentName}" — переаплоадите тот же файл для возобновления.`,
+      });
+    }
+
+    const tg = typeof req.body?.targetGroup === "string" ? req.body.targetGroup : "all";
+    const adminId = (req as unknown as { adminId?: string }).adminId;
+
+    const jobId = await startBroadcastJob({
+      channel: old.channel as "telegram" | "email" | "both",
+      subject: old.subject ?? "",
+      message: old.message,
+      attachment,
+      buttonText: old.buttonText ?? undefined,
+      buttonUrl: old.buttonUrl ?? undefined,
+      targetGroup: tg as Parameters<typeof startBroadcastJob>[0]["targetGroup"],
+      startedByAdmin: adminId,
+      resumeJobId: oldJobId,
+    });
+    return res.json({ jobId, resumedFrom: oldJobId });
+  })
+);
+
+// список получателей рассылки (sent_log) для админа.
+// ?format=csv → text/csv downloadable. По дефолту json с массивом.
+adminRouter.get(
+  "/broadcast/:jobId/recipients",
+  asyncRoute(async (req, res) => {
+    const jobId = req.params.jobId;
+    const fmt = typeof req.query.format === "string" ? req.query.format : "json";
+    const rows = await prisma.$queryRaw<Array<{
+      tgid: string;
+      sent_at: Date;
+      username: string | null;
+    }>>`
+      SELECT log.tgid, log.sent_at, c.telegram_username AS username
+        FROM broadcast_sent_log log
+        LEFT JOIN clients c ON c.telegram_id = log.tgid
+       WHERE log.broadcast_id = ${jobId}
+       ORDER BY log.sent_at ASC;
+    `;
+    if (fmt === "csv") {
+      const header = "tgid,username,sent_at\n";
+      const body = rows.map((r) => {
+        const u = (r.username ?? "").replace(/[",\n]/g, "");
+        return `${r.tgid},${u},${r.sent_at.toISOString()}`;
+      }).join("\n");
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="broadcast-${jobId}-recipients.csv"`);
+      return res.send(header + body + "\n");
+    }
+    return res.json({ total: rows.length, recipients: rows });
+  })
+);
+
 adminRouter.get(
   "/broadcast/status/:jobId",
   asyncRoute(async (req, res) => {
-    const job = getBroadcastJob(req.params.jobId);
+    // getBroadcastJob теперь async (читает из DB, не из in-memory).
+    const job = await getBroadcastJob(req.params.jobId);
     if (!job) return res.status(404).json({ message: "Job not found" });
     return res.json({
       id: job.id,
@@ -2848,7 +3729,27 @@ adminRouter.get(
       error: job.error ?? null,
       startedAt: job.startedAt.toISOString(),
       finishedAt: job.finishedAt ? job.finishedAt.toISOString() : null,
+      cancelRequested: job.cancelRequested,
     });
+  })
+);
+
+// отмена активной рассылки.
+// 25.05.2026 — теперь через DB-флаг (worker polls). Если job-row в БД 'running' но
+// worker уже умер (зомби) → DB-update переводит запись в cancelled.
+adminRouter.post(
+  "/broadcast/cancel/:jobId",
+  asyncRoute(async (req, res) => {
+    const jobId = req.params.jobId;
+    const result = await cancelBroadcastJob(jobId);
+    if (result.ok) return res.json({ ok: true });
+    const code = result.reason === "not_found" ? 404 : 409;
+    const msg = result.reason === "not_found"
+      ? "Рассылка не найдена"
+      : result.reason === "not_running"
+        ? "Рассылка уже завершена"
+        : "Отмена уже запрошена";
+    return res.status(code).json({ message: msg, reason: result.reason });
   })
 );
 
@@ -2885,14 +3786,37 @@ const autoBroadcastRuleSchema = z.object({
     "no_traffic",
     "subscription_expired",
     "subscription_ending_soon",
+    // новый триггер — за N минут до окончания подписки.
+    "subscription_ending_minutes",
+    // пассивные пользователи без действий.
+    "inactive_no_subscription",
+    "inactive_with_subscription",
   ]),
-  delayDays: z.union([z.number(), z.string()]).transform((v) => (typeof v === "string" ? parseInt(v, 10) : v)).pipe(z.number().int().min(0).max(365)),
+  // T-unify: для subscription_ending_minutes допускаем minutes до 7*24*60 = 10080.
+  delayDays: z.union([z.number(), z.string()]).transform((v) => (typeof v === "string" ? parseInt(v, 10) : v)).pipe(z.number().int().min(0).max(10080)),
   channel: z.enum(["telegram", "email", "both"]),
   subject: z.string().max(500).nullish(),
   message: z.string().min(1).max(4096),
   buttonText: z.string().max(64).nullish(),
   buttonUrl: z.string().max(500).nullish(),
+  // вторая кнопка под сообщением.
+  button2Text: z.string().max(64).nullish(),
+  button2Url: z.string().max(500).nullish(),
   enabled: z.boolean().optional(),
+  // индивидуальные скидки/промокоды для авторассылки.
+  promoCodeId: z.string().nullable().optional(),
+  personalDiscountPercent: z.number().min(0).max(100).nullable().optional(),
+  // при выдаче скидки клиенту через это правило —
+  // помечать её как одноразовую (сгорит после первой продуктовой покупки). Дефолт true.
+  personalDiscountIsOneTime: z.boolean().optional(),
+  maxRecipients: z.number().int().min(1).nullable().optional(),
+  // индивидуальный cron этого правила.
+  // null/пусто → scheduler берёт дефолт по типу триггера. Формат node-cron (5 полей).
+  cronExpression: z.string().max(64).nullable().optional(),
+  // per-rule флаг — если true, правило НЕ
+  // запускается по крону, ждёт события из бота (после регистрации). Поддерживается
+  // для after_registration.
+  eventDriven: z.boolean().optional(),
 });
 
 adminRouter.get("/auto-broadcast/rules", asyncRoute(async (_req, res) => {
@@ -2911,7 +3835,19 @@ adminRouter.get("/auto-broadcast/rules", asyncRoute(async (_req, res) => {
       message: r.message,
       buttonText: r.buttonText,
       buttonUrl: r.buttonUrl,
+      button2Text: r.button2Text,
+      button2Url: r.button2Url,
       enabled: r.enabled,
+      // T-promo (13.05.2026) — поля для рассылки с промокодом/скидкой.
+      promoCodeId: r.promoCodeId,
+      personalDiscountPercent: r.personalDiscountPercent,
+      personalDiscountIsOneTime: r.personalDiscountIsOneTime,
+      maxRecipients: r.maxRecipients,
+      // T-cron-per-rule (13.05.2026)
+      cronExpression: r.cronExpression,
+      // T-event-driven (14.05.2026)
+      eventDriven: r.eventDriven,
+      lastRunAt: r.lastRunAt?.toISOString() ?? null,
       createdAt: r.createdAt.toISOString(),
       updatedAt: r.updatedAt.toISOString(),
       sentCount: r._count.logs,
@@ -2939,9 +3875,25 @@ adminRouter.post("/auto-broadcast/rules", asyncRoute(async (req, res) => {
       message: data.message,
       buttonText: data.buttonText ?? null,
       buttonUrl: data.buttonUrl ?? null,
+      button2Text: data.button2Text ?? null,
+      button2Url: data.button2Url ?? null,
       enabled: data.enabled ?? true,
+      // T-promo (13.05.2026)
+      promoCodeId: data.promoCodeId ?? null,
+      personalDiscountPercent: data.personalDiscountPercent ?? null,
+      personalDiscountIsOneTime: data.personalDiscountIsOneTime ?? true,
+      maxRecipients: data.maxRecipients ?? null,
+      // T-cron-per-rule (13.05.2026)
+      cronExpression: data.cronExpression?.trim() || null,
+      // T-event-driven (14.05.2026)
+      eventDriven: data.eventDriven ?? false,
     },
   });
+  // T-cron-per-rule: подхватить cron сразу после create — пересоздаём scheduler для этого правила.
+  try {
+    const { rescheduleRule } = await import("../auto-broadcast/auto-broadcast-scheduler.js");
+    await rescheduleRule(rule.id);
+  } catch (e) { console.warn("[auto-broadcast] rescheduleRule after create failed:", e); }
   return res.status(201).json({
     id: rule.id,
     name: rule.name,
@@ -2952,7 +3904,16 @@ adminRouter.post("/auto-broadcast/rules", asyncRoute(async (req, res) => {
     message: rule.message,
     buttonText: rule.buttonText,
     buttonUrl: rule.buttonUrl,
+    button2Text: rule.button2Text,
+    button2Url: rule.button2Url,
     enabled: rule.enabled,
+    promoCodeId: rule.promoCodeId,
+    personalDiscountPercent: rule.personalDiscountPercent,
+    personalDiscountIsOneTime: rule.personalDiscountIsOneTime,
+    maxRecipients: rule.maxRecipients,
+    cronExpression: rule.cronExpression,
+    eventDriven: rule.eventDriven,
+    lastRunAt: rule.lastRunAt?.toISOString() ?? null,
     createdAt: rule.createdAt.toISOString(),
     updatedAt: rule.updatedAt.toISOString(),
   });
@@ -2962,10 +3923,18 @@ adminRouter.patch("/auto-broadcast/rules/:id", asyncRoute(async (req, res) => {
   const id = req.params.id;
   const parsed = autoBroadcastRuleSchema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Invalid input", errors: parsed.error.flatten() });
-  const rule = await prisma.autoBroadcastRule.update({
-    where: { id },
-    data: parsed.data as Record<string, unknown>,
-  });
+  // нормализуем cronExpression (пустая строка → null).
+  const data = { ...parsed.data } as Record<string, unknown>;
+  if ("cronExpression" in data) {
+    const raw = typeof data.cronExpression === "string" ? data.cronExpression.trim() : data.cronExpression;
+    data.cronExpression = raw || null;
+  }
+  const rule = await prisma.autoBroadcastRule.update({ where: { id }, data });
+  // Применяем новое расписание сразу.
+  try {
+    const { rescheduleRule } = await import("../auto-broadcast/auto-broadcast-scheduler.js");
+    await rescheduleRule(rule.id);
+  } catch (e) { console.warn("[auto-broadcast] rescheduleRule after patch failed:", e); }
   return res.json({
     id: rule.id,
     name: rule.name,
@@ -2976,7 +3945,16 @@ adminRouter.patch("/auto-broadcast/rules/:id", asyncRoute(async (req, res) => {
     message: rule.message,
     buttonText: rule.buttonText,
     buttonUrl: rule.buttonUrl,
+    button2Text: rule.button2Text,
+    button2Url: rule.button2Url,
     enabled: rule.enabled,
+    promoCodeId: rule.promoCodeId,
+    personalDiscountPercent: rule.personalDiscountPercent,
+    personalDiscountIsOneTime: rule.personalDiscountIsOneTime,
+    maxRecipients: rule.maxRecipients,
+    cronExpression: rule.cronExpression,
+    eventDriven: rule.eventDriven,
+    lastRunAt: rule.lastRunAt?.toISOString() ?? null,
     createdAt: rule.createdAt.toISOString(),
     updatedAt: rule.updatedAt.toISOString(),
   });
@@ -2984,6 +3962,11 @@ adminRouter.patch("/auto-broadcast/rules/:id", asyncRoute(async (req, res) => {
 
 adminRouter.delete("/auto-broadcast/rules/:id", asyncRoute(async (req, res) => {
   await prisma.autoBroadcastRule.delete({ where: { id: req.params.id } });
+  // T-cron-per-rule: снимаем cron-задачу удалённого правила.
+  try {
+    const { rescheduleRule } = await import("../auto-broadcast/auto-broadcast-scheduler.js");
+    await rescheduleRule(req.params.id);
+  } catch (e) { console.warn("[auto-broadcast] rescheduleRule after delete failed:", e); }
   return res.status(204).send();
 }));
 
@@ -3794,6 +4777,77 @@ adminRouter.get("/sales-report", async (req, res) => {
   });
 });
 
+/**
+ * отчёт продаж только через баланс.
+ * Доступ только для ADMIN или MANAGER с action `view_balance_sales`. Для менеджеров-девочек —
+ * они видят только то, что реально оплачено через начисление баланса (provider=balance),
+ * без всех остальных платёжек (карты/крипта/etc).
+ *
+ * Этот endpoint не пускает через requireAdminSection (т.к. секция `sales-report` могла быть
+ * не выдана менеджеру), а проверяет action напрямую.
+ */
+adminRouter.get("/balance-sales", requireAction("view_balance_sales"), async (req, res) => {
+  const from = typeof req.query.from === "string" ? req.query.from : null;
+  const to = typeof req.query.to === "string" ? req.query.to : null;
+  const search = typeof req.query.search === "string" ? req.query.search.trim() : null;
+  const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10) || 50));
+
+  const where: Record<string, unknown> = {
+    status: "PAID",
+    provider: "balance",
+  };
+  if (from || to) {
+    const paidAt: Record<string, Date> = {};
+    if (from) paidAt.gte = new Date(from);
+    if (to) paidAt.lte = new Date(to + "T23:59:59.999Z");
+    where.paidAt = paidAt;
+  }
+  if (search) {
+    where.OR = [
+      { client: { email: { contains: search, mode: "insensitive" } } },
+      { client: { telegramUsername: { contains: search, mode: "insensitive" } } },
+      { client: { telegramId: search } },
+      { tariff: { name: { contains: search, mode: "insensitive" } } },
+    ];
+  }
+
+  const [total, payments] = await Promise.all([
+    prisma.payment.count({ where }),
+    prisma.payment.findMany({
+      where,
+      orderBy: { paidAt: "desc" },
+      skip: (page - 1) * limit,
+      take: limit,
+      include: {
+        client: { select: { id: true, email: true, telegramId: true, telegramUsername: true } },
+        tariff: { select: { id: true, name: true } },
+      },
+    }),
+  ]);
+
+  const agg = await prisma.payment.aggregate({ where, _sum: { amount: true }, _count: true });
+
+  return res.json({
+    items: payments.map((p) => ({
+      id: p.id,
+      amount: p.amount,
+      currency: p.currency,
+      tariffName: p.tariff?.name ?? null,
+      clientId: p.client?.id ?? null,
+      clientEmail: p.client?.email ?? null,
+      clientTelegramId: p.client?.telegramId ?? null,
+      clientTelegramUsername: p.client?.telegramUsername ?? null,
+      paidAt: p.paidAt?.toISOString() ?? null,
+    })),
+    total,
+    page,
+    limit,
+    totalAmount: agg._sum.amount ?? 0,
+    totalCount: agg._count,
+  });
+});
+
 adminRouter.delete("/sales-report/:paymentId", async (req, res) => {
   const { paymentId } = req.params;
   const payment = await prisma.payment.findUnique({ where: { id: paymentId } });
@@ -3820,8 +4874,11 @@ export const ADMIN_ALLOWED_SECTIONS = [
   "singbox",
   "backup",
   "tickets",
+  "withdrawals", // Заявки на вывод USDT
   // Subscription
   "tariffs",
+  "trials", // Trial-пресеты (мульти-триал система)
+  "auto-renew", // Конструктор уведомлений автосписания
   "promo",
   "promo-codes",
   "marketing",
@@ -3834,10 +4891,16 @@ export const ADMIN_ALLOWED_SECTIONS = [
   "contests",
   "tour-constructor",
   "promo-vpn", // Продвижение VPN через Gramads
+  "marketplace",
   // Settings
   "settings",
   "languages",
   "api-keys",
+  "bots", // Боты-клоны
+  "antibot",
+  "diagnostics",
+  "webhook-inbox",
+  "audit", // Аудит-лог
 ] as const;
 
 /** Список админов и менеджеров (только ADMIN). */
@@ -3861,7 +4924,8 @@ adminRouter.get("/admins", asyncRoute(async (req, res) => {
     if (!raw?.trim()) return [];
     try {
       const p = JSON.parse(raw) as unknown;
-      return Array.isArray(p) ? p.filter((s): s is string => typeof s === "string") : [];
+      // возвращаем только секции, action:* — отдельный endpoint.
+      return Array.isArray(p) ? p.filter((s): s is string => typeof s === "string" && !s.startsWith("action:")) : [];
     } catch {
       return [];
     }
@@ -3956,7 +5020,19 @@ adminRouter.patch("/admins/:id", asyncRoute(async (req, res) => {
     const sections = body.data.allowedSections.filter((s) =>
       (ADMIN_ALLOWED_SECTIONS as readonly string[]).includes(s)
     );
-    updates.allowedSections = JSON.stringify(sections);
+    // сохраняем actions (action:*) из текущего значения,
+    // иначе PATCH секций стирает права из Permissions-диалога. Парсим как JSON или CSV
+    // (для обратной совместимости со старыми CSV-записями от admin-permissions).
+    const existingRaw = target.allowedSections ?? "";
+    let existingItems: string[] = [];
+    try {
+      const p = JSON.parse(existingRaw) as unknown;
+      if (Array.isArray(p)) existingItems = p.filter((s): s is string => typeof s === "string");
+    } catch {
+      existingItems = existingRaw.split(",").map((s) => s.trim()).filter(Boolean);
+    }
+    const existingActions = existingItems.filter((s) => s.startsWith("action:"));
+    updates.allowedSections = JSON.stringify([...sections, ...existingActions]);
   }
   if (body.data.password?.trim()) {
     updates.passwordHash = await hashPassword(body.data.password);
@@ -3970,7 +5046,8 @@ adminRouter.patch("/admins/:id", asyncRoute(async (req, res) => {
     ? (() => {
         try {
           const p = JSON.parse(updated.allowedSections) as unknown;
-          return Array.isArray(p) ? p.filter((s): s is string => typeof s === "string") : [];
+          // только секции, action:* — отдельный endpoint.
+          return Array.isArray(p) ? p.filter((s): s is string => typeof s === "string" && !s.startsWith("action:")) : [];
         } catch {
           return [];
         }
@@ -4015,8 +5092,8 @@ adminRouter.get("/secondary-subscriptions", asyncRoute(async (req, res) => {
   const sortBy = typeof req.query.sortBy === "string" ? req.query.sortBy : "createdAt";
   const sortDir = req.query.sortDir === "asc" ? "asc" as const : "desc" as const;
 
-  const where: Prisma.SecondarySubscriptionWhereInput = {};
-  const conditions: Prisma.SecondarySubscriptionWhereInput[] = [];
+  const where: Prisma.SubscriptionWhereInput = {};
+  const conditions: Prisma.SubscriptionWhereInput[] = [];
 
   // Gift status filter
   if (giftStatus === "owned") {
@@ -4041,19 +5118,42 @@ adminRouter.get("/secondary-subscriptions", asyncRoute(async (req, res) => {
   }
 
   // Search by owner email/telegramUsername/telegramId
+  // старая реализация фильтровала через nested relation:
+  //   { owner: { telegramUsername: { contains, mode: "insensitive" } } }
+  // В нашем Prisma (6.19.2) этот паттерн с mode:"insensitive" в nested relation
+  // молча возвращал 0 строк (баг проявлялся не для всех клиентов). Сейчас сначала
+  // резолвим matching client IDs отдельным запросом — этот же синтаксис на
+  // ТОП-уровне (как в /admin/clients) работает надёжно — а потом фильтруем
+  // subscriptions по `ownerId in (..)` или `giftedToClientId in (..)`.
   if (search.length > 0) {
+    const matchedClients = await prisma.client.findMany({
+      where: {
+        OR: [
+          { id: { equals: search } },
+          { email: { contains: search, mode: "insensitive" as const } },
+          { telegramUsername: { contains: search, mode: "insensitive" as const } },
+          { telegramId: { contains: search } },
+        ],
+      },
+      select: { id: true },
+      take: 500,
+    });
+    const matchedClientIds = matchedClients.map((c) => c.id);
     conditions.push({
       OR: [
-        { owner: { id: { equals: search } } },
-        { owner: { email: { contains: search, mode: "insensitive" as const } } },
-        { owner: { telegramUsername: { contains: search, mode: "insensitive" as const } } },
-        { owner: { telegramId: { contains: search } } },
-        { giftedToClient: { id: { equals: search } } },
-        { giftedToClient: { email: { contains: search, mode: "insensitive" as const } } },
-        { giftedToClient: { telegramUsername: { contains: search, mode: "insensitive" as const } } },
-        { giftedToClient: { telegramId: { contains: search } } },
+        ...(matchedClientIds.length > 0
+          ? [
+              { ownerId: { in: matchedClientIds } },
+              { giftedToClientId: { in: matchedClientIds } },
+              // поиск по ОТПРАВИТЕЛЮ подарка —
+              // подписки, у которых gift-код создан этим клиентом (username/tgid/email/id).
+              { giftCodes: { some: { creatorId: { in: matchedClientIds } } } },
+            ]
+          : []),
         { remnawaveUuid: { contains: search } },
         { id: { contains: search } },
+        // поиск по ПОДАРОЧНОМУ КОДУ (XXXX-XXXX-XXXX).
+        { giftCodes: { some: { code: { contains: search, mode: "insensitive" as const } } } },
       ],
     });
   }
@@ -4071,7 +5171,7 @@ adminRouter.get("/secondary-subscriptions", asyncRoute(async (req, res) => {
   if (conditions.length > 0) where.AND = conditions;
 
   // Determine orderBy
-  const allowedSorts: Record<string, Prisma.SecondarySubscriptionOrderByWithRelationInput> = {
+  const allowedSorts: Record<string, Prisma.SubscriptionOrderByWithRelationInput> = {
     createdAt: { createdAt: sortDir },
     updatedAt: { updatedAt: sortDir },
     subscriptionIndex: { subscriptionIndex: sortDir },
@@ -4079,7 +5179,7 @@ adminRouter.get("/secondary-subscriptions", asyncRoute(async (req, res) => {
   const orderBy = allowedSorts[sortBy] ?? { createdAt: sortDir };
 
   const [items, total] = await Promise.all([
-    prisma.secondarySubscription.findMany({
+    prisma.subscription.findMany({
       where,
       skip,
       take: limit,
@@ -4104,21 +5204,56 @@ adminRouter.get("/secondary-subscriptions", asyncRoute(async (req, res) => {
             redeemedAt: true,
             createdAt: true,
             redeemedBy: { select: { id: true, email: true, telegramUsername: true } },
+            // для отображения «отправителя» в админке.
+            creator: { select: { id: true, email: true, telegramUsername: true } },
+            createdByAdmin: true,
+            createdByAdminId: true,
           },
           orderBy: { createdAt: "desc" },
           take: 1,
         },
       },
     }),
-    prisma.secondarySubscription.count({ where }),
+    prisma.subscription.count({ where }),
   ]);
 
+  // резолвим имена админов одним batch-запросом — не дёргаем БД в цикле.
+  const adminIds = Array.from(new Set(items.map((s) => s.giftCodes[0]?.createdByAdminId).filter((v): v is string => !!v)));
+  const adminsMap: Record<string, { id: string; email: string }> = {};
+  if (adminIds.length > 0) {
+    const admins = await prisma.admin.findMany({
+      where: { id: { in: adminIds } },
+      select: { id: true, email: true },
+    });
+    for (const a of admins) adminsMap[a.id] = a;
+  }
+
   return res.json({
-    items: items.map((s) => ({
-      ...s,
-      latestGiftCode: s.giftCodes[0] ?? null,
-      giftCodes: undefined,
-    })),
+    items: items.map((s) => {
+      const lastCode = s.giftCodes[0] ?? null;
+      // отправитель — это:
+      //   • Конкретный админ из admins-таблицы (по createdByAdminId) → префикс 👑.
+      //   • Если createdByAdmin=true но adminId не сохранён (legacy) → «👑 Администратор».
+      //   • Иначе клиент-даритель из creator gift code.
+      const isAdminGift = lastCode?.createdByAdmin === true;
+      let giftSender: { id: string; email: string | null; telegramUsername: string | null; isAdmin: boolean } | null = null;
+      if (isAdminGift) {
+        const adminEntry = lastCode?.createdByAdminId ? adminsMap[lastCode.createdByAdminId] : null;
+        if (adminEntry) {
+          giftSender = { id: adminEntry.id, email: adminEntry.email, telegramUsername: null, isAdmin: true };
+        } else {
+          giftSender = { id: "admin", email: null, telegramUsername: "Администратор", isAdmin: true };
+        }
+      } else if (lastCode?.creator) {
+        giftSender = { ...lastCode.creator, isAdmin: false };
+      }
+      return {
+        ...s,
+        latestGiftCode: lastCode,
+        giftSender,
+        giftCodes: undefined,
+      };
+    }),
     total,
     page,
     limit,
@@ -4127,7 +5262,7 @@ adminRouter.get("/secondary-subscriptions", asyncRoute(async (req, res) => {
 }));
 
 adminRouter.get("/secondary-subscriptions/:id", asyncRoute(async (req, res) => {
-  const sub = await prisma.secondarySubscription.findUnique({
+  const sub = await prisma.subscription.findUnique({
     where: { id: req.params.id },
     include: {
       owner: {
@@ -4171,7 +5306,7 @@ adminRouter.get("/secondary-subscriptions/:id", asyncRoute(async (req, res) => {
 
   // Fetch history
   const history = await prisma.giftHistory.findMany({
-    where: { secondarySubscriptionId: sub.id },
+    where: { subscriptionId: sub.id },
     orderBy: { createdAt: "desc" },
     take: 50,
   });
@@ -4179,8 +5314,89 @@ adminRouter.get("/secondary-subscriptions/:id", asyncRoute(async (req, res) => {
   return res.json({ ...sub, remnaData, history });
 }));
 
+// PATCH доп. подписки админом — менять дни и лимит трафика.
+// addDays: положительное → продлить (от текущего expireAt или now если истекла),
+//          отрицательное → сократить срок.
+// trafficLimitBytes: 0 → безлимит, число > 0 → конкретный лимит, null → не менять.
+// Изменения пишутся в Remnawave (PATCH user) + лог в gift_history.
+const editSecondarySubSchema = z.object({
+  addDays: z.number().int().min(-3650).max(3650).optional(),
+  trafficLimitBytes: z.number().int().min(0).nullable().optional(),
+});
+adminRouter.patch("/secondary-subscriptions/:id", asyncRoute(async (req, res) => {
+  const parsed = editSecondarySubSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Неверные данные", errors: parsed.error.flatten() });
+  if (parsed.data.addDays == null && parsed.data.trafficLimitBytes === undefined) {
+    return res.status(400).json({ message: "Нужно указать хотя бы одно поле для изменения" });
+  }
+  const sub = await prisma.subscription.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, remnawaveUuid: true, ownerId: true },
+  });
+  if (!sub) return res.status(404).json({ message: "Подписка не найдена" });
+  if (!sub.remnawaveUuid) return res.status(400).json({ message: "Подписка не привязана к Remnawave" });
+  if (!isRemnaConfigured()) return res.status(503).json({ message: "Remnawave не настроен" });
+
+  // Читаем текущее состояние user в Remna — нам нужен expireAt для расчёта.
+  const userRes = await remnaGetUser(sub.remnawaveUuid);
+  if (userRes.error || !userRes.data) {
+    return res.status(404).json({ message: "Пользователь Remnawave не найден" });
+  }
+  const inner = (userRes.data as Record<string, unknown>) ?? {};
+  const responseObj = (inner.response ?? inner.data ?? inner) as Record<string, unknown>;
+  const currentExpireAtRaw = responseObj.expireAt ?? responseObj.expire_at;
+
+  const updatePayload: { uuid: string; expireAt?: string; trafficLimitBytes?: number } = { uuid: sub.remnawaveUuid };
+
+  let newExpireAt: Date | null = null;
+  if (parsed.data.addDays != null && parsed.data.addDays !== 0) {
+    let baseDate: Date;
+    if (typeof currentExpireAtRaw === "string" || typeof currentExpireAtRaw === "number") {
+      const d = typeof currentExpireAtRaw === "number" ? new Date(currentExpireAtRaw * 1000) : new Date(currentExpireAtRaw);
+      // Если подписка истекла — стартуем от now, иначе стек от текущего expireAt.
+      baseDate = !isNaN(d.getTime()) && d.getTime() > Date.now() ? d : new Date();
+    } else {
+      baseDate = new Date();
+    }
+    newExpireAt = new Date(baseDate.getTime() + parsed.data.addDays * 24 * 60 * 60 * 1000);
+    updatePayload.expireAt = newExpireAt.toISOString();
+  }
+
+  if (parsed.data.trafficLimitBytes !== undefined) {
+    updatePayload.trafficLimitBytes = parsed.data.trafficLimitBytes ?? 0; // null → 0 (безлимит)
+  }
+
+  const updateRes = await remnaUpdateUser(updatePayload);
+  if (updateRes.error) {
+    return res.status(updateRes.status >= 400 ? updateRes.status : 500).json({ message: updateRes.error });
+  }
+
+  // синкаем expireAt в БД для broadcast-фильтра.
+  if (newExpireAt) {
+    await prisma.subscription.update({
+      where: { id: sub.id },
+      data: { expireAt: newExpireAt },
+    }).catch(() => {});
+  }
+
+  await prisma.giftHistory.create({
+    data: {
+      clientId: sub.ownerId,
+      subscriptionId: sub.id,
+      eventType: "EDITED_BY_ADMIN",
+      metadata: {
+        addDays: parsed.data.addDays ?? null,
+        newExpireAt: newExpireAt?.toISOString() ?? null,
+        trafficLimitBytes: parsed.data.trafficLimitBytes !== undefined ? parsed.data.trafficLimitBytes : null,
+      },
+    },
+  });
+
+  return res.json({ success: true, expireAt: newExpireAt?.toISOString() ?? null, trafficLimitBytes: parsed.data.trafficLimitBytes ?? null });
+}));
+
 adminRouter.delete("/secondary-subscriptions/:id", asyncRoute(async (req, res) => {
-  const sub = await prisma.secondarySubscription.findUnique({
+  const sub = await prisma.subscription.findUnique({
     where: { id: req.params.id },
     select: { id: true, remnawaveUuid: true, ownerId: true },
   });
@@ -4197,14 +5413,14 @@ adminRouter.delete("/secondary-subscriptions/:id", asyncRoute(async (req, res) =
   await prisma.giftHistory.create({
     data: {
       clientId: sub.ownerId,
-      secondarySubscriptionId: sub.id,
+      subscriptionId: sub.id,
       eventType: "DELETED",
       metadata: { deletedBy: "admin" },
     },
   });
 
   // Cascade deletes GiftCodes via DB relation
-  await prisma.secondarySubscription.delete({ where: { id: sub.id } });
+  await prisma.subscription.delete({ where: { id: sub.id } });
 
   return res.json({ success: true });
 }));
@@ -4215,7 +5431,7 @@ adminRouter.delete("/secondary-subscriptions/bulk", asyncRoute(async (req, res) 
     return res.status(400).json({ message: "Укажите массив ids" });
   }
 
-  const subs = await prisma.secondarySubscription.findMany({
+  const subs = await prisma.subscription.findMany({
     where: { id: { in: ids } },
     select: { id: true, remnawaveUuid: true, ownerId: true },
   });
@@ -4231,13 +5447,13 @@ adminRouter.delete("/secondary-subscriptions/bulk", asyncRoute(async (req, res) 
   await prisma.giftHistory.createMany({
     data: subs.map((s) => ({
       clientId: s.ownerId,
-      secondarySubscriptionId: s.id,
+      subscriptionId: s.id,
       eventType: "DELETED",
       metadata: { deletedBy: "admin", bulk: true },
     })),
   });
 
-  await prisma.secondarySubscription.deleteMany({ where: { id: { in: ids } } });
+  await prisma.subscription.deleteMany({ where: { id: { in: ids } } });
 
   return res.json({ success: true, deleted: subs.length });
 }));
@@ -4258,10 +5474,10 @@ adminRouter.get("/gift-analytics", asyncRoute(async (_req, res) => {
     redeemedCodes,
     totalCodes,
   ] = await Promise.all([
-    prisma.secondarySubscription.count(),
-    prisma.secondarySubscription.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
-    prisma.secondarySubscription.count({ where: { OR: [{ giftStatus: null, giftedToClientId: null }, { giftStatus: "", giftedToClientId: null }, { giftStatus: "ACTIVATED_SELF" }] } }),
-    prisma.secondarySubscription.count({ where: { giftedToClientId: { not: null } } }),
+    prisma.subscription.count(),
+    prisma.subscription.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
+    prisma.subscription.count({ where: { OR: [{ giftStatus: null, giftedToClientId: null }, { giftStatus: "", giftedToClientId: null }, { giftStatus: "ACTIVATED_SELF" }] } }),
+    prisma.subscription.count({ where: { giftedToClientId: { not: null } } }),
     prisma.giftCode.count({ where: { status: "ACTIVE" } }),
     prisma.giftCode.count({ where: { status: "EXPIRED" } }),
     prisma.giftCode.count({ where: { status: "REDEEMED" } }),
@@ -4291,6 +5507,9 @@ adminRouter.post("/gift-codes/create", asyncRoute(async (req, res) => {
     clientId: z.string().min(1),
     tariffId: z.string().min(1),
     giftMessage: z.string().max(200).optional(),
+    durationDays: z.number().int().min(1).max(3650).optional(),
+    trafficGb: z.number().min(0).max(1048576).optional(),
+    notify: z.boolean().optional(),
   });
 
   const parsed = schema.safeParse(req.body);
@@ -4298,7 +5517,7 @@ adminRouter.post("/gift-codes/create", asyncRoute(async (req, res) => {
     return res.status(400).json({ message: "Некорректные данные", errors: parsed.error.flatten().fieldErrors });
   }
 
-  const { clientId, tariffId, giftMessage } = parsed.data;
+  const { clientId, tariffId, giftMessage, durationDays, trafficGb, notify = true } = parsed.data;
 
   // Проверяем что клиент существует
   const client = await prisma.client.findUnique({ where: { id: clientId } });
@@ -4306,12 +5525,66 @@ adminRouter.post("/gift-codes/create", asyncRoute(async (req, res) => {
     return res.status(404).json({ message: "Клиент не найден" });
   }
 
-  const result = await adminCreateGiftCode(clientId, tariffId, giftMessage);
+  // передаём adminId чтобы в админ-списке отображался конкретный менеджер.
+  const adminIdForGift = (req as unknown as { adminId?: string }).adminId ?? null;
+  // админ-override срока/трафика (GB → bytes; 0 = безлимит).
+  const giftOverrides: { durationDays?: number; trafficLimitBytes?: bigint | null } = {};
+  if (durationDays != null) giftOverrides.durationDays = durationDays;
+  if (trafficGb != null) giftOverrides.trafficLimitBytes = trafficGb > 0 ? BigInt(Math.round(trafficGb * 1024 ** 3)) : BigInt(0);
+  const result = await adminCreateGiftCode(clientId, tariffId, giftMessage, adminIdForGift, giftOverrides);
   if (!result.ok) {
     return res.status(result.status).json({ message: result.error });
   }
 
-  return res.json(result.data);
+  // giftUrl считаем ВСЕГДА (нужен и в ответе админу, и для авто-уведомления).
+  // Авто-сообщение клиенту шлём только если notify (по умолчанию true). Новая выдача «код в руки» → notify=false.
+  let giftUrl: string | null = null;
+  try {
+    const cfg = await getSystemConfig();
+    const botToken = (cfg.telegramBotToken || "").trim();
+    if (botToken) {
+      const meRes = await fetch(`https://api.telegram.org/bot${botToken}/getMe`)
+        .then((r) => r.json() as Promise<{ ok: boolean; result?: { username?: string } }>)
+        .catch(() => null);
+      const botUsername = meRes?.result?.username ?? "bot";
+      giftUrl = `https://t.me/${botUsername}?start=gift_${result.data.code}`;
+      if (notify) {
+        const fullClient = await prisma.client.findUnique({
+          where: { id: clientId },
+          select: { telegramId: true, telegramUsername: true },
+        });
+        if (fullClient?.telegramId) {
+          const tariff = await prisma.tariff.findUnique({ where: { id: tariffId }, select: { name: true } });
+          const customMessage = giftMessage?.trim() ? `\n\n💬 «${giftMessage.trim()}»` : "";
+          const text =
+            `🎁 Вам подарили подписку <b>${tariff?.name ?? "VPN"}</b>!\n\n` +
+            `Код активации: <code>${result.data.code}</code>${customMessage}\n\n` +
+            `${giftUrl}`;
+          const shareText = `У меня для тебя подарок 🎁\n \nПодписка на сервис безопасного удалённого доступа 🛡 \n\n💡 Нажми на ссылку, чтобы активировать:\n\n${giftUrl}`;
+          const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(giftUrl)}&text=${encodeURIComponent(shareText)}`;
+          await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: fullClient.telegramId,
+              text,
+              parse_mode: "HTML",
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "💌 Отправить подарок", url: shareUrl }],
+                  [{ text: "🎁 Активировать подарок", url: giftUrl }],
+                ],
+              },
+            }),
+          }).catch((e) => console.error("[admin/gift-codes/create] notify client failed:", e));
+        }
+      }
+    }
+  } catch (e) {
+    console.error("[admin/gift-codes/create] giftUrl/notify error:", e);
+  }
+
+  return res.json({ ...result.data, giftUrl });
 }));
 
 // ——— Tour Steps (конструктор тура) ———
@@ -4858,4 +6131,480 @@ adminRouter.delete("/tour-steps/:id/video", asyncRoute(async (req, res) => {
     include: { mascot: { include: { emotions: true } } },
   });
   return res.json(tourStepToJson(updated));
+}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-subscription Remna endpoints.
+//
+// Параллельный набор к `/clients/:id/remna/*` — но работает per-subscription.
+// Используется в UI «Подписки клиента» — каждая подписка имеет свой Remna user
+// и должна управляться отдельно (limits, squads, disable/enable, reset-traffic).
+//
+// Helper getSubscriptionRemnaUuid берёт `Subscription.remnawaveUuid` по subId.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function getSubscriptionRemnaUuid(subId: string): Promise<string | null> {
+  const sub = await prisma.subscription.findUnique({
+    where: { id: subId },
+    select: { remnawaveUuid: true },
+  });
+  return sub?.remnawaveUuid ?? null;
+}
+
+const subIdParam = z.object({ subId: z.string().min(1) });
+
+/** Список всех подписок клиента (primary + secondary) — для нового UI «Подписки клиента». */
+adminRouter.get("/clients/:id/subscriptions", asyncRoute(async (req, res) => {
+  const parsed = clientIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid client id" });
+  // расширили выборку: включаем не только subs, которыми клиент
+  // владеет (ownerId), но и subs, ПОДАРЕННЫЕ ему (giftedToClientId). Раньше второй
+  // случай не показывался в инлайн-блоке «Подписки клиента» в карточке клиента.
+  const subs = await prisma.subscription.findMany({
+    where: {
+      OR: [
+        { ownerId: parsed.data.id },
+        { giftedToClientId: parsed.data.id },
+      ],
+    },
+    orderBy: { subscriptionIndex: "asc" },
+    include: {
+      tariff: { select: { id: true, name: true } },
+    },
+  });
+  return res.json({
+    items: subs.map((s) => ({
+      id: s.id,
+      subscriptionIndex: s.subscriptionIndex,
+      isPrimary: s.subscriptionIndex === 0,
+      remnawaveUuid: s.remnawaveUuid,
+      tariffId: s.tariffId,
+      tariffName: s.tariff?.name ?? null,
+      giftStatus: s.giftStatus,
+      // добавили в ответ: нужны для UI-бейджей «Подарочная» и
+      // «Получена в подарок» в инлайн-блоке карточки клиента (clients.tsx).
+      purchasedAsGift: s.purchasedAsGift,
+      ownerId: s.ownerId,
+      giftedToClientId: s.giftedToClientId,
+      autoRenewEnabled: s.autoRenewEnabled,
+      expireAt: s.expireAt?.toISOString() ?? null,
+      createdAt: s.createdAt.toISOString(),
+    })),
+  });
+}));
+
+/** GET Remna user данных для подписки (Username, лимиты, трафик, expireAt, сквады). */
+adminRouter.get("/subscriptions/:subId/remna", asyncRoute(async (req, res) => {
+  const parsed = subIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid subscription id" });
+  const remnaUuid = await getSubscriptionRemnaUuid(parsed.data.subId);
+  if (!remnaUuid) return res.status(400).json({ message: "Подписка не привязана к Remna" });
+  const result = await remnaGetUser(remnaUuid);
+  if (result.error) return res.status(result.status >= 400 ? result.status : 500).json({ message: result.error });
+  return res.json(result.data ?? {});
+}));
+
+/** PATCH лимитов / сквадов / телеграма Remna user конкретной подписки. */
+adminRouter.patch("/subscriptions/:subId/remna", asyncRoute(async (req, res) => {
+  const parsed = subIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid subscription id" });
+  const remnaUuid = await getSubscriptionRemnaUuid(parsed.data.subId);
+  if (!remnaUuid) return res.status(400).json({ message: "Подписка не привязана к Remna" });
+  const body = remnaUpdateBodySchema.safeParse(req.body);
+  if (!body.success) return res.status(400).json({ message: "Invalid input", errors: body.error.flatten() });
+  // для MANAGER разрешено менять ТОЛЬКО hwidDeviceLimit,
+  // и только при наличии action `change_device_limit`. Остальные поля — admin-only.
+  const reqExt = req as express.Request & { adminRole?: "ADMIN" | "MANAGER"; adminAllowedSections?: string[] };
+  if (reqExt.adminRole !== "ADMIN") {
+    const allowedKeys = new Set(["hwidDeviceLimit"]);
+    const presentKeys = Object.keys(body.data).filter((k) => (body.data as Record<string, unknown>)[k] !== undefined);
+    const onlyAllowed = presentKeys.length > 0 && presentKeys.every((k) => allowedKeys.has(k));
+    if (!onlyAllowed) {
+      return res.status(403).json({ message: "MANAGER может менять только лимит устройств в этом эндпоинте" });
+    }
+    if (!(reqExt.adminAllowedSections ?? []).includes("action:change_device_limit")) {
+      return res.status(403).json({ message: "Требуется право «change_device_limit»" });
+    }
+  }
+  const getRes = await remnaGetUser(remnaUuid);
+  if (getRes.error) return res.status(getRes.status >= 400 ? getRes.status : 500).json({ message: getRes.error });
+  const current = getRemnaUserFieldsForMerge(getRes.data);
+  const patchBody: Record<string, unknown> = { uuid: remnaUuid };
+  if (body.data.activeInternalSquads === undefined && current.activeInternalSquads.length > 0) patchBody.activeInternalSquads = current.activeInternalSquads;
+  if (body.data.telegramId === undefined && current.telegramId !== undefined) patchBody.telegramId = current.telegramId;
+  if (body.data.email === undefined && current.email !== undefined) patchBody.email = current.email;
+  Object.assign(patchBody, body.data);
+  // когда админ меняет expireAt и status явно
+  // не передан — форсим ACTIVE если новая дата в будущем. Иначе Remna user
+  // остаётся в старом status (например EXPIRED после истечения), и бот продолжает
+  // рисовать «истекла», хоть expireAt уже в будущем. EXPIRED не форсим — Remna
+  // сама переключит когда expireAt в прошлом.
+  if (body.data.expireAt && body.data.status === undefined) {
+    const newExpire = new Date(body.data.expireAt);
+    // EXPIRED не форсим — Remna сама переключит status когда expireAt в прошлом.
+    // Форсим только ACTIVE при «продлении» (expireAt в будущем): без этого
+    // user, который уже был EXPIRED, остаётся EXPIRED даже после продления.
+    if (!Number.isNaN(newExpire.getTime()) && newExpire.getTime() > Date.now()) {
+      patchBody.status = "ACTIVE";
+    }
+  }
+  const result = await remnaUpdateUser(patchBody);
+  if (result.error) return res.status(result.status >= 400 ? result.status : 500).json({ message: result.error });
+  // зеркалим expireAt в БД для этой подписки —
+  // чтобы auto-broadcast / бот видели ту же дату что в Remna. Без этого после
+  // PATCH через UI «Применить лимиты» расходились БД и Remna (бот мог слать
+  // уведомления «истекает через 15 мин» когда в Remna уже истекло, и наоборот).
+  if (body.data.expireAt) {
+    try {
+      await prisma.subscription.update({
+        where: { id: parsed.data.subId },
+        data: { expireAt: new Date(body.data.expireAt) },
+      });
+    } catch (e) {
+      console.error("[admin/subscriptions/remna] expireAt DB sync failed:", e);
+    }
+  }
+  return res.json(result.data ?? {});
+}));
+
+/** Отвязать подписку от Remna (обнулить Subscription.remnawaveUuid). */
+adminRouter.post("/subscriptions/:subId/remna/unlink", asyncRoute(async (req, res) => {
+  const parsed = subIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid subscription id" });
+  const sub = await prisma.subscription.findUnique({
+    where: { id: parsed.data.subId },
+    select: { id: true, remnawaveUuid: true },
+  });
+  if (!sub) return res.status(404).json({ message: "Подписка не найдена" });
+  if (!sub.remnawaveUuid) return res.status(400).json({ message: "Подписка уже не привязана к Remna" });
+  await prisma.subscription.update({ where: { id: sub.id }, data: { remnawaveUuid: null } });
+  return res.json({ ok: true });
+}));
+
+adminRouter.post("/subscriptions/:subId/remna/revoke-subscription", asyncRoute(async (req, res) => {
+  const parsed = subIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid subscription id" });
+  const remnaUuid = await getSubscriptionRemnaUuid(parsed.data.subId);
+  if (!remnaUuid) return res.status(400).json({ message: "Подписка не привязана к Remna" });
+  const result = await remnaRevokeUserSubscription(remnaUuid);
+  if (result.error) return res.status(result.status >= 400 ? result.status : 500).json({ message: result.error });
+  return res.json(result.data ?? {});
+}));
+
+adminRouter.post("/subscriptions/:subId/remna/disable", asyncRoute(async (req, res) => {
+  const parsed = subIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid subscription id" });
+  const remnaUuid = await getSubscriptionRemnaUuid(parsed.data.subId);
+  if (!remnaUuid) return res.status(400).json({ message: "Подписка не привязана к Remna" });
+  const result = await remnaDisableUser(remnaUuid);
+  if (result.error) return res.status(result.status >= 400 ? result.status : 500).json({ message: result.error });
+  return res.json(result.data ?? {});
+}));
+
+adminRouter.post("/subscriptions/:subId/remna/enable", asyncRoute(async (req, res) => {
+  const parsed = subIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid subscription id" });
+  const remnaUuid = await getSubscriptionRemnaUuid(parsed.data.subId);
+  if (!remnaUuid) return res.status(400).json({ message: "Подписка не привязана к Remna" });
+  const result = await remnaEnableUser(remnaUuid);
+  if (result.error) return res.status(result.status >= 400 ? result.status : 500).json({ message: result.error });
+  return res.json(result.data ?? {});
+}));
+
+adminRouter.post("/subscriptions/:subId/remna/reset-traffic", asyncRoute(async (req, res) => {
+  const parsed = subIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid subscription id" });
+  const remnaUuid = await getSubscriptionRemnaUuid(parsed.data.subId);
+  if (!remnaUuid) return res.status(400).json({ message: "Подписка не привязана к Remna" });
+  const result = await remnaResetUserTraffic(remnaUuid);
+  if (result.error) return res.status(result.status >= 400 ? result.status : 500).json({ message: result.error });
+  return res.json(result.data ?? {});
+}));
+
+adminRouter.post("/subscriptions/:subId/remna/squads/add", asyncRoute(async (req, res) => {
+  const parsed = subIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid subscription id" });
+  const remnaUuid = await getSubscriptionRemnaUuid(parsed.data.subId);
+  if (!remnaUuid) return res.status(400).json({ message: "Подписка не привязана к Remna" });
+  const body = squadActionSchema.safeParse(req.body);
+  if (!body.success) return res.status(400).json({ message: "Invalid input" });
+  const userRes = await remnaGetUser(remnaUuid);
+  const userData = userRes.data as Record<string, unknown> | undefined;
+  const resp = (userData?.response ?? userData) as Record<string, unknown> | undefined;
+  const currentSquads: string[] = [];
+  const ais = resp?.activeInternalSquads;
+  if (Array.isArray(ais)) {
+    for (const s of ais) {
+      const u = (s && typeof s === "object" && "uuid" in s) ? (s as Record<string, unknown>).uuid : s;
+      if (typeof u === "string") currentSquads.push(u);
+    }
+  }
+  if (!currentSquads.includes(body.data.squadUuid)) currentSquads.push(body.data.squadUuid);
+  const result = await remnaUpdateUser({ uuid: remnaUuid, activeInternalSquads: currentSquads });
+  if (result.error) return res.status(result.status >= 400 ? result.status : 500).json({ message: result.error });
+  return res.json(result.data ?? {});
+}));
+
+adminRouter.post("/subscriptions/:subId/remna/squads/remove", asyncRoute(async (req, res) => {
+  const parsed = subIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid subscription id" });
+  const remnaUuid = await getSubscriptionRemnaUuid(parsed.data.subId);
+  if (!remnaUuid) return res.status(400).json({ message: "Подписка не привязана к Remna" });
+  const body = squadActionSchema.safeParse(req.body);
+  if (!body.success) return res.status(400).json({ message: "Invalid input" });
+  const userRes = await remnaGetUser(remnaUuid);
+  if (userRes.error) return res.status(userRes.status >= 400 ? userRes.status : 500).json({ message: userRes.error });
+  const current = getRemnaUserFieldsForMerge(userRes.data);
+  const currentSquads = current.activeInternalSquads.filter((u) => u !== body.data.squadUuid);
+  const result = await remnaUpdateUser({ uuid: remnaUuid, activeInternalSquads: currentSquads });
+  if (result.error) return res.status(result.status >= 400 ? result.status : 500).json({ message: result.error });
+  return res.json(result.data ?? {});
+}));
+
+adminRouter.get("/subscriptions/:subId/remna/devices", asyncRoute(async (req, res) => {
+  const parsed = subIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid subscription id" });
+  const remnaUuid = await getSubscriptionRemnaUuid(parsed.data.subId);
+  if (!remnaUuid) return res.status(400).json({ message: "Подписка не привязана к Remna" });
+  const result = await remnaGetUserHwidDevices(remnaUuid);
+  if (result.error) return res.status(result.status >= 400 ? result.status : 500).json({ message: result.error });
+  return res.json(result.data ?? {});
+}));
+
+adminRouter.post("/subscriptions/:subId/remna/devices/delete", requireAction("delete_device"), asyncRoute(async (req, res) => {
+  const parsed = subIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid subscription id" });
+  const remnaUuid = await getSubscriptionRemnaUuid(parsed.data.subId);
+  if (!remnaUuid) return res.status(400).json({ message: "Подписка не привязана к Remna" });
+  const body = z.object({ hwid: z.string().min(1) }).safeParse(req.body);
+  if (!body.success) return res.status(400).json({ message: "Invalid input" });
+  const result = await remnaDeleteUserHwidDevice(remnaUuid, body.data.hwid);
+  if (result.error) return res.status(result.status >= 400 ? result.status : 500).json({ message: result.error });
+  return res.json(result.data ?? { success: true });
+}));
+
+adminRouter.get("/subscriptions/:subId/remna/usage", asyncRoute(async (req, res) => {
+  const parsed = subIdParam.safeParse(req.params);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid subscription id" });
+  const remnaUuid = await getSubscriptionRemnaUuid(parsed.data.subId);
+  if (!remnaUuid) return res.status(400).json({ message: "Подписка не привязана к Remna" });
+  const days = Math.min(Math.max(parseInt(req.query.days as string) || 30, 1), 90);
+  const end = new Date();
+  const start = new Date(end.getTime() - days * 86400000);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  const result = await remnaGetUserBandwidthStats(remnaUuid, fmt(start), fmt(end));
+  if (result.error) return res.status(result.status >= 400 ? result.status : 500).json({ message: result.error });
+  return res.json(result.data ?? {});
+}));
+
+// ─── Referral admin (16.05.2026) ──────────────────────────────────
+// Полная картина по рефералке конкретного клиента: его реферер, кого пригласил,
+// заработок по уровням L1/L2/L3, последние credit'ы. Plus возможность переназначить
+// реферера (для саппорта когда клиент жалуется «не приходит реф. кэшбек»).
+
+/**
+ * GET /api/admin/referrals/lookup?q=<query>
+ * Поиск клиента по: client.id (cuid), telegramId, telegramUsername, email, referralCode.
+ * Возвращает до 10 совпадений — для autocomplete'а.
+ */
+adminRouter.get("/referrals/lookup", asyncRoute(async (req, res) => {
+  const q = String(req.query.q ?? "").trim();
+  if (q.length < 2) return res.json({ clients: [] });
+  const stripped = q.replace(/^@/, "");
+  const clients = await prisma.client.findMany({
+    where: {
+      OR: [
+        { id: q },
+        { telegramId: stripped },
+        { telegramUsername: { equals: stripped, mode: "insensitive" } },
+        { telegramUsername: { contains: stripped, mode: "insensitive" } },
+        { email: { equals: stripped, mode: "insensitive" } },
+        { referralCode: { equals: stripped.toUpperCase() } },
+      ],
+    },
+    select: {
+      id: true,
+      telegramId: true,
+      telegramUsername: true,
+      email: true,
+      referralCode: true,
+      referrerId: true,
+      balance: true,
+      _count: { select: { referrals: true, referralCredits: true } },
+    },
+    take: 10,
+  });
+  return res.json({ clients });
+}));
+
+/**
+ * GET /api/admin/referrals/:id
+ * Полная инфо по рефералке клиента.
+ *  - client (basic info)
+ *  - referrer (если есть)
+ *  - referrals[] (кого он пригласил)
+ *  - earnings: { totalAll, byLevel: {1, 2, 3} }
+ *  - recentCredits[] (последние 50)
+ */
+adminRouter.get("/referrals/:id", asyncRoute(async (req, res) => {
+  const id = String(req.params.id ?? "").trim();
+  if (!id) return res.status(400).json({ message: "Invalid client id" });
+
+  const client = await prisma.client.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      telegramId: true,
+      telegramUsername: true,
+      email: true,
+      referralCode: true,
+      referralPercent: true,
+      referrerId: true,
+      balance: true,
+      createdAt: true,
+    },
+  });
+  if (!client) return res.status(404).json({ message: "Клиент не найден" });
+
+  const referrer = client.referrerId
+    ? await prisma.client.findUnique({
+        where: { id: client.referrerId },
+        select: {
+          id: true, telegramId: true, telegramUsername: true,
+          email: true, referralCode: true,
+        },
+      })
+    : null;
+
+  const referrals = await prisma.client.findMany({
+    where: { referrerId: id },
+    select: {
+      id: true,
+      telegramId: true,
+      telegramUsername: true,
+      email: true,
+      createdAt: true,
+      _count: { select: { referrals: true } },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 200,
+  });
+
+  // earnings aggregate
+  const earningsRows = await prisma.referralCredit.groupBy({
+    by: ["level"],
+    where: { referrerId: id },
+    _sum: { amount: true },
+    _count: { id: true },
+  });
+  const byLevel: Record<number, { amount: number; count: number }> = {};
+  let totalAll = 0;
+  let totalCount = 0;
+  for (const r of earningsRows) {
+    const lvl = r.level;
+    const amt = Number(r._sum.amount ?? 0);
+    const cnt = Number(r._count.id ?? 0);
+    byLevel[lvl] = { amount: amt, count: cnt };
+    totalAll += amt;
+    totalCount += cnt;
+  }
+
+  const recentCredits = await prisma.referralCredit.findMany({
+    where: { referrerId: id },
+    select: {
+      id: true,
+      amount: true,
+      level: true,
+      createdAt: true,
+      paymentId: true,
+      payment: {
+        select: {
+          id: true,
+          amount: true,
+          status: true,
+          clientId: true,
+          client: { select: { id: true, telegramId: true, telegramUsername: true } },
+        },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 50,
+  });
+
+  return res.json({
+    client,
+    referrer,
+    referrals,
+    earnings: { totalAll, totalCount, byLevel },
+    recentCredits,
+  });
+}));
+
+/**
+ * PATCH /api/admin/referrals/:id/referrer
+ * Body: { referrerId: string | null, lookupBy?: "id"|"tgid"|"username"|"referralCode" }
+ * Если lookupBy задан и не "id" — referrerId интерпретируется как соответствующий ключ
+ * (например telegramId), и резолвится в Client.id. Защита от self-referral / циклов.
+ */
+adminRouter.patch("/referrals/:id/referrer", asyncRoute(async (req, res) => {
+  const id = String(req.params.id ?? "").trim();
+  if (!id) return res.status(400).json({ message: "Invalid client id" });
+
+  const schema = z.object({
+    referrerId: z.string().nullable(),
+    lookupBy: z.enum(["id", "tgid", "username", "referralCode"]).optional(),
+  });
+  const body = schema.safeParse(req.body);
+  if (!body.success) return res.status(400).json({ message: "Invalid input" });
+
+  const client = await prisma.client.findUnique({ where: { id }, select: { id: true, referrerId: true } });
+  if (!client) return res.status(404).json({ message: "Клиент не найден" });
+
+  let resolvedReferrerId: string | null = null;
+  if (body.data.referrerId) {
+    const raw = body.data.referrerId.trim().replace(/^@/, "");
+    const by = body.data.lookupBy ?? "id";
+    let found: { id: string } | null = null;
+    if (by === "id") {
+      found = await prisma.client.findUnique({ where: { id: raw }, select: { id: true } });
+    } else if (by === "tgid") {
+      found = await prisma.client.findFirst({ where: { telegramId: raw }, select: { id: true } });
+    } else if (by === "username") {
+      found = await prisma.client.findFirst({
+        where: { telegramUsername: { equals: raw, mode: "insensitive" } },
+        select: { id: true },
+      });
+    } else if (by === "referralCode") {
+      found = await prisma.client.findFirst({
+        where: { referralCode: raw.toUpperCase() },
+        select: { id: true },
+      });
+    }
+    if (!found) return res.status(404).json({ message: "Реферер не найден по указанному ключу" });
+    if (found.id === id) return res.status(400).json({ message: "Нельзя сделать клиента реферером самого себя" });
+
+    // Защита от циклов: проверяем что новый реферер не является нашим (прямым или транзитивным) рефералом.
+    let cursor: string | null = found.id;
+    const visited = new Set<string>();
+    while (cursor) {
+      if (cursor === id) {
+        return res.status(400).json({ message: "Цикл рефералки запрещён (этот клиент уже является чьим-то рефералом по цепочке)" });
+      }
+      if (visited.has(cursor)) break;
+      visited.add(cursor);
+      const parent: { referrerId: string | null } | null = await prisma.client.findUnique({
+        where: { id: cursor },
+        select: { referrerId: true },
+      });
+      cursor = parent?.referrerId ?? null;
+    }
+    resolvedReferrerId = found.id;
+  }
+
+  await prisma.client.update({
+    where: { id },
+    data: { referrerId: resolvedReferrerId },
+  });
+
+  return res.json({ ok: true, referrerId: resolvedReferrerId, previousReferrerId: client.referrerId });
 }));

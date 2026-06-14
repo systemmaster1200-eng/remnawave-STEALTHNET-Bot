@@ -1,58 +1,53 @@
 /**
- * Middleware для авторизации входящих запросов от Telegram-бота.
+ * No-op shim после удаления multi-bot/clone-bots в v5.0.0.
  *
- * Заменяет старую схему «X-Telegram-Bot-Token === systemSettings.telegram_bot_token»
- * на «X-Telegram-Bot-Token принадлежит активному Bot из таблицы bots».
- *
- * После успешной проверки в req.bot оказывается полная Bot-запись —
- * далее любой роут может использовать `req.bot.id` как фильтр для prisma-запросов
- * и `req.bot.markupPercent` для расчёта цены.
+ * `optionalBot` оставлен как настоящий express-middleware (используется через
+ * `publicConfigRouter.use(optionalBot)`), но теперь только кладёт null в req.bot
+ * и сразу вызывает next() — никаких DB-запросов больше нет.
  */
 
 import type { Request, Response, NextFunction } from "express";
-import type { Bot } from "@prisma/client";
-import { getBotByToken } from "./bot.service.js";
+import type { StubBot } from "./bot.service.js";
+import { getBotByToken, getPrimaryBot } from "./bot.service.js";
 
-export interface ReqWithBot {
-  bot: Bot;
-}
+export type ReqWithBot = Request & { bot?: StubBot | null };
 
-/** Извлекает токен из заголовка X-Telegram-Bot-Token. Регистр заголовка нормализуется Express'ом. */
 export function extractBotTokenFromRequest(req: Request): string {
   const h = req.headers["x-telegram-bot-token"];
-  if (typeof h === "string") return h.trim();
-  return "";
+  return typeof h === "string" ? h.trim() : "";
+}
+
+/** Helper (не middleware): получить bot объект явно для запроса. */
+export async function resolveBotForRequest(req: Request): Promise<StubBot> {
+  const token = extractBotTokenFromRequest(req);
+  if (token) {
+    const b = await getBotByToken(token);
+    if (b) return b;
+  }
+  return getPrimaryBot();
 }
 
 /**
- * Express-middleware: проверяет токен, кладёт активного Bot в req.bot.
- * При неудаче — 401. Используется для роутов, доступных ИЗ бот-процесса
- * (например, /api/bot-admin/*, /api/public/link-telegram-from-bot, /api/internal/bots).
+ * Express middleware: кладёт `req.bot` (либо primary stub если есть валидный токен,
+ * либо null) и продолжает цепочку через next().
  */
-export async function resolveBot(req: Request, res: Response, next: NextFunction) {
+export function optionalBot(req: Request, _res: Response, next: NextFunction): void {
   const token = extractBotTokenFromRequest(req);
   if (!token) {
-    return res.status(401).json({ message: "Unauthorized: missing X-Telegram-Bot-Token header" });
+    (req as ReqWithBot).bot = null;
+    next();
+    return;
   }
-  const bot = await getBotByToken(token);
-  if (!bot) {
-    return res.status(401).json({ message: "Unauthorized: bot token not recognized or bot inactive" });
-  }
-  (req as Request & ReqWithBot).bot = bot;
-  next();
+  getBotByToken(token)
+    .then((bot) => {
+      (req as ReqWithBot).bot = bot;
+      next();
+    })
+    .catch(() => {
+      (req as ReqWithBot).bot = null;
+      next();
+    });
 }
 
-/**
- * Опциональный аналог: если токен есть и валидный — кладёт req.bot, иначе пропускает дальше.
- * Используется в публичных роутах, которые должны работать и без бота
- * (например, getPublicConfig из веб-кабинета).
- */
-export async function optionalBot(req: Request, _res: Response, next: NextFunction) {
-  const token = extractBotTokenFromRequest(req);
-  if (!token) return next();
-  const bot = await getBotByToken(token);
-  if (bot) {
-    (req as Request & Partial<ReqWithBot>).bot = bot;
-  }
-  next();
-}
+/** Алиас для совместимости со старым кодом, который импортировал resolveBot. */
+export const resolveBot = resolveBotForRequest;

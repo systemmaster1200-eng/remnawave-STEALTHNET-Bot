@@ -1,12 +1,8 @@
 /**
  * API для админ-панели в Telegram-боте.
- * Авторизация: X-Telegram-Bot-Token (токен ЛЮБОГО активного клона) + telegramId (ID админа в Telegram).
- * Доступ только для telegramId из настройки bot_admin_telegram_ids.
- *
- * После миграции на боты-клоны: токен сверяется с таблицей bots (любой активный клон),
- * а не только с system_settings.telegram_bot_token. Список админов остаётся общим
- * (bot_admin_telegram_ids) — то есть админ-панель в боте видит всех клиентов всех клонов
- * (это feature, а не bug: владелец платформы должен видеть всё).
+ * Авторизация: X-Telegram-Bot-Token (основной токен из env BOT_TOKEN)
+ * + telegramId (ID админа в Telegram). Доступ только для telegramId из настройки
+ * bot_admin_telegram_ids.
  */
 
 import { Router, Request, Response } from "express";
@@ -14,7 +10,6 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { getSystemConfig } from "../client/client.service.js";
-import { getBotByToken } from "../bot/bot.service.js";
 import { markPaymentPaid } from "../payment/mark-paid.service.js";
 import { getBroadcastRecipientsCount, runBroadcast } from "../broadcast/broadcast.service.js";
 import {
@@ -68,15 +63,10 @@ function getTelegramId(req: Request): number | null {
   return null;
 }
 
-async function requireBotAdmin(req: Request, res: Response): Promise<{ telegramId: number; botId: string } | null> {
+async function requireBotAdmin(req: Request, res: Response): Promise<{ telegramId: number } | null> {
   const token = getBotToken(req);
-  if (!token) {
-    res.status(401).json({ message: "Unauthorized" });
-    return null;
-  }
-  // После миграции: принимаем токен ЛЮБОГО активного клона, а не только primary.
-  const bot = await getBotByToken(token);
-  if (!bot) {
+  const expected = (process.env.BOT_TOKEN ?? "").trim();
+  if (!token || !expected || token !== expected) {
     res.status(401).json({ message: "Unauthorized" });
     return null;
   }
@@ -91,7 +81,7 @@ async function requireBotAdmin(req: Request, res: Response): Promise<{ telegramI
     res.status(403).json({ message: "Forbidden" });
     return null;
   }
-  return { telegramId, botId: bot.id };
+  return { telegramId };
 }
 
 const notificationSettingsSchema = z.object({

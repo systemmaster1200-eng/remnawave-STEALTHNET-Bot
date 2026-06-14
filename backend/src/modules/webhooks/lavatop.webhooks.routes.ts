@@ -59,7 +59,6 @@ async function activatePayment(paymentId: string) {
     select: {
       id: true,
       clientId: true,
-      botId: true,
       amount: true,
       currency: true,
       tariffId: true,
@@ -84,7 +83,11 @@ async function activatePayment(paymentId: string) {
     });
     await notifyBalanceToppedUp(payment.clientId, payment.amount, payment.currency || "RUB", "Lava.top").catch(() => {});
   } else if (isExtraOption) {
-    await applyExtraOptionByPaymentId(payment.id);
+    const r = await applyExtraOptionByPaymentId(payment.id);
+    if (r.ok) {
+      const { notifyExtraOptionApplied } = await import("../notification/telegram-notify.service.js");
+      await notifyExtraOptionApplied(payment.clientId, payment.id).catch(() => {});
+    }
   } else if (payment.proxyTariffId) {
     const proxyResult = await createProxySlotsByPaymentId(payment.id);
     if (proxyResult.ok) {
@@ -101,6 +104,13 @@ async function activatePayment(paymentId: string) {
     const activation = await activateTariffByPaymentId(payment.id);
     if (activation.ok) await notifyTariffActivated(payment.clientId, payment.id).catch(() => {});
   }
+
+  // сжигаем одноразовую персональную скидку после продуктовой покупки.
+  if (!isTopUp) {
+    const { extinguishOneTimeDiscount } = await import("../client/personal-discount.js");
+    await extinguishOneTimeDiscount(payment.clientId).catch(() => {});
+  }
+
   await distributeReferralRewards(payment.id).catch(() => {});
 }
 
@@ -126,13 +136,12 @@ async function handleRecurringRenewal(event: LavatopWebhookEvent): Promise<void>
     return;
   }
 
-  // Находим исходный (parent) платёж — берём из него clientId, tariffId, botId
+  // Находим исходный (parent) платёж — берём из него clientId, tariffId
   const parent = await prisma.payment.findFirst({
     where: { orderId: parentOrderId, provider: "lavatop" },
     select: {
       id: true,
       clientId: true,
-      botId: true,
       currency: true,
       tariffId: true,
       tariffPriceOptionId: true,
@@ -140,9 +149,6 @@ async function handleRecurringRenewal(event: LavatopWebhookEvent): Promise<void>
       singboxTariffId: true,
       deviceCount: true,
       metadata: true,
-      baseAmount: true,
-      botMarkupPercent: true,
-      botMarkupAmount: true,
     },
   });
   if (!parent) {
@@ -173,7 +179,6 @@ async function handleRecurringRenewal(event: LavatopWebhookEvent): Promise<void>
     data: {
       id: newPaymentId,
       clientId: parent.clientId,
-      botId: parent.botId,
       orderId: childOrderId,
       amount,
       currency,
@@ -185,9 +190,6 @@ async function handleRecurringRenewal(event: LavatopWebhookEvent): Promise<void>
       proxyTariffId: parent.proxyTariffId,
       singboxTariffId: parent.singboxTariffId,
       deviceCount: parent.deviceCount,
-      baseAmount: parent.baseAmount,
-      botMarkupPercent: parent.botMarkupPercent,
-      botMarkupAmount: parent.botMarkupAmount,
       metadata: JSON.stringify(metadata),
       paidAt: new Date(),
     },
@@ -264,7 +266,7 @@ lavatopWebhooksRouter.post("/", async (req: Request, res: Response) => {
 
   const payment = await prisma.payment.findFirst({
     where: { orderId, provider: "lavatop" },
-    select: { id: true, status: true, clientId: true, botId: true, amount: true, currency: true, tariffId: true, proxyTariffId: true, singboxTariffId: true, metadata: true },
+    select: { id: true, status: true, clientId: true, amount: true, currency: true, tariffId: true, proxyTariffId: true, singboxTariffId: true, metadata: true },
   });
 
   if (!payment) {

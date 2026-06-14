@@ -1,81 +1,134 @@
 /**
- * Запуск авто-рассылки по расписанию (cron).
- * По умолчанию — раз в день в 9:00 (по времени сервера).
- * Расписание можно менять в админке (настройки → авто-рассылка или системные настройки).
+ * Per-rule cron scheduler для авто-рассылки.
+ *
+ * Архитектура:
+ * - Каждое правило AutoBroadcastRule имеет своё cron_expression (или null → дефолт по триггеру).
+ * - При старте сервера / после edit правила — пересоздаём cron-задачи: одна задача = одно правило.
+ * - Минутный cron используется только для triggers с узким окном (`subscription_ending_minutes`).
+ * - Ежечасный — для `subscription_expired` (окно 7 дней, час задержки не критичен).
+ * - Ежедневный — для one-time триггеров и `subscription_ending_soon`.
+ *
+ * Загрузка БД минимизирована: каждое правило знает когда срабатывать → нет одной большой пачки.
  */
 
 import cron, { type ScheduledTask } from "node-cron";
-import { getSystemConfig } from "../client/client.service.js";
-import { runAllRules } from "./auto-broadcast.service.js";
-import { env } from "../../config/env.js";
+import { prisma } from "../../db.js";
+import { runRule } from "./auto-broadcast.service.js";
 
-const DEFAULT_CRON = "0 9 * * *"; // 9:00 каждый день (minute hour day month weekday)
+/** Дефолтное расписание по типу триггера, если у правила cronExpression=null. */
+const DEFAULT_CRON_BY_TRIGGER: Record<string, string> = {
+  subscription_ending_minutes: "* * * * *",   // каждую минуту — узкое окно ±1 мин
+  subscription_expired:        "0 * * * *",   // каждый час — окно 7 дней, час OK
+  subscription_ending_soon:    "0 9 * * *",   // ежедневно в 9 утра
+  // after_registration НЕ запускается по
+  // крону — отправляется event-driven при /start в боте через
+  // fireRegistrationRulesForClient(). См. EVENT_DRIVEN_TRIGGERS ниже.
+  no_payment:                  "0 9 * * *",
+  trial_not_connected:         "0 9 * * *",
+  trial_used_never_paid:       "0 9 * * *",
+  no_traffic:                  "0 9 * * *",
+  inactivity:                  "0 9 * * *",
+};
 
-let currentTask: ScheduledTask | null = null;
+/**
+ * per-rule флаг `event_driven` на самом
+ * правиле определяет, скиппает ли scheduler создание крон-задачи. Это позволяет
+ * для одного и того же триггера (например after_registration) иметь несколько
+ * правил с разной логикой: одно мгновенное при /start (event_driven=true),
+ * другое по крону через N дней (event_driven=false). Старая константа удалена.
+ */
+const FALLBACK_CRON = "0 9 * * *";
 
-function startWithExpression(cronExpression: string): ScheduledTask | null {
-  const expr = cronExpression.trim();
-  if (!expr) return null;
+/** Активные cron-задачи: ruleId → ScheduledTask. */
+const ruleTasks = new Map<string, ScheduledTask>();
 
-  const valid = cron.validate(expr);
-  const schedule = valid ? expr : DEFAULT_CRON;
-  if (!valid) {
-    console.warn(`[auto-broadcast] Invalid cron "${expr}", using ${DEFAULT_CRON}`);
+/** Резолв расписания: явное cronExpression правила → дефолт по триггеру → fallback 9:00. */
+export function resolveCronForRule(rule: { cronExpression: string | null; triggerType: string }): string {
+  const explicit = rule.cronExpression?.trim();
+  if (explicit && cron.validate(explicit)) return explicit;
+  if (explicit) {
+    console.warn(`[auto-broadcast] Invalid cronExpression "${explicit}" for trigger ${rule.triggerType}, using default`);
+  }
+  return DEFAULT_CRON_BY_TRIGGER[rule.triggerType] ?? FALLBACK_CRON;
+}
+
+/** Запустить cron-задачу для одного правила. */
+function scheduleRule(rule: { id: string; name: string; enabled: boolean; cronExpression: string | null; triggerType: string; eventDriven: boolean }): void {
+  // Если для правила уже была задача — остановить.
+  const existing = ruleTasks.get(rule.id);
+  if (existing) {
+    existing.stop();
+    ruleTasks.delete(rule.id);
+  }
+  if (!rule.enabled) return;
+  // per-rule флаг — если правило event-driven,
+  // крон-задачу не создаём (оно вызывается по событию из бота/бэка).
+  if (rule.eventDriven) {
+    console.log(`[auto-broadcast] Skipping cron for "${rule.name}" — event-driven (triggers: ${rule.triggerType})`);
+    return;
   }
 
+  const schedule = resolveCronForRule(rule);
   const task = cron.schedule(schedule, async () => {
-    console.log(`[auto-broadcast] Cron triggered (${schedule}), starting rules...`);
+    console.log(`[auto-broadcast] Running rule "${rule.name}" (${rule.triggerType}, ${schedule})`);
     try {
-      const results = await runAllRules();
-      const total = results.reduce((s, r) => s + r.sent, 0);
-      const totalErrors = results.reduce((s, r) => s + r.errors.length, 0);
-
-      if (results.length === 0) {
-        console.log("[auto-broadcast] No enabled rules found.");
-      } else {
-        console.log(
-          `[auto-broadcast] Cron run complete: ${results.length} rule(s), ${total} sent, ${totalErrors} error(s)`,
-        );
-        // Логируем результат каждого правила при наличии ошибок
-        for (const r of results) {
-          if (r.errors.length > 0) {
-            console.warn(`[auto-broadcast]   Rule "${r.ruleName}": ${r.sent} sent, errors: ${r.errors.join("; ")}`);
-          }
-        }
+      const result = await runRule(rule.id);
+      await prisma.autoBroadcastRule.update({
+        where: { id: rule.id },
+        data: { lastRunAt: new Date() },
+      }).catch(() => {});
+      if (result.errors.length > 0) {
+        console.warn(`[auto-broadcast] Rule "${rule.name}": sent=${result.sent}, errors=${result.errors.length}: ${result.errors.slice(0, 3).join("; ")}`);
+      } else if (result.sent > 0) {
+        console.log(`[auto-broadcast] Rule "${rule.name}": sent=${result.sent}`);
       }
     } catch (e) {
-      console.error("[auto-broadcast] Scheduled run failed:", e);
+      console.error(`[auto-broadcast] Rule "${rule.name}" failed:`, e);
     }
   });
-
-  console.log(`[auto-broadcast] Scheduler started: ${schedule}`);
-  return task;
+  ruleTasks.set(rule.id, task);
+  console.log(`[auto-broadcast] Scheduled "${rule.name}" with "${schedule}" (${rule.triggerType})`);
 }
 
-/** Запустить планировщик. Если выражение не передано — берётся из настроек (БД) или env, иначе по умолчанию 9:00. */
-export async function startAutoBroadcastScheduler(cronExpression?: string): Promise<ScheduledTask | null> {
-  let expr = cronExpression?.trim();
-  if (!expr) {
-    const config = await getSystemConfig();
-    expr = config.autoBroadcastCron ?? env.AUTO_BROADCAST_CRON ?? DEFAULT_CRON;
+/** Загрузить ВСЕ правила из БД и запустить cron-задачи для каждого. */
+export async function startAutoBroadcastScheduler(): Promise<void> {
+  // Останавливаем все предыдущие задачи (на случай повторного вызова).
+  for (const [, task] of ruleTasks) task.stop();
+  ruleTasks.clear();
+
+  const rules = await prisma.autoBroadcastRule.findMany({
+    select: { id: true, name: true, enabled: true, cronExpression: true, triggerType: true, eventDriven: true },
+  });
+  for (const r of rules) scheduleRule(r);
+  console.log(`[auto-broadcast] Scheduler started: ${ruleTasks.size} active rule(s) (${rules.length} total)`);
+}
+
+/** Пересоздать cron-задачу для одного правила (вызывается после create/update в админке). */
+export async function rescheduleRule(ruleId: string): Promise<void> {
+  const rule = await prisma.autoBroadcastRule.findUnique({
+    where: { id: ruleId },
+    select: { id: true, name: true, enabled: true, cronExpression: true, triggerType: true, eventDriven: true },
+  });
+  if (!rule) {
+    // Правило удалили — снимаем задачу.
+    const task = ruleTasks.get(ruleId);
+    if (task) {
+      task.stop();
+      ruleTasks.delete(ruleId);
+      console.log(`[auto-broadcast] Removed task for deleted rule ${ruleId}`);
+    }
+    return;
   }
-  currentTask = startWithExpression(expr);
-  return currentTask;
+  scheduleRule(rule);
 }
 
-/** Перезапустить планировщик с актуальным расписанием из настроек (после сохранения в админке). */
+/** Backwards compat — старый код может вызывать рестарт scheduler'а. */
 export async function restartAutoBroadcastScheduler(): Promise<void> {
-  if (currentTask) {
-    currentTask.stop();
-    currentTask = null;
-  }
   await startAutoBroadcastScheduler();
 }
 
-/** Остановить планировщик (при завершении процесса). */
+/** Остановить все задачи (при graceful shutdown). */
 export function stopAutoBroadcastScheduler(): void {
-  if (currentTask) {
-    currentTask.stop();
-    currentTask = null;
-  }
+  for (const [, task] of ruleTasks) task.stop();
+  ruleTasks.clear();
 }

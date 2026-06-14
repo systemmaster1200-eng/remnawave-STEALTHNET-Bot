@@ -16,13 +16,16 @@ export interface ReqAdmin {
 }
 
 function parseAllowedSections(raw: string | null): string[] {
-  if (!raw?.trim()) return [];
+  const s = (raw ?? "").trim();
+  if (!s) return [];
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === "string") : [];
+    const parsed = JSON.parse(s) as unknown;
+    if (Array.isArray(parsed)) return parsed.filter((x): x is string => typeof x === "string");
   } catch {
-    return [];
+    /* fall through */
   }
+  // legacy CSV-формат от старого PUT /admin-permissions.
+  return s.split(",").map((x) => x.trim()).filter(Boolean);
 }
 
 /** Нормализует путь запроса до пути относительно /api/admin (без ведущего слэша). */
@@ -43,6 +46,9 @@ function getSectionFromPath(normalisedPath: string): string | null {
     return "dashboard";
   }
   if (first === "payments") return "sales-report";
+  // доступ защищён через action,
+  // не через секцию — возвращаем null чтобы requireAdminSection пропустил.
+  if (first === "balance-sales") return null;
   if (first === "tariff-categories") return "tariffs";
   if (first === "default-subscription-page-config") return "settings";
   if (first === "sync") return "settings";
@@ -51,6 +57,8 @@ function getSectionFromPath(normalisedPath: string): string | null {
   if (first === "traffic-abuse") return "analytics";
   if (first === "api-keys") return "settings";
   if (first === "gramads") return "promo-vpn";
+  // Антибот: и фильтры регистраций, и bulk-purge — все работают через /api/admin/clients/...
+  if (first === "clients" && (segments[1] === "antibot" || segments[1] === "bulk")) return "clients";
   return first;
 }
 
@@ -101,6 +109,21 @@ export function requireAdminSection(req: Request, res: Response, next: NextFunct
   }
   if (ext.adminAllowedSections.includes(section)) return next();
   return res.status(403).json({ message: "Access denied to this section." });
+}
+
+/**
+ * фабрика middleware «требуется action».
+ * ADMIN всегда проходит. MANAGER должен иметь `action:<key>` в allowedSections.
+ * Хранение в общем поле allowedSections с префиксом — см. admin-permissions.routes.ts.
+ */
+export function requireAction(actionKey: string) {
+  return function (req: Request, res: Response, next: NextFunction) {
+    const ext = req as Request & ReqAdmin;
+    if (ext.adminRole === "ADMIN") return next();
+    const needle = `action:${actionKey}`;
+    if (ext.adminAllowedSections.includes(needle)) return next();
+    return res.status(403).json({ message: `Access denied: требуется право «${actionKey}»` });
+  };
 }
 
 /** Если токен есть и валиден — добавляет adminId в req, иначе не блокирует (для опционального auth). */

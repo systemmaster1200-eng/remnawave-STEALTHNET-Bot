@@ -61,11 +61,20 @@ export async function distributeReferralRewards(paymentId: string): Promise<{ di
     const level2 = level1?.referrer ?? null;
     const level3 = level2?.referrer ?? null;
 
-    const amount = payment.baseAmount ?? payment.amount;
+    // v5.0.0: после выпила multi-bot реферальный бонус считается от amount
+    // (раньше использовалось baseAmount = amount без наценки клона).
+    const amount = payment.amount;
     const updates: { clientId: string; bonus: number; level: number }[] = [];
+    // ВНИМАНИЕ: Client.referralPercent — это индивидуальный override клиента
+    // как реферера ПЕРВОГО уровня (т.е. процент с его прямых рефералов).
+    // Для 2/3 уровня этот override НЕ применяется — там всегда глобальный
+    // дефолт из SystemConfig.referralPercentLevel2 / referralPercentLevel3.
+    // Раньше тут было `level2?.referralPercent ?? p2` — это давало бонус
+    // 2 уровня по проценту 1-го уровня (если у промежуточного реферера
+    // стоял VIP-override). См. отчёт пользователя 14.05.2026.
     const pct1 = level1?.referralPercent ?? p1;
-    const pct2 = level2?.referralPercent ?? p2;
-    const pct3 = level3?.referralPercent ?? p3;
+    const pct2 = p2;
+    const pct3 = p3;
     if (level1 && !level1.isBlocked && pct1 > 0) {
       updates.push({ clientId: level1.id, bonus: Math.round(amount * (pct1 / 100) * 100) / 100, level: 1 });
     }

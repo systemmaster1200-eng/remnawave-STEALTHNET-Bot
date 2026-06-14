@@ -8,6 +8,37 @@ import { getProxyUrl } from "../proxy-util/get-proxy-url.js";
 
 const YOOKASSA_API = "https://api.yookassa.ru/v3";
 
+/**
+ * Placeholder-email для receipts, когда юзер отказался от чека.
+ * 54-ФЗ требует email в `receipt.customer.email`, но реальные чеки слать некуда —
+ * подставляем правдоподобный адрес на популярных доменах.
+ *
+ * Если у клиента есть Telegram-username — используем его как локальную часть
+ * (`ivan_petrov2913@mail.ru`), иначе fallback на полностью случайный.
+ */
+const PLACEHOLDER_DOMAINS = [
+  "gmail.com", "mail.ru", "yandex.ru", "outlook.com",
+  "icloud.com", "hotmail.com", "rambler.ru", "bk.ru",
+  "list.ru", "inbox.ru", "yahoo.com",
+];
+
+function generatePlaceholderEmail(tgUsername?: string | null): string {
+  const domain = PLACEHOLDER_DOMAINS[Math.floor(Math.random() * PLACEHOLDER_DOMAINS.length)];
+  if (tgUsername && typeof tgUsername === "string") {
+    // Чистим username: только [a-z0-9_.], lowercase, max 24 chars.
+    const cleaned = tgUsername.toLowerCase().replace(/[^a-z0-9_.]/g, "").slice(0, 24);
+    if (cleaned.length >= 3) {
+      // Добавляем 3–4 цифры для уникальности (стиль "ivan2008" — выглядит реалистично).
+      const suffix = Math.floor(Math.random() * 9000) + 100;
+      return `${cleaned}${suffix}@${domain}`;
+    }
+  }
+  // Fallback: полностью случайный.
+  const a = Math.random().toString(36).slice(2, 10);
+  const b = Math.random().toString(36).slice(2, 6);
+  return `${a}${b}@${domain}`;
+}
+
 export type CreatePaymentParams = {
   shopId: string;
   secretKey: string;
@@ -18,6 +49,9 @@ export type CreatePaymentParams = {
   metadata: Record<string, string>;
   /** Email покупателя для чека 54-ФЗ (обязателен при включённых чеках в ЮKassa) */
   customerEmail?: string | null;
+  /** TG-username клиента; используется как имя в placeholder-email
+   *  если customerEmail не задан (генерится `<tg_username><цифры>@<random-domain>`). */
+  customerTelegramUsername?: string | null;
   /** Сохранить способ оплаты для рекуррентных платежей */
   savePaymentMethod?: boolean;
 };
@@ -31,7 +65,7 @@ export type CreatePaymentResult =
  * Idempotence-Key: генерируется из metadata.payment_id + timestamp для уникальности.
  */
 export async function createYookassaPayment(params: CreatePaymentParams): Promise<CreatePaymentResult> {
-  const { shopId, secretKey, amount, currency, returnUrl, description, metadata, customerEmail, savePaymentMethod } = params;
+  const { shopId, secretKey, amount, currency, returnUrl, description, metadata, customerEmail, customerTelegramUsername, savePaymentMethod } = params;
   if (!shopId?.trim() || !secretKey?.trim()) {
     return { ok: false, error: "YooKassa not configured" };
   }
@@ -39,19 +73,23 @@ export async function createYookassaPayment(params: CreatePaymentParams): Promis
   const valueStr = amount.toFixed(2);
   const currencyUpper = currency.toUpperCase();
 
-  // Чек 54-ФЗ (обязателен, если в ЛК ЮKassa включены «Чеки от ЮKassa»)
+  // Чек 54-ФЗ (обязателен, если в ЛК ЮKassa включены «Чеки от ЮKassa»).
+  // для wolfpn используется УСН (доходы) + НДС 5%:
+  //   tax_system_code = 2  (УСН доходы)        — https://yookassa.ru/developers/payment-acceptance/scenario-extensions/receipts#tax-system-codes
+  //   vat_code        = 7  (НДС по ставке 5%)  — https://yookassa.ru/developers/payment-acceptance/scenario-extensions/receipts#vat-codes
   const receipt = {
     customer: {
       email: (customerEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail))
         ? customerEmail.trim()
-        : "noreply@receipt.stealthnet.local",
+        : generatePlaceholderEmail(customerTelegramUsername),
     },
+    tax_system_code: 2,
     items: [
       {
         description: description.slice(0, 128) || "Оплата подписки",
         quantity: "1.00",
         amount: { value: valueStr, currency: currencyUpper },
-        vat_code: 1, // Без НДС
+        vat_code: 7,
         payment_subject: "service" as const,
         payment_mode: "full_payment" as const,
       },
@@ -161,6 +199,8 @@ export type AutopaymentParams = {
   description: string;
   metadata: Record<string, string>;
   customerEmail?: string | null;
+  /** для placeholder-email (см. createYookassaPayment). */
+  customerTelegramUsername?: string | null;
 };
 
 export type AutopaymentResult =
@@ -172,7 +212,7 @@ export type AutopaymentResult =
  * Не требует подтверждения пользователя — деньги списываются сразу (capture: true).
  */
 export async function createYookassaAutopayment(params: AutopaymentParams): Promise<AutopaymentResult> {
-  const { shopId, secretKey, amount, currency, paymentMethodId, description, metadata, customerEmail } = params;
+  const { shopId, secretKey, amount, currency, paymentMethodId, description, metadata, customerEmail, customerTelegramUsername } = params;
   if (!shopId?.trim() || !secretKey?.trim()) {
     return { ok: false, error: "YooKassa not configured" };
   }
@@ -180,18 +220,20 @@ export async function createYookassaAutopayment(params: AutopaymentParams): Prom
   const valueStr = amount.toFixed(2);
   const currencyUpper = currency.toUpperCase();
 
+  // те же коды что в createYookassaPayment.
   const receipt = {
     customer: {
       email: (customerEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail))
         ? customerEmail.trim()
-        : "noreply@receipt.stealthnet.local",
+        : generatePlaceholderEmail(customerTelegramUsername),
     },
+    tax_system_code: 2,
     items: [
       {
         description: description.slice(0, 128) || "Автопродление подписки",
         quantity: "1.00",
         amount: { value: valueStr, currency: currencyUpper },
-        vat_code: 1,
+        vat_code: 7,
         payment_subject: "service" as const,
         payment_mode: "full_payment" as const,
       },

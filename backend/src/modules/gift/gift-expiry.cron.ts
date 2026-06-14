@@ -53,7 +53,7 @@ async function notifyExpiringGiftCodes(): Promise<void> {
       creator: {
         select: { telegramId: true },
       },
-      secondarySubscription: {
+      subscription: {
         include: { tariff: { select: { name: true } } },
       },
     },
@@ -77,7 +77,7 @@ async function notifyExpiringGiftCodes(): Promise<void> {
     const timeLabel = hoursLeft >= 24
       ? `${Math.round(hoursLeft / 24)} дн.`
       : `${hoursLeft} ч.`;
-    const tariffLabel = code.secondarySubscription?.tariff?.name ?? "подписка";
+    const tariffLabel = code.subscription?.tariff?.name ?? "подписка";
 
     await sendTelegramNotification(
       telegramId,

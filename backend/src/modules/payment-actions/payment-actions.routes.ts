@@ -219,10 +219,19 @@ paymentActionsRouter.post(
         activationResult = result;
         if (!(result as { ok?: boolean }).ok) {
           activationError = ((result as { error?: string }).error) ?? "extra option activation failed";
+        } else if (payment.clientId) {
+          const { notifyExtraOptionApplied } = await import("../notification/telegram-notify.service.js");
+          await notifyExtraOptionApplied(payment.clientId, payment.id).catch(() => {});
         }
       } catch (e) {
         activationError = `Не определён тип платежа для retry: ${String(e)}`;
       }
+    }
+
+    // сжигаем одноразовую персональную скидку после успешной активации.
+    if (!activationError && payment.clientId) {
+      const { extinguishOneTimeDiscount } = await import("../client/personal-discount.js");
+      await extinguishOneTimeDiscount(payment.clientId).catch(() => {});
     }
 
     await logAdmin(req, "payment.retry_activation", { type: "payment", id }, {

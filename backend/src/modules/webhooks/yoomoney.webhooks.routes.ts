@@ -145,7 +145,6 @@ yoomoneyWebhooksRouter.post("/yoomoney", async (req, res) => {
   type PaymentRow = {
     id: string;
     clientId: string;
-    botId: string | null;
     amount: number;
     tariffId: string | null;
     proxyTariffId: string | null;
@@ -158,7 +157,6 @@ yoomoneyWebhooksRouter.post("/yoomoney", async (req, res) => {
   const paymentSelect = {
     id: true,
     clientId: true,
-    botId: true,
     amount: true,
     tariffId: true,
     proxyTariffId: true,
@@ -239,6 +237,8 @@ yoomoneyWebhooksRouter.post("/yoomoney", async (req, res) => {
       const result = await applyExtraOptionByPaymentId(payment.id);
       if (result.ok) {
         console.log("[YooMoney Webhook] Extra option applied", { paymentId: payment.id });
+        const { notifyExtraOptionApplied } = await import("../notification/telegram-notify.service.js");
+        await notifyExtraOptionApplied(payment.clientId, payment.id).catch(() => {});
       } else {
         console.error("[YooMoney Webhook] Extra option apply failed", { paymentId: payment.id, error: (result as { error?: string }).error });
       }
@@ -269,6 +269,12 @@ yoomoneyWebhooksRouter.post("/yoomoney", async (req, res) => {
         console.error("[YooMoney Webhook] Tariff activation failed", { paymentId: payment.id, error: (activation as { error?: string }).error });
       }
     }
+  }
+
+  // сжигаем одноразовую персональную скидку после продуктовой покупки.
+  if (!isTopUp) {
+    const { extinguishOneTimeDiscount } = await import("../client/personal-discount.js");
+    await extinguishOneTimeDiscount(payment.clientId).catch(() => {});
   }
 
   await distributeReferralRewards(payment.id).catch((e) => {

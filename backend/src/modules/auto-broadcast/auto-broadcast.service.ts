@@ -51,13 +51,22 @@ export type TriggerType =
   | "trial_used_never_paid"
   | "no_traffic"
   | "subscription_expired"
-  | "subscription_ending_soon";
+  | "subscription_ending_soon"
+  // новый триггер — за N МИНУТ до окончания (а не дней).
+  // delayDays интерпретируется как минуты. Пример: delayDays=15 → за 15 минут до истечения.
+  | "subscription_ending_minutes"
+  // пассивные пользователи (не брал триал И не платил).
+  // Различие — наличие активной подписки (факт, не гадание). Без окна createdAt → вся база,
+  // one-time дедуп → каждому 1 раз.
+  | "inactive_no_subscription"   // без действий + НЕТ подписки
+  | "inactive_with_subscription"; // без действий + ЕСТЬ подписка
 
 /** Recurring-триггеры — могут повторяться, дедупликация по кулдауну */
 const RECURRING_TRIGGERS: Set<TriggerType> = new Set([
   "inactivity",
   "subscription_expired",
   "subscription_ending_soon",
+  "subscription_ending_minutes",
 ]);
 
 function isRecurring(trigger: string): boolean {
@@ -77,22 +86,38 @@ type InlineKeyboardButton =
 
 type InlineKeyboard = { inline_keyboard: InlineKeyboardButton[][] };
 
-function buildReplyMarkup(buttonText?: string | null, buttonAction?: string | null, publicAppUrl?: string | null): InlineKeyboard | undefined {
-  const label = buttonText?.trim();
-  const action = buttonAction?.trim();
-  if (!label || !action) return undefined;
-
-  let btn: InlineKeyboardButton;
+function makeButton(label: string, action: string, publicAppUrl?: string | null): InlineKeyboardButton {
   if (action.startsWith("menu:")) {
-    btn = { text: label, callback_data: action };
-  } else if (action.startsWith("webapp:")) {
+    return { text: label, callback_data: action };
+  }
+  if (action.startsWith("webapp:")) {
     const path = action.slice(7);
     const base = (publicAppUrl || "").replace(/\/+$/, "");
-    btn = { text: label, web_app: { url: `${base}${path}` } };
-  } else {
-    btn = { text: label, url: action };
+    return { text: label, web_app: { url: `${base}${path}` } };
   }
-  return { inline_keyboard: [[btn]] };
+  return { text: label, url: action };
+}
+
+/**
+ * builder reply_markup для одной или двух кнопок.
+ * Кнопки идут отдельными рядами (каждая на новой строке).
+ */
+function buildReplyMarkup(
+  buttonText?: string | null,
+  buttonAction?: string | null,
+  publicAppUrl?: string | null,
+  button2Text?: string | null,
+  button2Action?: string | null,
+): InlineKeyboard | undefined {
+  const rows: InlineKeyboardButton[][] = [];
+  const lbl1 = buttonText?.trim();
+  const act1 = buttonAction?.trim();
+  if (lbl1 && act1) rows.push([makeButton(lbl1, act1, publicAppUrl)]);
+  const lbl2 = button2Text?.trim();
+  const act2 = button2Action?.trim();
+  if (lbl2 && act2) rows.push([makeButton(lbl2, act2, publicAppUrl)]);
+  if (rows.length === 0) return undefined;
+  return { inline_keyboard: rows };
 }
 
 async function sendTelegram(botToken: string, chatId: string, text: string, replyMarkup?: InlineKeyboard): Promise<{ ok: boolean; error?: string }> {
@@ -106,12 +131,17 @@ async function sendTelegram(botToken: string, chatId: string, text: string, repl
     };
     if (replyMarkup) payload.reply_markup = replyMarkup;
     const proxy = await getProxyUrl("telegram");
+    // T-debug (14.05.2026) — детальный лог для отладки авто-рассылки.
+    console.log(`${LOG_PREFIX} [DEBUG-SEND] POST chat=${chatId} proxy=${proxy ?? "none"} botToken=${botToken.slice(0, 10)}... text="${text.slice(0, 60).replace(/\n/g, " ")}"`);
     const res = await proxyFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }, proxy);
-    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; description?: string };
+    const bodyRaw = await res.text();
+    let data: { ok?: boolean; description?: string; result?: { message_id?: number } } = {};
+    try { data = JSON.parse(bodyRaw); } catch { /* not json */ }
+    console.log(`${LOG_PREFIX} [DEBUG-SEND] RESP chat=${chatId} httpStatus=${res.status} ok=${data.ok} msgId=${data.result?.message_id ?? "-"} body="${bodyRaw.slice(0, 300).replace(/\n/g, " ")}"`);
     if (!res.ok || !data.ok) {
       const err = data.description ?? `HTTP ${res.status}`;
       console.warn(`${LOG_PREFIX} Telegram send failed for chat ${chatId}: ${err}`);
@@ -127,25 +157,68 @@ async function sendTelegram(botToken: string, chatId: string, text: string, repl
 
 // ─── Dedup helpers ────────────────────────────────────────────────
 
-/** Для ONE-TIME триггеров: получить Set клиентов, которым уже КОГДА-ЛИБО отправлялось это правило */
-async function getEverSentClientIds(ruleId: string): Promise<Set<string>> {
+/**
+ * для триггеров subscription_* дедуп
+ * идёт по ID подписки (а не клиента). У одного клиента может быть несколько
+ * подписок — каждая должна получать своё уведомление независимо.
+ */
+function isSubscriptionTrigger(t: string): boolean {
+  return t === "subscription_expired"
+    || t === "subscription_ending_soon"
+    || t === "subscription_ending_minutes";
+}
+
+/**
+ * Возвращает Set уже отправленных «ключей» для правила (только для НЕ-subscription
+ * триггеров — там ключ = clientId). Для subscription_* триггеров используется
+ * `getSentSubscriptionSnapshots` ниже — там ключ = (subscriptionId, expireAtSnapshot).
+ *
+ * @param cooldownDays если задан — учитываем только записи за последние N дней (RECURRING).
+ *                     если null/undefined — все записи (ONE-TIME).
+ */
+async function getSentClientKeys(
+  ruleId: string,
+  cooldownDays: number | null,
+): Promise<Set<string>> {
+  const where: { ruleId: string; sentAt?: { gte: Date } } = { ruleId };
+  if (cooldownDays != null) {
+    where.sentAt = { gte: new Date(Date.now() - cooldownDays * 24 * 60 * 60 * 1000) };
+  }
   const logs = await prisma.autoBroadcastLog.findMany({
-    where: { ruleId },
+    where,
     select: { clientId: true },
     distinct: ["clientId"],
   });
   return new Set(logs.map((l) => l.clientId));
 }
 
-/** Для RECURRING триггеров: получить Set клиентов, которым отправлялось за последние N дней */
-async function getRecentlySentClientIds(ruleId: string, cooldownDays: number): Promise<Set<string>> {
-  const since = new Date(Date.now() - cooldownDays * 24 * 60 * 60 * 1000);
+/**
+ * возвращает Map<subscriptionId, Set<expireAtMs>>
+ * со всеми отправленными snapshot'ами для правила. Используется при проверке
+ * кандидатных подписок: подписка считается «уже уведомлённой за текущий цикл», только
+ * если её текущий `expireAt` СОВПАДАЕТ с одним из snapshot'ов в наборе. После
+ * ПРОДЛЕНИЯ подписки expireAt сдвинется → ни один старый snapshot не совпадёт →
+ * правило снова отправит уведомление на новый цикл.
+ *
+ * Legacy записи (snapshot=null до миграции) бэкфилл'ятся в SQL миграции —
+ * после деплоя их быть не должно. Если всё же встретим null — кладём ключ 0,
+ * который никогда не совпадёт с реальным expireAt (Date.getTime() > 0).
+ */
+async function getSentSubscriptionSnapshots(
+  ruleId: string,
+): Promise<Map<string, Set<number>>> {
   const logs = await prisma.autoBroadcastLog.findMany({
-    where: { ruleId, sentAt: { gte: since } },
-    select: { clientId: true },
-    distinct: ["clientId"],
+    where: { ruleId, subscriptionId: { not: null } },
+    select: { subscriptionId: true, expireAtSnapshot: true },
   });
-  return new Set(logs.map((l) => l.clientId));
+  const map = new Map<string, Set<number>>();
+  for (const l of logs) {
+    if (!l.subscriptionId) continue;
+    const set = map.get(l.subscriptionId) ?? new Set<number>();
+    set.add(l.expireAtSnapshot ? l.expireAtSnapshot.getTime() : 0);
+    map.set(l.subscriptionId, set);
+  }
+  return map;
 }
 
 // ─── Eligible clients ─────────────────────────────────────────────
@@ -214,18 +287,66 @@ async function getClientMainExpiries(): Promise<Map<string, Date>> {
 }
 
 /**
- * Получить ID клиентов, подходящих под правило (с учётом дедупликации, окна,
- * канала доставки и статуса авто-продления).
+ * Target = «одна отправка».
+ * Для subscription_* триггеров каждая подписка клиента — отдельный target.
+ * Это позволяет одному клиенту получать уведомления про РАЗНЫЕ подписки
+ * (например 5-мин до окончания подписки #2 И через 5 дней — про подписку #7).
+ */
+export interface BroadcastTarget {
+  clientId: string;
+  /** Только для subscription_* триггеров. Для остальных — undefined. */
+  subscriptionId?: string;
+  /** Кэшируем имя тарифа чтобы не запрашивать повторно в runRule. */
+  tariffName?: string;
+  /**
+   * текущий expireAt подписки на момент сбора
+   * кандидатов. Используется в runRule при записи лога — сохраняется как
+   * expireAtSnapshot для будущего дедупа. Только для subscription_* триггеров.
+   */
+  subExpireAt?: Date;
+}
+
+/**
+ * Получить ID клиентов, подходящих под правило (для UI eligible-count и
+ * обратной совместимости). Внутри использует getEligibleTargets и сводит
+ * до уникальных clientId.
  */
 export async function getEligibleClientIds(ruleId: string): Promise<string[]> {
+  const targets = await getEligibleTargets(ruleId);
+  return Array.from(new Set(targets.map((t) => t.clientId)));
+}
+
+/**
+ * Возвращает массив target'ов для отправки. Для subscription_* триггеров каждая
+ * запись = подписка (clientId + subscriptionId). Для прочих триггеров — клиент.
+ *
+ * Дедуп:
+ *   subscription_* → по (ruleId, subscriptionId) — каждая подписка отдельно
+ *   прочие         → по (ruleId, clientId)
+ */
+/**
+ * для after_registration больше не запускаем
+ * по cron — правило срабатывает event-driven при /start в боте через
+ * `fireRegistrationRulesForClient(clientId)` ниже. Передавая `opts.onlyClientId`,
+ * мы фильтруем target'ы только до этого клиента (без поиска по окну createdAt).
+ */
+export async function getEligibleTargets(
+  ruleId: string,
+  opts?: { onlyClientId?: string },
+): Promise<BroadcastTarget[]> {
   const rule = await prisma.autoBroadcastRule.findUnique({
     where: { id: ruleId },
   });
   if (!rule) return [];
 
-  const sentSet = isRecurring(rule.triggerType)
-    ? await getRecentlySentClientIds(ruleId, RECURRING_COOLDOWN_DAYS)
-    : await getEverSentClientIds(ruleId);
+  // для subscription_* триггеров используем
+  // snapshot-based дедуп (по expireAt). Для остальных — старый key-based по clientId
+  // (с cooldown 30 дней для recurring).
+  const useSubKey = isSubscriptionTrigger(rule.triggerType);
+  const sentSubMap = useSubKey ? await getSentSubscriptionSnapshots(ruleId) : new Map<string, Set<number>>();
+  const sentClientSet = !useSubKey
+    ? await getSentClientKeys(ruleId, isRecurring(rule.triggerType) ? RECURRING_COOLDOWN_DAYS : null)
+    : new Set<string>();
 
   const now = new Date();
   const dayMs = 24 * 60 * 60 * 1000;
@@ -234,31 +355,56 @@ export async function getEligibleClientIds(ruleId: string): Promise<string[]> {
   // Базовая часть WHERE: не заблокирован + есть канал доставки, подходящий правилу
   const baseWhere = { isBlocked: false, ...channelFilter(rule.channel) };
 
-  let clients: { id: string }[] = [];
+  let targets: BroadcastTarget[] = [];
 
   switch (rule.triggerType as TriggerType) {
     // ── after_registration ──────────────────────────────────────
-    // Окно: createdAt ∈ [now-(delay+window), now-delay]. Без верхней границы при
-    // включении нового правила уведомление ушло бы всем старым клиентам.
     case "after_registration": {
-      const windowEnd = new Date(now.getTime() - delayDays * dayMs);
-      const windowStart = new Date(windowEnd.getTime() - ONE_TIME_WINDOW_DAYS * dayMs);
-      clients = await prisma.client.findMany({
-        where: {
-          ...baseWhere,
-          createdAt: { gte: windowStart, lte: windowEnd },
-        },
-        select: { id: true },
-      });
+      // два режима — event и cron, выбирается
+      // флагом `eventDriven` на правиле:
+      //   • event (onlyClientId задан): берём ТОЛЬКО этого клиента, без фильтров
+      //     активности — мгновенный welcome при /start, юзер ещё не успел ничего
+      //     сделать, важно поприветствовать.
+      //   • cron (onlyClientId не задан): окно [createdAt - delay - 3d, createdAt - delay]
+      //     ПЛЮС фильтр «вообще ничего не сделал»:
+      //       — не пробовал триал (trialUsed=false)
+      //       — не платил (нет PAID платежей)
+      //       — не подключён к Remna (нет подписки с remnawaveUuid)
+      //     Это исключает спам тех, кто уже взял триал/купил/подключился.
+      if (opts?.onlyClientId) {
+        const c = await prisma.client.findUnique({
+          where: { id: opts.onlyClientId },
+          select: { id: true, isBlocked: true, telegramId: true, email: true },
+        });
+        if (c && !c.isBlocked) {
+          const passChannel =
+            rule.channel === "telegram" ? !!c.telegramId :
+            rule.channel === "email" ? !!c.email :
+            !!(c.telegramId || c.email);
+          if (passChannel) targets = [{ clientId: c.id }];
+        }
+      } else {
+        const windowEnd = new Date(now.getTime() - delayDays * dayMs);
+        const windowStart = new Date(windowEnd.getTime() - ONE_TIME_WINDOW_DAYS * dayMs);
+        const cs = await prisma.client.findMany({
+          where: {
+            ...baseWhere,
+            createdAt: { gte: windowStart, lte: windowEnd },
+            trialUsed: false,
+            payments: { none: { status: "PAID", amount: { gt: 0 } } },
+            ownedSubscriptions: { none: { remnawaveUuid: { not: null } } },
+          },
+          select: { id: true },
+        });
+        targets = cs.map((c) => ({ clientId: c.id }));
+      }
       break;
     }
 
-    // ── no_payment ──────────────────────────────────────────────
-    // Зарегистрирован в окне [now-(delay+window), now-delay], ни разу не платил.
     case "no_payment": {
       const windowEnd = new Date(now.getTime() - delayDays * dayMs);
       const windowStart = new Date(windowEnd.getTime() - ONE_TIME_WINDOW_DAYS * dayMs);
-      clients = await prisma.client.findMany({
+      const cs = await prisma.client.findMany({
         where: {
           ...baseWhere,
           createdAt: { gte: windowStart, lte: windowEnd },
@@ -266,33 +412,69 @@ export async function getEligibleClientIds(ruleId: string): Promise<string[]> {
         },
         select: { id: true },
       });
+      targets = cs.map((c) => ({ clientId: c.id }));
       break;
     }
 
-    // ── trial_not_connected ─────────────────────────────────────
-    // Зарегистрирован в окне, триал не активировал, подписки нет.
+    // ── inactive_no_subscription ─────────────────────────────────
+    // пассивный без подписки —
+    // не брал триал, не платил, и НЕТ активной подписки (нет sub с remnawaveUuid).
+    // БЕЗ окна createdAt — вся база. one-time дедуп → каждому 1 раз.
+    case "inactive_no_subscription": {
+      const cs = await prisma.client.findMany({
+        where: {
+          ...baseWhere,
+          trialUsed: false,
+          payments: { none: { status: "PAID", amount: { gt: 0 } } },
+          ownedSubscriptions: { none: { remnawaveUuid: { not: null } } },
+        },
+        select: { id: true },
+      });
+      targets = cs.map((c) => ({ clientId: c.id }));
+      break;
+    }
+
+    // ── inactive_with_subscription ───────────────────────────────
+    // пассивный с подпиской —
+    // не брал триал, не платил, но ЕСТЬ активная подписка (sub с remnawaveUuid).
+    case "inactive_with_subscription": {
+      const cs = await prisma.client.findMany({
+        where: {
+          ...baseWhere,
+          trialUsed: false,
+          payments: { none: { status: "PAID", amount: { gt: 0 } } },
+          ownedSubscriptions: { some: { remnawaveUuid: { not: null } } },
+        },
+        select: { id: true },
+      });
+      targets = cs.map((c) => ({ clientId: c.id }));
+      break;
+    }
+
     case "trial_not_connected": {
       const windowEnd = new Date(now.getTime() - delayDays * dayMs);
       const windowStart = new Date(windowEnd.getTime() - ONE_TIME_WINDOW_DAYS * dayMs);
-      clients = await prisma.client.findMany({
+      const cs = await prisma.client.findMany({
         where: {
           ...baseWhere,
           createdAt: { gte: windowStart, lte: windowEnd },
           trialUsed: false,
-          remnawaveUuid: null,
+          // после T-unify клиент может
+          // иметь подписки даже если client.remnawaveUuid=null (это legacy primary
+          // поле). Корректно проверять «не привязан к Remna» через отсутствие
+          // ЛЮБОЙ подписки с remnawaveUuid в таблице Subscription.
+          ownedSubscriptions: { none: { remnawaveUuid: { not: null } } },
         },
         select: { id: true },
       });
+      targets = cs.map((c) => ({ clientId: c.id }));
       break;
     }
 
-    // ── trial_used_never_paid ───────────────────────────────────
-    // Использовал триал в окне [now-(delay+window), now-delay], ни разу не платил.
-    // По createdAt (т.к. момент активации триала в БД не фиксируется отдельно).
     case "trial_used_never_paid": {
       const windowEnd = new Date(now.getTime() - delayDays * dayMs);
       const windowStart = new Date(windowEnd.getTime() - ONE_TIME_WINDOW_DAYS * dayMs);
-      clients = await prisma.client.findMany({
+      const cs = await prisma.client.findMany({
         where: {
           ...baseWhere,
           createdAt: { gte: windowStart, lte: windowEnd },
@@ -301,37 +483,42 @@ export async function getEligibleClientIds(ruleId: string): Promise<string[]> {
         },
         select: { id: true },
       });
+      targets = cs.map((c) => ({ clientId: c.id }));
       break;
     }
 
-    // ── no_traffic ──────────────────────────────────────────────
-    // Подключён к VPN (есть remnawaveUuid), зарегистрирован в окне, не платил
-    // (платный не нужно напоминать «ты не пользуешься»). One-time.
     case "no_traffic": {
       const windowEnd = new Date(now.getTime() - delayDays * dayMs);
       const windowStart = new Date(windowEnd.getTime() - ONE_TIME_WINDOW_DAYS * dayMs);
-      clients = await prisma.client.findMany({
+      const cs = await prisma.client.findMany({
         where: {
           ...baseWhere,
-          remnawaveUuid: { not: null },
+          // «привязан к Remna» — это
+          // ХОТЯ БЫ одна подписка с remnawaveUuid в таблице Subscription.
+          // Раньше через client.remnawaveUuid (legacy primary) — после unify это
+          // поле может быть null у клиентов с активными подписками.
+          ownedSubscriptions: { some: { remnawaveUuid: { not: null } } },
           createdAt: { gte: windowStart, lte: windowEnd },
           payments: { none: { status: "PAID", amount: { gt: 0 } } },
         },
         select: { id: true },
       });
+      targets = cs.map((c) => ({ clientId: c.id }));
       break;
     }
 
-    // ── inactivity ──────────────────────────────────────────────
-    // Платил когда-то, но в последние delayDays PAID-платежей нет. Recurring.
-    // Исключаем тех, кто вообще никогда не платил (иначе дубль no_payment).
     case "inactivity": {
       const since = new Date(now.getTime() - delayDays * dayMs);
       const all = await prisma.client.findMany({
         where: {
           ...baseWhere,
-          // Хотя бы один платный платёж когда-либо
           payments: { some: { status: "PAID", amount: { gt: 0 } } },
+          // клиент с
+          // ДЕЙСТВУЮЩЕЙ подпиской (любая длительность — 7 дней, год, год+) —
+          // НЕ «неактивный», даже если давно не платил (купил на год вперёд).
+          // Раньше: юзер с годовой подпиской через 30 дней получал «вы неактивны»,
+          // и каждый месяц до конца действия подписки.
+          ownedSubscriptions: { none: { expireAt: { gt: now } } },
         },
         select: { id: true },
       });
@@ -344,64 +531,92 @@ export async function getEligibleClientIds(ruleId: string): Promise<string[]> {
           })
         ).map((p) => p.clientId),
       );
-      clients = all.filter((c) => !recentlyPaidIds.has(c.id));
+      targets = all.filter((c) => !recentlyPaidIds.has(c.id)).map((c) => ({ clientId: c.id }));
       break;
     }
 
-    // ── subscription_expired ────────────────────────────────────
-    // Подписка истекла в окне [now-(delay+EXPIRED_WINDOW), now-delay].
-    // Исключаем клиентов с включённым авто-продлением.
+    // ── subscription_* триггеры ─────────────────────────────────
+    // каждая подписка — отдельный target.
+    // Дедуп по subscriptionId — позволяет уведомлять про РАЗНЫЕ подписки одного
+    // клиента независимо. Раньше был distinct(ownerId), и юзер с 5 истекающими
+    // подписками получал уведомление только за одну.
+
     case "subscription_expired": {
       const windowEnd = new Date(now.getTime() - delayDays * dayMs);
       const windowStart = new Date(windowEnd.getTime() - EXPIRED_WINDOW_DAYS * dayMs);
-      const expiries = await getClientMainExpiries();
-      const expiredIds: string[] = [];
-      for (const [clientId, expireAt] of expiries) {
-        if (expireAt >= windowStart && expireAt <= windowEnd) {
-          expiredIds.push(clientId);
-        }
-      }
-      if (expiredIds.length === 0) {
-        clients = [];
-      } else {
-        clients = await prisma.client.findMany({
-          where: {
-            ...baseWhere,
-            id: { in: expiredIds },
-            autoRenewEnabled: false,
-          },
-          select: { id: true },
-        });
-      }
+      const subs = await prisma.subscription.findMany({
+        where: {
+          expireAt: { gte: windowStart, lte: windowEnd },
+          autoRenewEnabled: false,
+          tariffId: { not: null },
+          // подписки в инвентаре подарков
+          // (purchasedAsGift=true) не уведомляем — это «товар» в gift-flow дарителя,
+          // не «активная подписка» юзера.
+          //
+          // Что покрывает фильтр:
+          //   purchasedAsGift=true + giftStatus=null         → куплена в инвентарь, не подарена → НЕ слать
+          //   purchasedAsGift=true + giftStatus=GIFT_RESERVED → код создан, ждёт активации     → НЕ слать
+          //
+          // Что НЕ исключает (покрывается логикой purchasedAsGift=false):
+          //   purchasedAsGift=false + giftStatus=GIFTED          → передана получателю, теперь его → СЛАТЬ
+          //   purchasedAsGift=false + giftStatus=ACTIVATED_SELF  → даритель забрал себе → СЛАТЬ
+          //   purchasedAsGift=false + giftStatus=null            → обычная подписка → СЛАТЬ
+          purchasedAsGift: false,
+          owner: baseWhere,
+        },
+        select: { id: true, ownerId: true, expireAt: true, tariff: { select: { name: true } } },
+      });
+      targets = subs.map((s) => ({
+        clientId: s.ownerId,
+        subscriptionId: s.id,
+        tariffName: s.tariff?.name ?? undefined,
+        subExpireAt: s.expireAt ?? undefined,
+      }));
       break;
     }
 
-    // ── subscription_ending_soon ────────────────────────────────
-    // Подписка истекает через N дней — окно [now + (N-1), now + N] суток.
-    // Исключаем клиентов с включённым авто-продлением.
+    case "subscription_ending_minutes": {
+      const minutesLeft = Math.max(1, delayDays);
+      const minuteMs = 60 * 1000;
+      const windowStart = new Date(now.getTime() + (minutesLeft - 1) * minuteMs);
+      const windowEnd = new Date(now.getTime() + minutesLeft * minuteMs);
+      const subs = await prisma.subscription.findMany({
+        where: {
+          expireAt: { gte: windowStart, lt: windowEnd },
+          autoRenewEnabled: false,
+          tariffId: { not: null },
+          owner: baseWhere,
+        },
+        select: { id: true, ownerId: true, expireAt: true, tariff: { select: { name: true } } },
+      });
+      targets = subs.map((s) => ({
+        clientId: s.ownerId,
+        subscriptionId: s.id,
+        tariffName: s.tariff?.name ?? undefined,
+        subExpireAt: s.expireAt ?? undefined,
+      }));
+      break;
+    }
+
     case "subscription_ending_soon": {
       const daysLeft = Math.max(1, delayDays);
       const windowStart = new Date(now.getTime() + (daysLeft - 1) * dayMs);
       const windowEnd = new Date(now.getTime() + daysLeft * dayMs);
-      const expiries = await getClientMainExpiries();
-      const endingSoonIds: string[] = [];
-      for (const [clientId, expireAt] of expiries) {
-        if (expireAt >= windowStart && expireAt < windowEnd) {
-          endingSoonIds.push(clientId);
-        }
-      }
-      if (endingSoonIds.length === 0) {
-        clients = [];
-      } else {
-        clients = await prisma.client.findMany({
-          where: {
-            ...baseWhere,
-            id: { in: endingSoonIds },
-            autoRenewEnabled: false,
-          },
-          select: { id: true },
-        });
-      }
+      const subs = await prisma.subscription.findMany({
+        where: {
+          expireAt: { gte: windowStart, lt: windowEnd },
+          autoRenewEnabled: false,
+          tariffId: { not: null },
+          owner: baseWhere,
+        },
+        select: { id: true, ownerId: true, expireAt: true, tariff: { select: { name: true } } },
+      });
+      targets = subs.map((s) => ({
+        clientId: s.ownerId,
+        subscriptionId: s.id,
+        tariffName: s.tariff?.name ?? undefined,
+        subExpireAt: s.expireAt ?? undefined,
+      }));
       break;
     }
 
@@ -410,11 +625,32 @@ export async function getEligibleClientIds(ruleId: string): Promise<string[]> {
       return [];
   }
 
-  const eligible = clients.map((c) => c.id).filter((id) => !sentSet.has(id));
+  // для subscription_* фильтр идёт через
+  // sentSubMap. Подписка считается «уже уведомлённой за текущий цикл», только если
+  // её current expireAt совпадает с одним из сохранённых snapshot'ов. После продления
+  // (expireAt сдвинулся) подписка снова попадёт в eligible.
+  let eligible: BroadcastTarget[];
+  let alreadySent: number;
+  if (useSubKey) {
+    let skipped = 0;
+    eligible = targets.filter((t) => {
+      if (!t.subscriptionId) return true;
+      const snapshots = sentSubMap.get(t.subscriptionId);
+      if (!snapshots || snapshots.size === 0) return true;
+      const currentExpireMs = t.subExpireAt ? t.subExpireAt.getTime() : 0;
+      const alreadyForThisCycle = snapshots.has(currentExpireMs);
+      if (alreadyForThisCycle) skipped++;
+      return !alreadyForThisCycle;
+    });
+    alreadySent = skipped;
+  } else {
+    eligible = targets.filter((t) => !sentClientSet.has(t.clientId));
+    alreadySent = sentClientSet.size;
+  }
 
   console.log(
     `${LOG_PREFIX} Rule "${rule.name}" (${rule.triggerType}, delay=${rule.delayDays}, channel=${rule.channel}): ` +
-    `${clients.length} matched, ${sentSet.size} already sent, ${eligible.length} eligible`,
+    `${targets.length} matched, ${alreadySent} already sent, ${eligible.length} eligible`,
   );
 
   return eligible;
@@ -433,14 +669,41 @@ export type RunRuleResult = {
 /**
  * Выполнить одно правило: отправить сообщение подходящим клиентам и записать лог.
  */
-export async function runRule(ruleId: string): Promise<RunRuleResult> {
-  const rule = await prisma.autoBroadcastRule.findUnique({ where: { id: ruleId } });
+export async function runRule(ruleId: string, opts?: { onlyClientId?: string }): Promise<RunRuleResult> {
+  // подгружаем promoCode для подстановки в текст + проверки лимита.
+  const rule = await prisma.autoBroadcastRule.findUnique({
+    where: { id: ruleId },
+    include: { promoCode: true, _count: { select: { logs: true } } },
+  });
   if (!rule) return { ruleId, ruleName: "", sent: 0, skipped: 0, errors: ["Rule not found"] };
   if (!rule.enabled) return { ruleId, ruleName: rule.name, sent: 0, skipped: 0, errors: [] };
 
-  const clientIds = await getEligibleClientIds(ruleId);
-  if (clientIds.length === 0) {
+  // теперь работаем через targets — для
+  // subscription_* триггеров каждая подписка отдельный target. Один клиент с
+  // несколькими истекающими подписками получит N сообщений (по одному на подписку).
+  // T-event-driven: для after_registration onlyClientId сужает выборку до 1 клиента.
+  let targets = await getEligibleTargets(ruleId, opts);
+  if (targets.length === 0) {
     return { ruleId, ruleName: rule.name, sent: 0, skipped: 0, errors: [] };
+  }
+
+  const alreadySent = rule._count.logs;
+  let effectiveMax: number | null = rule.maxRecipients ?? null;
+  if (rule.promoCode && rule.promoCode.maxUses > 0) {
+    const remainingPromoUses = rule.promoCode.maxUses - alreadySent;
+    if (remainingPromoUses <= 0) {
+      console.log(`${LOG_PREFIX} Rule "${rule.name}": промокод исчерпан (${alreadySent}/${rule.promoCode.maxUses}). Отправка остановлена.`);
+      return { ruleId, ruleName: rule.name, sent: 0, skipped: 0, errors: [] };
+    }
+    effectiveMax = effectiveMax != null ? Math.min(effectiveMax, remainingPromoUses) : remainingPromoUses;
+  }
+  if (effectiveMax != null) {
+    const slotsLeft = effectiveMax - alreadySent;
+    if (slotsLeft <= 0) {
+      console.log(`${LOG_PREFIX} Rule "${rule.name}": лимит получателей исчерпан (${alreadySent}/${effectiveMax}).`);
+      return { ruleId, ruleName: rule.name, sent: 0, skipped: 0, errors: [] };
+    }
+    if (targets.length > slotsLeft) targets = targets.slice(0, slotsLeft);
   }
 
   const config = await getSystemConfig();
@@ -475,32 +738,120 @@ export async function runRule(ruleId: string): Promise<RunRuleResult> {
 
   const serviceName = config.serviceName || "Сервис";
   const subject = rule.subject?.trim() || `Сообщение от ${serviceName}`;
-  const htmlMessage = rule.message.trim().replace(/\n/g, "<br>\n");
-  const htmlBody = `<!DOCTYPE html><html><body style="font-family: sans-serif;">${htmlMessage}</body></html>`;
-  const replyMarkup = buildReplyMarkup(rule.buttonText, rule.buttonUrl, config.publicAppUrl);
+  // подставляем глобальные плейсхолдеры (одинаковые для всех клиентов).
+  // {{PROMOCODE}} → код PromoCode.
+  // {{DISCOUNT}} → discountPercent промокода ИЛИ personalDiscountPercent.
+  // Per-client плейсхолдеры ({{TARIFF}}, {{SUBSCRIPTION_ID}}) применяем внутри цикла.
+  let globalMessage = rule.message.trim();
+  if (rule.promoCode) {
+    globalMessage = globalMessage.split("{{PROMOCODE}}").join(rule.promoCode.code);
+    if (rule.promoCode.discountPercent != null) {
+      globalMessage = globalMessage.split("{{DISCOUNT}}").join(`${Math.round(rule.promoCode.discountPercent)}%`);
+    }
+  }
+  if (rule.personalDiscountPercent != null) {
+    globalMessage = globalMessage.split("{{DISCOUNT}}").join(`${Math.round(rule.personalDiscountPercent)}%`);
+  }
 
-  const clients = await prisma.client.findMany({
-    where: { id: { in: clientIds } },
+  // Уникальные clientId для загрузки контактов (TG/email).
+  const uniqueClientIds = Array.from(new Set(targets.map((t) => t.clientId)));
+  const clientsRaw = await prisma.client.findMany({
+    where: { id: { in: uniqueClientIds } },
     select: { id: true, telegramId: true, email: true },
   });
+  const clientsMap = new Map(clientsRaw.map((c) => [c.id, c]));
 
   let sent = 0;
   let skipped = 0;
   const errors: string[] = [];
   const SKIP_PATTERNS = /blocked by the user|can't initiate conversation|send messages to bots|chat not found|user is deactivated|bot was kicked/i;
+  const personalDiscountAlreadyApplied = new Set<string>();
+  // Анти-задвоение: для subscription_* триггеров у клиента может быть несколько
+  // подписок (несколько target'ов в одном прогоне). Шлём ОДНО сообщение на клиента
+  // за прогон, но в лог пишем КАЖДУЮ подписку (чтобы дедуп-снапшоты по подпискам
+  // сохранялись и правило не сработало повторно в следующих тиках).
+  const isSubTrigger = isSubscriptionTrigger(rule.triggerType);
+  const clientMessagedThisRun = new Set<string>();
 
-  console.log(`${LOG_PREFIX} Rule "${rule.name}": sending to ${clients.length} clients...`);
+  console.log(`${LOG_PREFIX} Rule "${rule.name}": sending to ${targets.length} targets (${uniqueClientIds.length} unique clients)...`);
 
-  for (const c of clients) {
+  for (const t of targets) {
+    const c = clientsMap.get(t.clientId);
+    if (!c) continue;
     let telegramOk = false;
     let emailOk = false;
-
     let telegramSkipped = false;
 
-    // Telegram
-    if (doTelegram && botToken && c.telegramId?.trim()) {
-      const tgResult = await sendTelegram(botToken, c.telegramId.trim(), rule.message.trim(), replyMarkup);
+    // Личная скидка: выставляем один раз на клиента, даже если у него несколько target'ов.
+    if (
+      rule.personalDiscountPercent != null &&
+      rule.personalDiscountPercent > 0 &&
+      !personalDiscountAlreadyApplied.has(c.id)
+    ) {
+      await prisma.client.update({
+        where: { id: c.id },
+        data: {
+          personalDiscountPercent: rule.personalDiscountPercent,
+          personalDiscountIsOneTime: rule.personalDiscountIsOneTime ?? true,
+        },
+      }).catch(() => { /* ignore */ });
+      personalDiscountAlreadyApplied.add(c.id);
+    }
+
+    // для subscription_* триггеров подписка
+    // и её tariffName УЖЕ выбраны в targets[t] (из getEligibleTargets). Для прочих
+    // триггеров — подписки нет (target = client). Тогда {{TARIFF}} → дефолт,
+    // {{SUBSCRIPTION_ID}} остаётся пустой (или подставляется недавняя для
+    // совместимости с правилами after_registration etc).
+    let perClientMessage = globalMessage;
+    let subscriptionIdForButton: string | null = t.subscriptionId ?? null;
+    let tariffNameForText: string | null = t.tariffName ?? null;
+    if (!subscriptionIdForButton) {
+      // Fallback для не-subscription триггеров: берём любую активную с тарифом.
+      // Без primary-приоритета — нам всё равно какая (для после-регистр. правил
+      // {{TARIFF}} обычно вообще не нужен).
+      try {
+        const fb = await prisma.subscription.findFirst({
+          where: { ownerId: c.id, tariffId: { not: null } },
+          orderBy: { createdAt: "desc" },
+          include: { tariff: { select: { name: true } } },
+        });
+        if (fb) {
+          subscriptionIdForButton = fb.id;
+          tariffNameForText = fb.tariff?.name ?? null;
+        }
+      } catch { /* ignore */ }
+    }
+    perClientMessage = perClientMessage
+      .split("{{TARIFF}}")
+      .join(tariffNameForText ?? "подписка");
+    if (subscriptionIdForButton) {
+      perClientMessage = perClientMessage.split("{{SUBSCRIPTION_ID}}").join(subscriptionIdForButton);
+    }
+    // Литеральные «\n»/«\r\n» из ручного ввода в админке → реальные переносы строк.
+    // Реальные переносы (из seed) не содержат backslash и не затрагиваются.
+    perClientMessage = perClientMessage.replace(/\\r\\n|\\n/g, "\n");
+
+    // Анти-задвоение: этому клиенту в этом прогоне уже отправили — не шлём повтор,
+    // но ниже всё равно запишем лог по текущей подписке (для дедуп-снапшота).
+    const alreadyMessagedClient = isSubTrigger && clientMessagedThisRun.has(c.id);
+
+    const subB1Url = rule.buttonUrl && subscriptionIdForButton
+      ? rule.buttonUrl.split("{{SUBSCRIPTION_ID}}").join(subscriptionIdForButton)
+      : rule.buttonUrl;
+    const subB2Url = rule.button2Url && subscriptionIdForButton
+      ? rule.button2Url.split("{{SUBSCRIPTION_ID}}").join(subscriptionIdForButton)
+      : rule.button2Url;
+    const perClientMarkup = buildReplyMarkup(
+      rule.buttonText, subB1Url, config.publicAppUrl,
+      rule.button2Text, subB2Url,
+    );
+
+    // Telegram (пропускаем, если клиенту уже отправили в этом прогоне — анти-задвоение)
+    if (doTelegram && botToken && c.telegramId?.trim() && !alreadyMessagedClient) {
+      const tgResult = await sendTelegram(botToken, c.telegramId.trim(), perClientMessage, perClientMarkup);
       telegramOk = tgResult.ok;
+      if (telegramOk) clientMessagedThisRun.add(c.id);
       if (!telegramOk) {
         if (tgResult.error && SKIP_PATTERNS.test(tgResult.error)) {
           skipped++;
@@ -512,10 +863,11 @@ export async function runRule(ruleId: string): Promise<RunRuleResult> {
       await delay(TELEGRAM_DELAY_MS);
     }
 
-    // Email
-    if (doEmail && smtpConfig?.host && smtpConfig?.fromEmail && c.email?.trim()) {
+    // Email (пропускаем, если клиенту уже отправили в этом прогоне — анти-задвоение)
+    if (doEmail && smtpConfig?.host && smtpConfig?.fromEmail && c.email?.trim() && !alreadyMessagedClient) {
       try {
-        const res = await sendEmail(smtpConfig, c.email.trim(), subject, htmlBody);
+        const perClientHtml = `<!DOCTYPE html><html><body style="font-family: sans-serif;">${perClientMessage.replace(/\n/g, "<br>\n")}</body></html>`;
+        const res = await sendEmail(smtpConfig, c.email.trim(), subject, perClientHtml);
         emailOk = res.ok;
         if (!emailOk && errors.length < 20) {
           errors.push(`Email fail: ${c.email}`);
@@ -529,14 +881,25 @@ export async function runRule(ruleId: string): Promise<RunRuleResult> {
     }
 
     const anySent = telegramOk || emailOk;
-    const shouldLog = anySent || telegramSkipped;
+    // Логируем (= помечаем подписку обработанной) если отправили, либо клиент
+    // заблокировал бота, либо пропустили как дубль клиента в этом прогоне —
+    // во всех случаях по этой подписке больше слать не нужно.
+    const shouldLog = anySent || telegramSkipped || alreadyMessagedClient;
     if (shouldLog) {
       try {
         await prisma.autoBroadcastLog.create({
-          data: { ruleId: rule.id, clientId: c.id },
+          data: {
+            ruleId: rule.id,
+            clientId: c.id,
+            subscriptionId: t.subscriptionId ?? null,
+            // сохраняем текущий expireAt подписки
+            // как snapshot. После продления подписки expireAt изменится — следующий
+            // тик правила увидит несовпадение и снова попадёт в eligible.
+            expireAtSnapshot: t.subscriptionId && t.subExpireAt ? t.subExpireAt : null,
+          },
         });
       } catch (logErr) {
-        console.error(`${LOG_PREFIX} Failed to write log for rule ${rule.id}, client ${c.id}:`, logErr);
+        console.error(`${LOG_PREFIX} Failed to write log for rule ${rule.id}, client ${c.id}, sub ${t.subscriptionId ?? "—"}:`, logErr);
       }
       if (anySent) sent++;
     }
@@ -590,5 +953,49 @@ export async function runAllRules(): Promise<RunRuleResult[]> {
   const totalErrors = results.reduce((s, r) => s + r.errors.length, 0);
   console.log(`${LOG_PREFIX} All rules done: ${totalSent} sent, ${totalSkipped} skipped, ${totalErrors} error(s)`);
 
+  return results;
+}
+
+/**
+ * запустить ВСЕ правила с триггером
+ * `after_registration` для конкретного клиента (event-driven path). Вызывается
+ * сразу после регистрации в боте — приветствие приходит в течение секунды.
+ *
+ * Дедуп тот же что у крон-пути — `(rule_id, client_id)` через autoBroadcastLog.
+ * Если клиент удалил учётку и зарегистрировался заново — у него новый client_id,
+ * дедуп пройдёт, юзер получит welcome снова. Если случайно вызовем дважды для
+ * того же client_id — второй вызов отбросится дедупом, спама не будет.
+ */
+export async function fireRegistrationRulesForClient(clientId: string): Promise<RunRuleResult[]> {
+  if (!clientId) return [];
+  // запускаем ТОЛЬКО event-driven правила.
+  // Cron-правила с тем же триггером (after_registration) обрабатываются в обычном
+  // потоке планировщика и НЕ должны срабатывать здесь — иначе будет двойная отправка.
+  const rules = await prisma.autoBroadcastRule.findMany({
+    where: { triggerType: "after_registration", enabled: true, eventDriven: true },
+    select: { id: true, name: true },
+  });
+  if (rules.length === 0) return [];
+
+  console.log(`${LOG_PREFIX} fireRegistrationRulesForClient: ${rules.length} rule(s) for client ${clientId}`);
+  const results: RunRuleResult[] = [];
+  for (const r of rules) {
+    try {
+      const result = await runRule(r.id, { onlyClientId: clientId });
+      results.push(result);
+      if (result.sent > 0) {
+        console.log(`${LOG_PREFIX} [event] Rule "${r.name}": sent=${result.sent} to client ${clientId}`);
+      }
+    } catch (err) {
+      console.error(`${LOG_PREFIX} [event] Rule "${r.name}" failed for client ${clientId}:`, err);
+      results.push({
+        ruleId: r.id,
+        ruleName: r.name,
+        sent: 0,
+        skipped: 0,
+        errors: [err instanceof Error ? err.message : String(err)],
+      });
+    }
+  }
   return results;
 }

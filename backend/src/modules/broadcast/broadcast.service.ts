@@ -3,14 +3,34 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "../../db.js";
 import { getSystemConfig } from "../client/client.service.js";
 import { sendEmail } from "../mail/mail.service.js";
 import { proxyFetch } from "../proxy-util/proxy-fetch.js";
 import { getProxyUrl } from "../proxy-util/get-proxy-url.js";
 
-const TELEGRAM_SEND_DELAY_MS = 60;
+// параметры throughput'а:
+// • Для ТЕКСТА Telegram global rate ~30 msg/sec — можно агрессивно.
+// • Для МЕДИА (video/photo/document) практический лимит ~5-8/sec на бота;
+//   при превышении Telegram возвращает 429 retry_after=60s (видели на практике).
+// Решение: концурренси и delay выбираются ДИНАМИЧЕСКИ в зависимости от типа.
+//   text:  CONCURRENCY=4, DELAY=50ms  → ~20 msg/sec  (под global 30)
+//   media: CONCURRENCY=1, DELAY=200ms → ~5  msg/sec  (под media-throttle)
+// 429-retry с respect retry_after — страховка если всё равно превысим.
+const TELEGRAM_TEXT_CONCURRENCY = 4;
+const TELEGRAM_TEXT_DELAY_MS = 50;
+// после file_id-reuse upload пропадает → можем увеличить.
+// 1 worker для первой отправки (upload бинаря), потом file_id ускоряет всё в 20x.
+// delay 150ms = ~6.5 msg/sec безопасно под media-throttle Telegram (~5-8/sec).
+const TELEGRAM_MEDIA_CONCURRENCY = 1;
+const TELEGRAM_MEDIA_DELAY_MS = 150;
 const EMAIL_SEND_DELAY_MS = 200;
+const TELEGRAM_429_MAX_RETRIES = 3;
 
 export type BroadcastChannel = "telegram" | "email" | "both";
 
@@ -53,64 +73,294 @@ function buildReplyMarkup(buttonText?: string, buttonAction?: string, publicAppU
 }
 
 /**
- * Отправить текстовое сообщение в Telegram.
+ * Отправить текстовое сообщение в Telegram. * принимает proxy parameter (берём 1 раз перед циклом, не на каждое сообщение)
+ * и retry на 429 с уважением retry_after.
  */
-async function sendTelegramMessage(botToken: string, chatId: string, text: string, replyMarkup?: InlineKeyboard): Promise<{ ok: boolean; error?: string }> {
+async function sendTelegramMessage(
+  botToken: string,
+  chatId: string,
+  text: string,
+  replyMarkup: InlineKeyboard | undefined,
+  proxy: string | null,
+): Promise<TgSendResult> {
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-  try {
-    const payload: Record<string, unknown> = {
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-    };
-    if (replyMarkup) payload.reply_markup = replyMarkup;
-    const proxy = await getProxyUrl("telegram");
+  const payload: Record<string, unknown> = {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+  };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  return telegramSendWith429Retry(async () => {
     const res = await proxyFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }, proxy);
-    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; description?: string };
-    if (res.ok && data.ok) return { ok: true };
-    return { ok: false, error: data.description ?? res.statusText ?? "Unknown error" };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, error: msg };
+    return res;
+  });
+}
+
+/**
+ * Универсальная обёртка с retry на 429. Telegram при превышении rate возвращает
+ * 429 + parameters.retry_after (sec). Мы спим столько и повторяем — не теряем
+ * сообщения. До TELEGRAM_429_MAX_RETRIES попыток.
+ *
+ * возвращаем result-объект Telegram при success
+ * (нужно для извлечения file_id и переиспользования его в следующих отправках).
+ */
+type TgSendResult = { ok: true; result: TgSendResultData } | { ok: false; error: string };
+type TgSendResultData = {
+  message_id?: number;
+  video?: { file_id?: string };
+  photo?: Array<{ file_id?: string }>;
+  document?: { file_id?: string };
+  animation?: { file_id?: string };
+};
+
+async function telegramSendWith429Retry(
+  doRequest: () => Promise<Response>,
+): Promise<TgSendResult> {
+  for (let attempt = 0; attempt <= TELEGRAM_429_MAX_RETRIES; attempt++) {
+    try {
+      const res = await doRequest();
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        result?: TgSendResultData;
+        description?: string;
+        error_code?: number;
+        parameters?: { retry_after?: number };
+      };
+      if (res.ok && data.ok) return { ok: true, result: data.result ?? {} };
+      if (data.error_code === 429 && data.parameters?.retry_after && attempt < TELEGRAM_429_MAX_RETRIES) {
+        const wait = Math.min(60, data.parameters.retry_after) * 1000;
+        console.warn(`[broadcast] 429 — sleeping ${wait}ms then retry (attempt ${attempt + 1}/${TELEGRAM_429_MAX_RETRIES})`);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      return { ok: false, error: data.description ?? res.statusText ?? "Unknown error" };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // Network errors — retry с маленьким backoff.
+      if (attempt < TELEGRAM_429_MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+        continue;
+      }
+      return { ok: false, error: msg };
+    }
   }
+  return { ok: false, error: "max retries exceeded" };
+}
+
+/** Helper: извлекает file_id из Telegram-ответа в зависимости от типа вложения. */
+function extractFileId(kind: "photo" | "video" | "document", result: TgSendResultData): string | null {
+  if (kind === "video") return result.video?.file_id ?? null;
+  if (kind === "document") return result.document?.file_id ?? null;
+  if (kind === "photo") {
+    // photo[] — самый большой обычно последний.
+    const arr = result.photo ?? [];
+    return arr[arr.length - 1]?.file_id ?? null;
+  }
+  return null;
 }
 
 /**
  * Отправить фото в Telegram (caption = текст сообщения).
  */
+/**
+ * теперь принимает либо Buffer (первая отправка, upload),
+ * либо string (file_id из предыдущей успешной отправки этого же бота — Telegram
+ * хранит файл и принимает его строкой без upload). Каноничный приём для broadcast.
+ */
 async function sendTelegramPhoto(
   botToken: string,
   chatId: string,
   caption: string,
-  buffer: Buffer,
+  photo: Buffer | string,
   mimeType: string,
   fileName: string,
-  replyMarkup?: InlineKeyboard
-): Promise<{ ok: boolean; error?: string }> {
+  replyMarkup: InlineKeyboard | undefined,
+  proxy: string | null,
+): Promise<TgSendResult> {
   const url = `https://api.telegram.org/bot${botToken}/sendPhoto`;
-  try {
+  return telegramSendWith429Retry(async () => {
     const form = new FormData();
     form.append("chat_id", chatId);
-    form.append("photo", new Blob([buffer], { type: mimeType }), fileName || "image");
+    if (typeof photo === "string") form.append("photo", photo);
+    else form.append("photo", new Blob([photo], { type: mimeType }), fileName || "image");
     if (caption) {
       form.append("caption", caption);
       form.append("parse_mode", "HTML");
     }
     if (replyMarkup) form.append("reply_markup", JSON.stringify(replyMarkup));
-    const proxy = await getProxyUrl("telegram");
-    const res = await proxyFetch(url, { method: "POST", body: form }, proxy);
-    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; description?: string };
-    if (res.ok && data.ok) return { ok: true };
-    return { ok: false, error: data.description ?? res.statusText ?? "Unknown error" };
+    return await proxyFetch(url, { method: "POST", body: form }, proxy);
+  });
+}
+
+/**
+ * Запускает ffprobe и возвращает {width, height, duration} видео с учётом rotation.
+ * нужно для sendVideo, иначе Telegram рисует квадрат-плейсхолдер
+ * вместо корректного аспекта (особенно для 9:16 рилсов и нестандартных размеров).
+ *
+ * iPhone и др. шлют mp4 где stream-размеры landscape (1920×1080), а в metadata
+ * есть пометка «rotate 90/270» — реальный аспект vertical (1080×1920). Если
+ * передать в sendVideo non-rotated размеры — Telegram нарисует видео в landscape-боксе
+ * и оно будет выглядеть растянутым / в чёрных полосах / квадратом. Поэтому
+ * детектим rotation (новый формат: side_data_list[].rotation, legacy: tags.rotate)
+ * и при 90°/270° СВОПАЕМ width<->height перед отправкой.
+ */
+function probeVideoMetaSync(buffer: Buffer, fileName: string): { width?: number; height?: number; duration?: number } {
+  let tmpDir: string | null = null;
+  try {
+    tmpDir = mkdtempSync(join(tmpdir(), "vidprobe-"));
+    const fpath = join(tmpDir, fileName.replace(/[^\w.-]/g, "_") || "video.mp4");
+    writeFileSync(fpath, buffer);
+    let out: string;
+    try {
+      out = execFileSync("ffprobe", [
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_streams",
+        "-of", "json",
+        fpath,
+      ], { encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024 });
+    } catch (e) {
+      console.warn("[broadcast] ffprobe spawn failed:", e instanceof Error ? e.message : e);
+      return {};
+    }
+
+    const parsed = JSON.parse(out) as {
+      streams?: {
+        width?: number;
+        height?: number;
+        duration?: string;
+        tags?: { rotate?: string };
+        side_data_list?: { rotation?: number; side_data_type?: string }[];
+      }[];
+    };
+    const s = parsed.streams?.[0];
+    if (!s) return {};
+
+    let w = typeof s.width === "number" ? s.width : undefined;
+    let h = typeof s.height === "number" ? s.height : undefined;
+    const dur = s.duration ? Math.round(parseFloat(s.duration)) : undefined;
+
+    // Детектим rotation: новый формат (ffmpeg 5+) — side_data_list, legacy — tags.rotate.
+    let rotation = 0;
+    if (Array.isArray(s.side_data_list)) {
+      for (const sd of s.side_data_list) {
+        if (typeof sd.rotation === "number") rotation = sd.rotation;
+      }
+    }
+    if (!rotation && s.tags?.rotate) {
+      const r = parseInt(s.tags.rotate, 10);
+      if (Number.isFinite(r)) rotation = r;
+    }
+    // Нормализуем — может быть -90 (=270) и т.д.
+    const norm = ((rotation % 360) + 360) % 360;
+    if ((norm === 90 || norm === 270) && w && h) {
+      [w, h] = [h, w];
+    }
+
+    return { width: w, height: h, duration: dur };
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, error: msg };
+    console.warn("[broadcast] ffprobe failed:", e instanceof Error ? e.message : e);
+    return {};
+  } finally {
+    if (tmpDir) try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
+}
+
+/**
+ * Генерирует thumbnail (превью первого «не-чёрного» кадра) для видео.
+ * Telegram автогенерит thumb из 1-го кадра, но не всегда:
+ * для некоторых H264/HEVC контейнеров получается чёрный screen. Делаем сами:
+ *   • -ss 00:00:01 — берём 1-ю секунду (часто там уже есть контент, не fade-in)
+ *   • -vframes 1 — один кадр
+ *   • scale до 320px по большей стороне (требование Telegram thumb: ≤320 + ≤200 KB)
+ *   • -q:v 5 — нормальное JPEG качество, обычно <50 KB
+ * Возвращает Buffer JPEG или null если ffmpeg недоступен / упал.
+ */
+function generateVideoThumbnail(buffer: Buffer, fileName: string): Buffer | null {
+  let tmpDir: string | null = null;
+  try {
+    tmpDir = mkdtempSync(join(tmpdir(), "vidthumb-"));
+    const inPath = join(tmpDir, fileName.replace(/[^\w.-]/g, "_") || "video.mp4");
+    const outPath = join(tmpDir, "thumb.jpg");
+    writeFileSync(inPath, buffer);
+    try {
+      execFileSync("ffmpeg", [
+        "-v", "error",
+        "-y",
+        "-ss", "00:00:01",
+        "-i", inPath,
+        "-vframes", "1",
+        "-vf", "scale='min(320,iw)':'min(320,ih)':force_original_aspect_ratio=decrease",
+        "-q:v", "5",
+        outPath,
+      ], { timeout: 15_000, stdio: ["ignore", "ignore", "pipe"] });
+    } catch (e) {
+      console.warn("[broadcast] ffmpeg thumb failed:", e instanceof Error ? e.message : e);
+      return null;
+    }
+    if (!existsSync(outPath)) return null;
+    const thumb = readFileSync(outPath);
+    if (thumb.length === 0 || thumb.length > 200 * 1024) {
+      // Telegram режет thumb >200 KB. Если получился больше — просто не шлём
+      // (Telegram сам что-то нарисует, лучше чем 400 error).
+      console.warn(`[broadcast] thumb too big (${thumb.length} bytes), skipping`);
+      return null;
+    }
+    return thumb;
+  } catch (e) {
+    console.warn("[broadcast] thumb gen failed:", e instanceof Error ? e.message : e);
+    return null;
+  } finally {
+    if (tmpDir) try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Отправить видео в Telegram (caption = текст сообщения). Telegram отрисует
+ * нативный плеер с превью; для документа (sendDocument) видео будет просто файлом.
+ * 25.05.2026,.
+ *   • Передаём width / height / duration из ffprobe — иначе Telegram рисует квадрат.
+ *   • supports_streaming=true — позволяет смотреть без полной загрузки.
+ */
+async function sendTelegramVideo(
+  botToken: string,
+  chatId: string,
+  caption: string,
+  video: Buffer | string,
+  mimeType: string,
+  fileName: string,
+  replyMarkup: InlineKeyboard | undefined,
+  meta: { width?: number; height?: number; duration?: number } | undefined,
+  thumbnail: Buffer | null | undefined,
+  proxy: string | null,
+): Promise<TgSendResult> {
+  const url = `https://api.telegram.org/bot${botToken}/sendVideo`;
+  return telegramSendWith429Retry(async () => {
+    const form = new FormData();
+    form.append("chat_id", chatId);
+    if (typeof video === "string") form.append("video", video);
+    else form.append("video", new Blob([video], { type: mimeType }), fileName || "video");
+    if (caption) {
+      form.append("caption", caption);
+      form.append("parse_mode", "HTML");
+    }
+    form.append("supports_streaming", "true");
+    if (meta?.width) form.append("width", String(meta.width));
+    if (meta?.height) form.append("height", String(meta.height));
+    if (meta?.duration) form.append("duration", String(meta.duration));
+    // thumbnail передаём ТОЛЬКО при upload бинаря.
+    // Для file_id Telegram уже знает превью.
+    if (typeof video !== "string" && thumbnail && thumbnail.length > 0) {
+      form.append("thumbnail", new Blob([thumbnail], { type: "image/jpeg" }), "thumb.jpg");
+    }
+    if (replyMarkup) form.append("reply_markup", JSON.stringify(replyMarkup));
+    return await proxyFetch(url, { method: "POST", body: form }, proxy);
+  });
 }
 
 /**
@@ -120,30 +370,25 @@ async function sendTelegramDocument(
   botToken: string,
   chatId: string,
   caption: string,
-  buffer: Buffer,
+  document: Buffer | string,
   mimeType: string,
   fileName: string,
-  replyMarkup?: InlineKeyboard
-): Promise<{ ok: boolean; error?: string }> {
+  replyMarkup: InlineKeyboard | undefined,
+  proxy: string | null,
+): Promise<TgSendResult> {
   const url = `https://api.telegram.org/bot${botToken}/sendDocument`;
-  try {
+  return telegramSendWith429Retry(async () => {
     const form = new FormData();
     form.append("chat_id", chatId);
-    form.append("document", new Blob([buffer], { type: mimeType }), fileName || "file");
+    if (typeof document === "string") form.append("document", document);
+    else form.append("document", new Blob([document], { type: mimeType }), fileName || "file");
     if (caption) {
       form.append("caption", caption);
       form.append("parse_mode", "HTML");
     }
     if (replyMarkup) form.append("reply_markup", JSON.stringify(replyMarkup));
-    const proxy = await getProxyUrl("telegram");
-    const res = await proxyFetch(url, { method: "POST", body: form }, proxy);
-    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; description?: string };
-    if (res.ok && data.ok) return { ok: true };
-    return { ok: false, error: data.description ?? res.statusText ?? "Unknown error" };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, error: msg };
-  }
+    return await proxyFetch(url, { method: "POST", body: form }, proxy);
+  });
 }
 
 export type BroadcastAttachment = {
@@ -168,6 +413,69 @@ export type BroadcastProgress = {
  * onProgress — опциональный коллбек для трекинга прогресса (обновляется после
  * каждого отправленного/зафейленного получателя и в момент переключения канала).
  */
+/**
+ * группы получателей для broadcast.
+ * точные фильтры через Subscription.expireAt.
+ */
+export type BroadcastTargetGroup =
+  | "all"               // Все клиенты (с telegramId/email)
+  | "active_subs"       // У клиента есть хоть одна неистёкшая подписка (expireAt > now)
+  | "expired_subs"      // У клиента есть подписки, но ВСЕ истекли (expireAt <= now)
+  | "with_any_subs"     // У клиента есть любая подписка (активная или истёкшая)
+  | "without_subs"      // У клиента нет подписок вообще
+  | "standard_subs"     // Активная подписка со Стандартным тарифом (menuEmoji=🌐)
+  | "unblock_subs"      // Активная подписка с Unblock (menuEmoji=🔒)
+  | "unblock_unlimited" // Активная подписка с Безлимитным Unblock (menuEmoji=♾️🔒)
+  ;
+
+function buildClientWhereForGroup(group: BroadcastTargetGroup | undefined, base: Prisma.ClientWhereInput): Prisma.ClientWhereInput {
+  if (!group || group === "all") return base;
+  if (group === "without_subs") {
+    return { ...base, ownedSubscriptions: { none: {} } };
+  }
+  if (group === "with_any_subs") {
+    return { ...base, ownedSubscriptions: { some: {} } };
+  }
+  const now = new Date();
+  if (group === "active_subs") {
+    // Точный фильтр: хотя бы одна подписка с expireAt > now (или expireAt=null для свежих).
+    return {
+      ...base,
+      ownedSubscriptions: {
+        some: {
+          OR: [{ expireAt: { gt: now } }, { expireAt: null }],
+        },
+      },
+    };
+  }
+  if (group === "expired_subs") {
+    // У клиента есть подписки И все они истекли (expireAt <= now).
+    return {
+      ...base,
+      ownedSubscriptions: { some: {} },
+      NOT: {
+        ownedSubscriptions: {
+          some: {
+            OR: [{ expireAt: { gt: now } }, { expireAt: null }],
+          },
+        },
+      },
+    };
+  }
+  // Тарифные фильтры: хотя бы одна АКТИВНАЯ подписка с этим тарифом.
+  const activeFilter = { OR: [{ expireAt: { gt: now } }, { expireAt: null }] };
+  if (group === "standard_subs") {
+    return { ...base, ownedSubscriptions: { some: { tariff: { menuEmoji: "🌐" }, ...activeFilter } } };
+  }
+  if (group === "unblock_subs") {
+    return { ...base, ownedSubscriptions: { some: { tariff: { menuEmoji: "🔒" }, ...activeFilter } } };
+  }
+  if (group === "unblock_unlimited") {
+    return { ...base, ownedSubscriptions: { some: { tariff: { menuEmoji: "♾️🔒" }, ...activeFilter } } };
+  }
+  return base;
+}
+
 export async function runBroadcast(options: {
   channel: BroadcastChannel;
   subject: string;
@@ -175,10 +483,16 @@ export async function runBroadcast(options: {
   attachment?: BroadcastAttachment;
   buttonText?: string;
   buttonUrl?: string;
+  targetGroup?: BroadcastTargetGroup;
   onProgress?: (p: BroadcastProgress) => void;
-}): Promise<BroadcastResult> {
-  const { channel, subject, message, attachment, buttonText, buttonUrl, onProgress } = options;
-  const result: BroadcastResult = {
+  /** проверяется перед каждой отправкой. Если вернёт true, рассылка прерывается. */
+  isCancelled?: () => boolean;
+  /** id записи в broadcast_history. Нужно для persistent log
+   *  и auto-resume (skip уже отправленных tgid'ов). Без него log пишется не будет. */
+  broadcastId?: string;
+}): Promise<BroadcastResult & { cancelled?: boolean }> {
+  const { channel, subject, message, attachment, buttonText, buttonUrl, targetGroup, onProgress, isCancelled, broadcastId } = options;
+  const result: BroadcastResult & { cancelled?: boolean } = {
     ok: true,
     sentTelegram: 0,
     sentEmail: 0,
@@ -191,12 +505,28 @@ export async function runBroadcast(options: {
   const doTelegram = channel === "telegram" || channel === "both";
   const doEmail = channel === "email" || channel === "both";
   const isImage = attachment?.mimetype?.startsWith("image/") ?? false;
+  // добавили ветку video/* → sendVideo (нативный плеер
+  // с превью в Telegram, в отличие от sendDocument где видео — просто файл).
+  const isVideo = attachment?.mimetype?.startsWith("video/") ?? false;
+  // одноразовый probe видео для width/height/duration:
+  // иначе Telegram рисует квадрат-плейсхолдер при отсутствии явных размеров.
+  // Делается ОДИН раз перед циклом (не на каждого получателя).
+  const videoMeta = isVideo && attachment ? probeVideoMetaSync(attachment.buffer, attachment.originalname) : {};
+  // также генерим thumbnail (первый «не-чёрный» кадр).
+  // Telegram сам автогенерит, но не всегда — иногда превью чёрное. Делаем сами.
+  const videoThumb = isVideo && attachment ? generateVideoThumbnail(attachment.buffer, attachment.originalname) : null;
+  if (isVideo) {
+    console.log(`[broadcast] video metadata: ${JSON.stringify(videoMeta)}  thumb=${videoThumb ? videoThumb.length + "B" : "none"}`);
+  }
   const replyMarkup = buildReplyMarkup(buttonText, buttonUrl, config.publicAppUrl);
 
+  // применяем фильтр targetGroup к where-clause.
+  const whereTelegram = buildClientWhereForGroup(targetGroup, { telegramId: { not: null } });
+  const whereEmail = buildClientWhereForGroup(targetGroup, { email: { not: null } });
   // Предварительно считаем получателей, чтобы фронт мог сразу показать "X из Y".
   const [totalTelegram, totalEmail] = await Promise.all([
-    doTelegram ? prisma.client.count({ where: { telegramId: { not: null } } }) : Promise.resolve(0),
-    doEmail ? prisma.client.count({ where: { email: { not: null } } }) : Promise.resolve(0),
+    doTelegram ? prisma.client.count({ where: whereTelegram }) : Promise.resolve(0),
+    doEmail ? prisma.client.count({ where: whereEmail }) : Promise.resolve(0),
   ]);
   const progress: BroadcastProgress = {
     totalTelegram,
@@ -223,42 +553,109 @@ export async function runBroadcast(options: {
       result.errors.push("Telegram: не задан токен бота (Настройки → Почта и Telegram)");
       result.ok = false;
     } else {
+      // proxy URL берём ОДИН раз перед циклом
+      // (раньше каждое сообщение делало getSystemConfig() → 50k DB roundtrips).
+      const telegramProxy = await getProxyUrl("telegram");
+      console.log(`[broadcast] telegram proxy: ${telegramProxy ? "configured" : "direct"}`);
+
+      // 25.05.2026 — детерминированный порядок + auto-resume через broadcast_sent_log.
       const clients = await prisma.client.findMany({
-        where: { telegramId: { not: null } },
+        where: whereTelegram,
         select: { id: true, telegramId: true },
+        orderBy: { id: "asc" },
       });
-      for (const c of clients) {
-        const tid = c.telegramId!.trim();
-        if (!tid) continue;
-        await delay(TELEGRAM_SEND_DELAY_MS);
-        const send = attachment
-          ? isImage
-            ? await sendTelegramPhoto(
-                botToken,
-                tid,
-                message,
-                attachment.buffer,
-                attachment.mimetype,
-                attachment.originalname,
-                replyMarkup
-              )
-            : await sendTelegramDocument(
-                botToken,
-                tid,
-                message,
-                attachment.buffer,
-                attachment.mimetype,
-                attachment.originalname,
-                replyMarkup
-              )
-          : await sendTelegramMessage(botToken, tid, message, replyMarkup);
-        if (send.ok) result.sentTelegram++;
-        else {
+
+      let alreadySent: Set<string> = new Set();
+      if (broadcastId) {
+        try {
+          const sentRows = await prisma.broadcastSentLog.findMany({
+            where: { broadcastId },
+            select: { tgid: true },
+          });
+          alreadySent = new Set(sentRows.map((r: { tgid: string }) => r.tgid));
+          if (alreadySent.size > 0) {
+            console.log(`[broadcast] resume: ${alreadySent.size} tgid'ов уже отправлены — skip`);
+            result.sentTelegram = alreadySent.size;
+          }
+        } catch (e) {
+          console.warn("[broadcast] resume log load failed:", e instanceof Error ? e.message : e);
+        }
+      }
+
+      const queue = clients.filter((c) => c.telegramId && !alreadySent.has(c.telegramId!.trim()));
+      // выбираем concurrency/delay по типу вложения.
+      const hasMedia = isImage || isVideo || (attachment && !isImage && !isVideo);
+      const concurrency = hasMedia ? TELEGRAM_MEDIA_CONCURRENCY : TELEGRAM_TEXT_CONCURRENCY;
+      const sendDelay = hasMedia ? TELEGRAM_MEDIA_DELAY_MS : TELEGRAM_TEXT_DELAY_MS;
+      console.log(`[broadcast] telegram: ${clients.length} matched, ${queue.length} to send (media=${hasMedia}, concurrency=${concurrency}, delay=${sendDelay}ms)`);
+
+      // file_id reuse: первая отправка загружает binary,
+      // получаем file_id из ответа Telegram, дальнейшие отправки идут строкой
+      // (без upload). Снижает bandwidth в N раз и нагрузку на Telegram bot API.
+      let cachedFileId: string | null = null;
+
+      // Helper отправляет одного получателя + пишет в sent_log если broadcastId задан.
+      const sendOne = async (tid: string): Promise<void> => {
+        let send: TgSendResult;
+        if (attachment) {
+          const fileArg: Buffer | string = cachedFileId ?? attachment.buffer;
+          if (isImage) {
+            send = await sendTelegramPhoto(botToken, tid, message, fileArg, attachment.mimetype, attachment.originalname, replyMarkup, telegramProxy);
+          } else if (isVideo) {
+            send = await sendTelegramVideo(botToken, tid, message, fileArg, attachment.mimetype, attachment.originalname, replyMarkup, videoMeta, videoThumb, telegramProxy);
+          } else {
+            send = await sendTelegramDocument(botToken, tid, message, fileArg, attachment.mimetype, attachment.originalname, replyMarkup, telegramProxy);
+          }
+        } else {
+          send = await sendTelegramMessage(botToken, tid, message, replyMarkup, telegramProxy);
+        }
+
+        if (send.ok) {
+          result.sentTelegram++;
+          // Кешируем file_id после ПЕРВОЙ успешной отправки media-вложения.
+          if (attachment && !cachedFileId) {
+            const kind = isImage ? "photo" : isVideo ? "video" : "document";
+            const fid = extractFileId(kind, send.result);
+            if (fid) {
+              cachedFileId = fid;
+              console.log(`[broadcast] file_id cached after 1st send: ${fid.substring(0, 20)}… (kind=${kind})`);
+            }
+          }
+          if (broadcastId) {
+            // Best-effort INSERT — если упадёт (unique violation на retry/race), игнорируем.
+            prisma.broadcastSentLog.create({
+              data: { broadcastId, tgid: tid },
+            }).catch(() => { /* duplicate / FK gone — норм */ });
+          }
+        } else {
           result.failedTelegram++;
           if (result.errors.length < 10) result.errors.push(`Telegram ${tid}: ${send.error ?? "error"}`);
         }
-        report();
-      }
+      };
+
+      // Concurrent pool: N воркеров берут задачи из очереди.
+      // 25.05.2026 — каждый воркер делает delay(TELEGRAM_SEND_DELAY_MS) ПЕРЕД sendOne,
+      // чтобы под глобальный rate ≈ N × (1000/DELAY) сообщений/сек (~200/s при 8×40),
+      // но 429-retry внутри send-функций мягко дросселирует если Telegram ругается.
+      let nextIdx = 0;
+      const worker = async (): Promise<void> => {
+        while (true) {
+          if (isCancelled?.()) { result.cancelled = true; return; }
+          const idx = nextIdx++;
+          if (idx >= queue.length) return;
+          const c = queue[idx];
+          const tid = c.telegramId!.trim();
+          if (!tid) continue;
+          await delay(sendDelay);
+          await sendOne(tid);
+          // Report не чаще раз в ~50 сообщений чтобы не дёргать DB-progress-write.
+          if (idx % 50 === 0) report();
+        }
+      };
+
+      const workers = Array.from({ length: concurrency }, () => worker());
+      await Promise.all(workers);
+      report();
     }
   }
 
@@ -279,7 +676,7 @@ export async function runBroadcast(options: {
       result.ok = false;
     } else {
       const clients = await prisma.client.findMany({
-        where: { email: { not: null } },
+        where: whereEmail,
         select: { id: true, email: true },
       });
       const serviceName = config.serviceName || "Сервис";
@@ -290,6 +687,7 @@ export async function runBroadcast(options: {
         ? [{ filename: attachment.originalname || "file", content: attachment.buffer }]
         : undefined;
       for (const c of clients) {
+        if (isCancelled?.()) { result.cancelled = true; break; }
         const email = c.email!.trim();
         if (!email) continue;
         await delay(EMAIL_SEND_DELAY_MS);
@@ -325,7 +723,7 @@ export async function getBroadcastRecipientsCount(): Promise<{ withTelegram: num
 // успешно завершается. Поэтому запускаем рассылку как фоновую задачу и
 // отдаём на фронт jobId — он опрашивает статус.
 
-export type BroadcastJobStatus = "running" | "completed" | "error";
+export type BroadcastJobStatus = "running" | "completed" | "error" | "cancelled";
 
 export type BroadcastJob = {
   id: string;
@@ -333,8 +731,10 @@ export type BroadcastJob = {
   startedAt: Date;
   finishedAt?: Date;
   error?: string;
-  result?: BroadcastResult;
+  result?: BroadcastResult & { cancelled?: boolean };
   progress: BroadcastProgress;
+  /** флаг ставится cancelBroadcastJob() и проверяется в runBroadcast() */
+  cancelRequested: boolean;
 };
 
 const broadcastJobs = new Map<string, BroadcastJob>();
@@ -347,120 +747,143 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000).unref?.();
 
-export function startBroadcastJob(options: {
+/**
+ * путь к общему диску для attachment'ов между api и
+ * broadcast-worker. Объявлен как shared volume в docker-compose.
+ */
+const ATTACHMENT_DIR = process.env.BROADCAST_ATTACHMENT_DIR || "/data/broadcast-attachments";
+
+async function saveAttachmentToDisk(jobId: string, attachment: BroadcastAttachment): Promise<string> {
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  await mkdir(ATTACHMENT_DIR, { recursive: true });
+  const safeName = attachment.originalname.replace(/[^\w.-]/g, "_") || "file";
+  const path = `${ATTACHMENT_DIR}/${jobId}__${safeName}`;
+  await writeFile(path, attachment.buffer);
+  return path;
+}
+
+/**
+ * рассылка теперь обрабатывается ОТДЕЛЬНЫМ контейнером
+ * stealthnet-broadcast-worker. API только кладёт задачу в очередь (DB row
+ * status='pending' + attachment на shared volume) и сразу возвращает jobId.
+ * Worker polling'ом подхватит и запустит runBroadcast в своём процессе —
+ * event-loop api остаётся свободным для bot/UI запросов.
+ */
+export async function startBroadcastJob(options: {
   channel: BroadcastChannel;
   subject: string;
   message: string;
   attachment?: BroadcastAttachment;
   buttonText?: string;
   buttonUrl?: string;
+  /** целевая группа получателей. */
+  targetGroup?: BroadcastTargetGroup;
   startedByAdmin?: string;
-}): string {
-  const jobId = randomUUID();
-  const job: BroadcastJob = {
-    id: jobId,
-    status: "running",
-    startedAt: new Date(),
-    progress: {
-      totalTelegram: 0,
-      totalEmail: 0,
-      sentTelegram: 0,
-      sentEmail: 0,
-      failedTelegram: 0,
-      failedEmail: 0,
-    },
-  };
-  broadcastJobs.set(jobId, job);
+  /** Resume: переиспользуем существующую запись broadcast_history. */
+  resumeJobId?: string;
+}): Promise<string> {
+  const jobId = options.resumeJobId ?? randomUUID();
 
-  // Запускаем в фоне — HTTP-запрос на POST /admin/broadcast возвращается сразу
-  // с jobId, а реальная отправка продолжается без таймаут-рисков.
-  void (async () => {
-    // 1) Создаём запись истории (status=running) — id совпадает с jobId.
-    let historyCreated = false;
+  // 1. Сохраняем attachment на shared volume (если есть).
+  let attachmentPath: string | null = null;
+  if (options.attachment) {
     try {
+      attachmentPath = await saveAttachmentToDisk(jobId, options.attachment);
+    } catch (e) {
+      console.error("[broadcast] failed to save attachment to disk:", e instanceof Error ? e.message : e);
+      throw new Error("Failed to save attachment");
+    }
+  }
+
+  // 2. Создаём/обновляем DB row со status='pending'. Worker подхватит.
+  try {
+    if (options.resumeJobId) {
+      await prisma.broadcastHistory.update({
+        where: { id: jobId },
+        data: {
+          status: "pending",
+          finishedAt: null,
+          error: null,
+          cancelRequested: false,
+          attachmentName: options.attachment?.originalname ?? null,
+          attachmentPath: attachmentPath,
+          attachmentMime: options.attachment?.mimetype ?? null,
+          targetGroup: options.targetGroup ?? null,
+        },
+      });
+      console.log(`[broadcast] queued for resume: ${jobId}`);
+    } else {
       await prisma.broadcastHistory.create({
         data: {
           id: jobId,
-          status: "running",
+          status: "pending",
           channel: options.channel,
           subject: options.subject ?? "",
           message: options.message,
           buttonText: options.buttonText || null,
           buttonUrl: options.buttonUrl || null,
           attachmentName: options.attachment?.originalname || null,
+          attachmentPath: attachmentPath,
+          attachmentMime: options.attachment?.mimetype || null,
+          targetGroup: options.targetGroup || null,
           startedByAdmin: options.startedByAdmin || null,
         },
       });
-      historyCreated = true;
-    } catch (e) {
-      // История — best-effort: если создать запись не удалось, рассылку всё равно запускаем.
-      console.warn("[broadcast] failed to create history record:", e instanceof Error ? e.message : e);
+      console.log(`[broadcast] queued: ${jobId} (worker will pick up within ~3s)`);
     }
-
-    // Пишем прогресс в БД не чаще раза в 5 сек, чтобы не нагружать запись на каждое сообщение.
-    let lastDbWriteAt = 0;
-    const PROGRESS_FLUSH_MS = 5000;
-
-    try {
-      job.result = await runBroadcast({
-        ...options,
-        onProgress: (p) => {
-          job.progress = { ...p };
-          if (!historyCreated) return;
-          const now = Date.now();
-          if (now - lastDbWriteAt < PROGRESS_FLUSH_MS) return;
-          lastDbWriteAt = now;
-          void prisma.broadcastHistory
-            .update({
-              where: { id: jobId },
-              data: {
-                totalTelegram: p.totalTelegram,
-                sentTelegram: p.sentTelegram,
-                failedTelegram: p.failedTelegram,
-                totalEmail: p.totalEmail,
-                sentEmail: p.sentEmail,
-                failedEmail: p.failedEmail,
-              },
-            })
-            .catch((e: unknown) => console.warn("[broadcast] progress update failed:", e instanceof Error ? e.message : e));
-        },
-      });
-      job.status = "completed";
-    } catch (e) {
-      job.status = "error";
-      job.error = e instanceof Error ? e.message : String(e);
-    } finally {
-      job.finishedAt = new Date();
-      // 2) Финализируем запись истории с итоговыми результатами.
-      if (historyCreated) {
-        try {
-          await prisma.broadcastHistory.update({
-            where: { id: jobId },
-            data: {
-              status: job.status,
-              finishedAt: job.finishedAt,
-              totalTelegram: job.progress.totalTelegram,
-              sentTelegram: job.result?.sentTelegram ?? job.progress.sentTelegram,
-              failedTelegram: job.result?.failedTelegram ?? job.progress.failedTelegram,
-              totalEmail: job.progress.totalEmail,
-              sentEmail: job.result?.sentEmail ?? job.progress.sentEmail,
-              failedEmail: job.result?.failedEmail ?? job.progress.failedEmail,
-              errors: job.result?.errors?.length ? job.result.errors.slice(0, 50) : undefined,
-              error: job.error || null,
-            },
-          });
-        } catch (e) {
-          console.warn("[broadcast] history finalize failed:", e instanceof Error ? e.message : e);
-        }
-      }
-    }
-  })();
+  } catch (e) {
+    console.error("[broadcast] failed to queue:", e instanceof Error ? e.message : e);
+    throw e;
+  }
 
   return jobId;
 }
 
-export function getBroadcastJob(jobId: string): BroadcastJob | null {
-  return broadcastJobs.get(jobId) ?? null;
+/**
+ * статус ТЕПЕРЬ читается из DB, а не из in-memory map
+ * (рассылка теперь в отдельном worker-процессе, in-memory map api не виден).
+ */
+export async function getBroadcastJob(jobId: string): Promise<BroadcastJob | null> {
+  const row = await prisma.broadcastHistory.findUnique({ where: { id: jobId } });
+  if (!row) return null;
+  return {
+    id: row.id,
+    status: (row.status as BroadcastJobStatus),
+    startedAt: row.startedAt,
+    finishedAt: row.finishedAt ?? undefined,
+    error: row.error ?? undefined,
+    progress: {
+      totalTelegram: row.totalTelegram,
+      totalEmail: row.totalEmail,
+      sentTelegram: row.sentTelegram,
+      sentEmail: row.sentEmail,
+      failedTelegram: row.failedTelegram,
+      failedEmail: row.failedEmail,
+    },
+    cancelRequested: row.cancelRequested,
+  };
+}
+
+/**
+ * попросить активную рассылку остановиться.
+ * Реальное прерывание произойдёт **между сообщениями** (после текущего sendMessage),
+ * так что cancel почти мгновенный (≤ TELEGRAM_SEND_DELAY_MS).
+ * Возвращает причину если отмена невозможна.
+ */
+/**
+ * cancel ТЕПЕРЬ через БД (рассылка в отдельном worker'е).
+ * SET cancel_requested=true → worker увидит при следующем чекинге и прервётся.
+ */
+export async function cancelBroadcastJob(jobId: string): Promise<{ ok: boolean; reason?: "not_found" | "not_running" | "already_cancelled" }> {
+  const row = await prisma.broadcastHistory.findUnique({ where: { id: jobId } });
+  if (!row) return { ok: false, reason: "not_found" };
+  if (row.status !== "running" && row.status !== "pending") return { ok: false, reason: "not_running" };
+  if (row.cancelRequested) return { ok: false, reason: "already_cancelled" };
+  await prisma.broadcastHistory.update({
+    where: { id: jobId },
+    data: { cancelRequested: true },
+  });
+  return { ok: true };
 }
 
 export type BroadcastHistoryItem = {

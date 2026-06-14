@@ -221,7 +221,6 @@ externalApiRouter.post("/auth/register", async (req: Request, res: Response) => 
 
   const client = await prisma.client.create({
     data: {
-      botId: primaryBot.id,
       email,
       passwordHash: await hashPassword(parsed.data.password),
       referralCode: generateReferralCode(),

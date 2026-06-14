@@ -149,7 +149,6 @@ yookassaWebhooksRouter.post("/yookassa", async (req, res) => {
     select: {
       id: true,
       clientId: true,
-      botId: true,
       amount: true,
       currency: true,
       tariffId: true,
@@ -215,6 +214,9 @@ yookassaWebhooksRouter.post("/yookassa", async (req, res) => {
     const result = await applyExtraOptionByPaymentId(payment.id);
     if (result.ok) {
       console.log("[YooKassa Webhook] Extra option applied", { paymentId: payment.id });
+      // уведомляем клиента после успешной активации опции.
+      const { notifyExtraOptionApplied } = await import("../notification/telegram-notify.service.js");
+      await notifyExtraOptionApplied(payment.clientId, payment.id).catch(() => {});
     } else {
       console.error("[YooKassa Webhook] Extra option apply failed", {
         paymentId: payment.id,
@@ -256,6 +258,12 @@ yookassaWebhooksRouter.post("/yookassa", async (req, res) => {
         error: (activation as { error?: string }).error,
       });
     }
+  }
+
+  // сжигаем одноразовую персональную скидку после продуктовой покупки.
+  if (!isTopUp) {
+    const { extinguishOneTimeDiscount } = await import("../client/personal-discount.js");
+    await extinguishOneTimeDiscount(payment.clientId).catch(() => {});
   }
 
   await distributeReferralRewards(payment.id).catch((e) => {

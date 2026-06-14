@@ -2,12 +2,12 @@
  * Сервис дополнительных подписок и подарков (v2).
  *
  * Бизнес-логика:
- * 1. Покупка доп. подписки → создаётся SecondarySubscription + Remnawave-пользователь с суффиксом _1, _2, ...
+ * 1. Покупка доп. подписки → создаётся Subscription + Remnawave-пользователь с суффиксом _1, _2, ...
  * 2. Активировать себе → снять GIFT_RESERVED, подписка появляется на дашборде владельца
  * 3. Подарить → генерируется 12-символьный код XXXX-XXXX-XXXX, подписка скрывается (giftStatus = GIFT_RESERVED)
  * 4. Активировать подарок → подписка переносится на получателя (ownerId → recipient, giftedToClientId → recipient)
  * 5. Отмена / экспирация → подписка возвращается дарителю (giftStatus = null)
- * 6. Удаление подписки → remnaDeleteUser + hard delete SecondarySubscription
+ * 6. Удаление подписки → remnaDeleteUser + hard delete Subscription
  *
  * Все мутации логируются в GiftHistory.
  */
@@ -24,6 +24,7 @@ import {
   remnaDeleteUser,
 } from "../remna/remna.client.js";
 import { getSystemConfig } from "../client/client.service.js";
+import { getNextSubscriptionIndex } from "../subscription/subscription.helpers.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -31,7 +32,7 @@ export type GiftResult<T = void> =
   | { ok: true; data: T }
   | { ok: false; error: string; status: number };
 
-export type SecondarySubscriptionData = {
+export type SubscriptionData = {
   id: string;
   ownerId: string;
   remnawaveUuid: string | null;
@@ -61,15 +62,9 @@ function normalizeCode(input: string): string {
   return input.replace(/[\s-]/g, "").toUpperCase();
 }
 
-/** Определяет следующий subscriptionIndex для данного клиента. */
-async function getNextSubscriptionIndex(ownerId: string): Promise<number> {
-  const last = await prisma.secondarySubscription.findFirst({
-    where: { ownerId },
-    orderBy: { subscriptionIndex: "desc" },
-    select: { subscriptionIndex: true },
-  });
-  return (last?.subscriptionIndex ?? 0) + 1;
-}
+// локальная копия удалена. Используем централизованный helper
+// `getNextSubscriptionIndex` из subscription.helpers.ts — он ищет ПЕРВЫЙ свободный слот (0, 1, 2…),
+// не max+1. Старая локальная функция возвращала 1 даже для свежего клиента (0+1=1).
 
 /** Генерирует Remnawave username для дочерней подписки: {rootUsername}_{index}. */
 function secondaryRemnaUsername(
@@ -90,13 +85,13 @@ function secondaryRemnaUsername(
 async function logGiftEvent(
   clientId: string,
   eventType: string,
-  secondarySubscriptionId?: string | null,
+  subscriptionId?: string | null,
   metadata?: Record<string, unknown>,
 ): Promise<void> {
   await prisma.giftHistory.create({
     data: {
       clientId,
-      secondarySubscriptionId: secondarySubscriptionId ?? null,
+      subscriptionId: subscriptionId ?? null,
       eventType,
       metadata: (metadata as Prisma.InputJsonValue) ?? undefined,
     },
@@ -106,7 +101,7 @@ async function logGiftEvent(
 // ─── Core Functions ──────────────────────────────────────────────────────────
 
 /**
- * Создаёт дополнительную подписку (SecondarySubscription + Remnawave user).
+ * Создаёт дополнительную подписку (Subscription + Remnawave user).
  * Вызывается ПОСЛЕ успешной оплаты тарифа (из webhook / оплата балансом).
  */
 export async function createAdditionalSubscription(
@@ -123,8 +118,8 @@ export async function createAdditionalSubscription(
     internalSquadUuids: string[];
     trafficResetMode?: string;
   },
-  options?: { skipConfigCheck?: boolean; extraDevices?: number },
-): Promise<GiftResult<{ secondarySubscriptionId: string; subscriptionIndex: number }>> {
+  options?: { skipConfigCheck?: boolean; extraDevices?: number; purchasedAsGift?: boolean },
+): Promise<GiftResult<{ subscriptionId: string; subscriptionIndex: number }>> {
   if (!isRemnaConfigured()) {
     return { ok: false, error: "Сервис временно недоступен", status: 503 };
   }
@@ -148,7 +143,7 @@ export async function createAdditionalSubscription(
   }
 
   // Проверяем лимит
-  const existingCount = await prisma.secondarySubscription.count({
+  const existingCount = await prisma.subscription.count({
     where: { ownerId: rootClientId },
   });
   if (existingCount >= config.maxAdditionalSubscriptions) {
@@ -159,7 +154,19 @@ export async function createAdditionalSubscription(
     };
   }
 
-  let index = await getNextSubscriptionIndex(rootClientId);
+  // subscriptionIndex (для БД) и usernameSuffix
+  // (для генерации уникального имени в Remna) — это РАЗНЫЕ переменные. Раньше один и тот же
+  // `index` инкрементировался при retry «username taken», что протекало в БД и подписка
+  // получала subscription_index=1 вместо 0 для свежего клиента.
+  let subscriptionIndex = await getNextSubscriptionIndex(rootClientId);
+
+  // Подарочная подписка (purchasedAsGift=true) НИКОГДА не должна занимать primary-слот.
+  // T-gift-index-fix : берём ПЕРВЫЙ СВОБОДНЫЙ индекс ≥1 (а не тупо 1) —
+  // иначе у клиента с дырой на index 0 и уже занятым index 1 prisma.subscription.create падал
+  // с UNIQUE-конфликтом (ownerId, subscriptionIndex), и активация подарка после оплаты не проходила.
+  if (options?.purchasedAsGift === true && subscriptionIndex === 0) {
+    subscriptionIndex = await getNextSubscriptionIndex(rootClientId, 1);
+  }
 
   // Создаём пользователя в Remnawave
   const trafficLimitBytes = tariff.trafficLimitBytes != null ? Number(tariff.trafficLimitBytes) : 0;
@@ -177,13 +184,32 @@ export async function createAdditionalSubscription(
     ? includedDevices + extraDevices
     : tariff.deviceLimit ?? undefined;
 
-  // Retry с инкрементом индекса — если username уже занят в Remnawave
-  const MAX_ATTEMPTS = 5;
+  // Retry с инкрементом ОТДЕЛЬНОГО суффикса для username — если username уже занят в Remnawave.
+  // юзеры с многими тестовыми подписками упирались в лимит
+  // (после удалений в БД индексы _1.._5 могли остаться в Remna, и 5 попыток incremental не хватало).
+  // Решение: 20 incremental + fallback на random hex suffix — гарантированно уникальное имя.
+  const MAX_ATTEMPTS = 25;
+  const RANDOM_FALLBACK_AFTER = 20; // последние 5 попыток — со случайным суффиксом
   let remnaUuid: string | undefined;
   let username = "";
+  // usernameSuffix — стартует от subscriptionIndex (естественное имя «alice_0/alice_1»),
+  // но инкрементируется НЕЗАВИСИМО при коллизии. Это не влияет на subscriptionIndex для БД.
+  let usernameSuffix = subscriptionIndex;
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    username = secondaryRemnaUsername(rootClient, index);
+    if (attempt < RANDOM_FALLBACK_AFTER) {
+      username = secondaryRemnaUsername(rootClient, usernameSuffix);
+    } else {
+      // Random suffix — practically uncollidable (16M вариаций на 3 байта).
+      const baseName = remnaUsernameFromClient({
+        telegramUsername: rootClient.telegramUsername,
+        telegramId: rootClient.telegramId,
+        email: rootClient.email,
+        clientIdFallback: rootClient.id,
+      });
+      const rnd = Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, "0");
+      username = (baseName + "_r" + rnd).slice(0, 36);
+    }
 
     const createRes = await remnaCreateUser({
       username,
@@ -203,8 +229,8 @@ export async function createAdditionalSubscription(
       createRes.error.toLowerCase().includes("already exists");
 
     if (isUsernameTaken) {
-      console.warn(`[gift] Username "${username}" already exists in Remnawave, retrying with index ${index + 1}`);
-      index++;
+      console.warn(`[gift] Username "${username}" already exists in Remnawave, retrying (attempt ${attempt + 1}/${MAX_ATTEMPTS}) — увеличиваю usernameSuffix, subscriptionIndex=${subscriptionIndex} НЕ трогаю`);
+      usernameSuffix++;
       continue;
     }
 
@@ -217,26 +243,68 @@ export async function createAdditionalSubscription(
     return { ok: false, error: "Ошибка создания VPN-пользователя (все имена заняты)", status: 502 };
   }
 
-  // Создаём запись SecondarySubscription
-  const subscription = await prisma.secondarySubscription.create({
+  // если в админке включён toggle «Автопродление подписки»
+  // (defaultAutoRenewEnabled), то новые secondary создаются сразу с autoRenewEnabled=true.
+  // Подарочные (purchasedAsGift=true) — НЕ включаем (получатель сам решит после redeem).
+  const isGiftPurchase = options?.purchasedAsGift === true;
+  const defaultAutoRenew = !isGiftPurchase && config.defaultAutoRenewEnabled === true;
+
+  // Создаём запись Subscription
+  const subscription = await prisma.subscription.create({
     data: {
       ownerId: rootClientId,
-      subscriptionIndex: index,
+      subscriptionIndex,
       remnawaveUuid: remnaUuid,
       tariffId: tariff.id ?? null,
+      // покупки через раздел «🎁 Подарки» помечаем true.
+      // Обычные доп. подписки (купил себе) → false (default). Решает дубль в UI.
+      purchasedAsGift: isGiftPurchase,
+      // автосписание включаем по дефолту, если админ
+      // настроил это в /admin/auto-renew. Подарочные подписки исключаем — там получатель
+      // сам решит включать ли.
+      autoRenewEnabled: defaultAutoRenew,
+      // сохраняем кастомную цену и pricePerDay для дальнейшего
+      // продления и аналитики. Подарочные тоже — потому что получатель может продлевать.
+      ...(tariff.price != null && tariff.price > 0 ? {
+        customPrice: tariff.price,
+        currentPricePerDay: tariff.durationDays > 0 ? tariff.price / tariff.durationDays : null,
+      } : {}),
+      // T-unify: если автопродление включено по дефолту — сохраняем тариф+опцию для cron.
+      ...(defaultAutoRenew && tariff.id ? { autoRenewTariffId: tariff.id } : {}),
+      // кешируем expireAt в БД. Используется в:
+      //   • broadcast filter (active_subs / expired_subs)
+      //   • auto-renew cron
+      //   • admin UI без запроса в Remna
+      expireAt: new Date(expireAt),
     },
   });
+
+  // если это primary-подписка (idx=0) — синкаем
+  // legacy-поля Client.{remnawaveUuid,currentTariffId,currentPricePerDay} для обратной
+  // совместимости старого кода (кабинет, mini-app, /api/client/me).
+  if (subscriptionIndex === 0 && !isGiftPurchase) {
+    await prisma.client.update({
+      where: { id: rootClientId },
+      data: {
+        remnawaveUuid: remnaUuid,
+        ...(tariff.id ? { currentTariffId: tariff.id } : {}),
+        ...(tariff.price != null && tariff.price > 0 && tariff.durationDays > 0
+          ? { currentPricePerDay: tariff.price / tariff.durationDays }
+          : {}),
+      },
+    }).catch(() => { /* legacy fields, не критично */ });
+  }
 
   // Логируем
   await logGiftEvent(rootClientId, "PURCHASED", subscription.id, {
     tariffName: tariff.name ?? null,
     price: tariff.price ?? null,
-    subscriptionIndex: index,
+    subscriptionIndex,
   });
 
   return {
     ok: true,
-    data: { secondarySubscriptionId: subscription.id, subscriptionIndex: index },
+    data: { subscriptionId: subscription.id, subscriptionIndex },
   };
 }
 
@@ -248,7 +316,7 @@ export async function activateForSelf(
   ownerId: string,
   subscriptionId: string,
 ): Promise<GiftResult<{ subscriptionId: string }>> {
-  const sub = await prisma.secondarySubscription.findUnique({
+  const sub = await prisma.subscription.findUnique({
     where: { id: subscriptionId },
     include: { tariff: { select: { name: true } } },
   });
@@ -269,14 +337,19 @@ export async function activateForSelf(
   // Если есть активный код — отменяем его
   if (sub.giftStatus === "GIFT_RESERVED") {
     await prisma.giftCode.updateMany({
-      where: { secondarySubscriptionId: subscriptionId, status: "ACTIVE" },
+      where: { subscriptionId: subscriptionId, status: "ACTIVE" },
       data: { status: "CANCELLED" },
     });
   }
 
-  await prisma.secondarySubscription.update({
+  await prisma.subscription.update({
     where: { id: subscriptionId },
-    data: { giftStatus: "ACTIVATED_SELF" },
+    data: {
+      giftStatus: "ACTIVATED_SELF",
+      // юзер забрал подарочную подписку себе → переезжает
+      // в общий список «Мои подписки», исчезает из «🎁 Мои подарки».
+      purchasedAsGift: false,
+    },
   });
 
   await logGiftEvent(ownerId, "ACTIVATED_SELF", subscriptionId, {
@@ -293,7 +366,7 @@ export async function deleteSubscription(
   ownerId: string,
   subscriptionId: string,
 ): Promise<GiftResult> {
-  const sub = await prisma.secondarySubscription.findUnique({
+  const sub = await prisma.subscription.findUnique({
     where: { id: subscriptionId },
     include: { tariff: { select: { name: true } } },
   });
@@ -314,7 +387,7 @@ export async function deleteSubscription(
 
   // Отменяем все активные коды
   await prisma.giftCode.updateMany({
-    where: { secondarySubscriptionId: subscriptionId, status: "ACTIVE" },
+    where: { subscriptionId: subscriptionId, status: "ACTIVE" },
     data: { status: "CANCELLED" },
   });
 
@@ -334,7 +407,7 @@ export async function deleteSubscription(
   });
 
   // Hard delete
-  await prisma.secondarySubscription.delete({
+  await prisma.subscription.delete({
     where: { id: subscriptionId },
   });
 
@@ -342,22 +415,22 @@ export async function deleteSubscription(
 }
 
 /**
- * Список всех подписок клиента (основная + дополнительные).
- * Скрытые (giftStatus = GIFT_RESERVED) не включаются.
- * Подаренные и уже активированные у текущего клиента (giftStatus = GIFTED) — показываются.
+ * Список подарочных подписок клиента — для раздела «🎁 Мои подарки».
+ * Показывает ТОЛЬКО подписки помеченные `purchasedAsGift = true` (куплены через gift flow,
+ * чтобы передать кому-то). Если юзер «забрал себе» (activateForSelf) — флаг сбрасывается
+ * и подписка исчезает из этого списка (переезжает в обычные «Мои подписки»).
+ *
+ * Раньше показывал все secondary без gift_status — это создавало дубли с «Мои подписки».
  */
 export async function listClientSubscriptions(
   rootClientId: string,
-): Promise<GiftResult<SecondarySubscriptionData[]>> {
-  const secondaries = await prisma.secondarySubscription.findMany({
+): Promise<GiftResult<SubscriptionData[]>> {
+  const secondaries = await prisma.subscription.findMany({
     where: {
       ownerId: rootClientId,
-      OR: [
-        { giftStatus: null },
-        { giftStatus: "" },
-        { giftStatus: "ACTIVATED_SELF" },
-        { giftStatus: "GIFTED" },
-      ], // не показываем только зарезервированные под подарок
+      purchasedAsGift: true,
+      // GIFTED показываем только если ownerId совпадает (подарено и записано на дарителя — для истории).
+      // Но фактически после GIFTED ownerId меняется на получателя, поэтому фильтр по ownerId этого не пропустит.
     },
     orderBy: { subscriptionIndex: "asc" },
   });
@@ -371,8 +444,8 @@ export async function listClientSubscriptions(
  */
 export async function listAllClientSubscriptions(
   rootClientId: string,
-): Promise<GiftResult<SecondarySubscriptionData[]>> {
-  const secondaries = await prisma.secondarySubscription.findMany({
+): Promise<GiftResult<SubscriptionData[]>> {
+  const secondaries = await prisma.subscription.findMany({
     where: {
       ownerId: rootClientId,
       OR: [
@@ -394,19 +467,19 @@ export async function listAllClientSubscriptions(
  */
 export async function createGiftCode(
   rootClientId: string,
-  secondarySubscriptionId: string,
+  subscriptionId: string,
   giftMessage?: string,
   options?: { skipConfigCheck?: boolean },
-): Promise<GiftResult<{ code: string; expiresAt: Date; tariffName: string | null }>> {
+): Promise<GiftResult<{ code: string; expiresAt: Date; tariffName: string | null; durationDays: number | null; trafficLimitBytes: number | null }>> {
   const config = await getSystemConfig();
   if (!options?.skipConfigCheck && !config.giftSubscriptionsEnabled) {
     return { ok: false, error: "Подарки отключены", status: 403 };
   }
 
   // Read for ownership check + tariff name lookup (read-only).
-  const sub = await prisma.secondarySubscription.findUnique({
-    where: { id: secondarySubscriptionId },
-    include: { tariff: { select: { name: true } } },
+  const sub = await prisma.subscription.findUnique({
+    where: { id: subscriptionId },
+    include: { tariff: { select: { name: true, durationDays: true, trafficLimitBytes: true } } },
   });
   if (!sub || sub.ownerId !== rootClientId) {
     return { ok: false, error: "Подписка не найдена", status: 404 };
@@ -417,6 +490,12 @@ export async function createGiftCode(
   if (sub.giftStatus === "ACTIVATED_SELF") {
     return { ok: false, error: "Подписка активирована на себя и не может быть подарена", status: 400 };
   }
+  // нельзя дарить «свою» подписку — только купленную для подарка.
+  // purchasedAsGift=false означает что клиент купил её себе (или получил через grant админа).
+  // Чтобы подарить, нужно покупать через раздел «🎁 Подарки» (там purchasedAsGift=true).
+  if (sub.purchasedAsGift !== true) {
+    return { ok: false, error: "Эта подписка куплена для себя — её нельзя подарить. Купите новую подписку через «🎁 Подарки».", status: 400 };
+  }
 
   // Тут была дыра: 25 параллельных /create-code на одну подписку — все 25
   // успевали прочитать giftStatus=null, проверить что активного кода нет,
@@ -426,9 +505,9 @@ export async function createGiftCode(
   // PG лочит строку, кто первый успел — забрал. Остальным count=0, идут
   // лесом с 409. Заодно убирается отдельная проверка "активный код уже есть",
   // потому что инвариант: ACTIVE GiftCode <=> giftStatus = GIFT_RESERVED.
-  const reserve = await prisma.secondarySubscription.updateMany({
+  const reserve = await prisma.subscription.updateMany({
     where: {
-      id: secondarySubscriptionId,
+      id: subscriptionId,
       ownerId: rootClientId,
       giftStatus: null,
     },
@@ -452,8 +531,8 @@ export async function createGiftCode(
   }
   if (attempts >= 10) {
     // Rollback reservation — could not generate unique code.
-    await prisma.secondarySubscription.update({
-      where: { id: secondarySubscriptionId },
+    await prisma.subscription.update({
+      where: { id: subscriptionId },
       data: { giftStatus: null },
     }).catch(() => {});
     return { ok: false, error: "Не удалось сгенерировать уникальный код", status: 500 };
@@ -471,7 +550,7 @@ export async function createGiftCode(
       data: {
         code,
         creatorId: rootClientId,
-        secondarySubscriptionId,
+        subscriptionId,
         status: "ACTIVE",
         expiresAt,
         giftMessage: trimmedMessage,
@@ -479,30 +558,53 @@ export async function createGiftCode(
     });
   } catch (err) {
     // Rollback reservation on unexpected failure (e.g. unique-violation).
-    await prisma.secondarySubscription.update({
-      where: { id: secondarySubscriptionId },
+    await prisma.subscription.update({
+      where: { id: subscriptionId },
       data: { giftStatus: null },
     }).catch(() => {});
     throw err;
   }
 
-  await logGiftEvent(rootClientId, "CODE_CREATED", secondarySubscriptionId, {
+  await logGiftEvent(rootClientId, "CODE_CREATED", subscriptionId, {
     code,
     tariffName: sub.tariff?.name ?? null,
     giftMessage: trimmedMessage,
   });
 
-  return { ok: true, data: { code, expiresAt, tariffName: sub.tariff?.name ?? null } };
+  // возвращаем длительность + лимит трафика —
+  // бот рендерит разный текст для Unblock (с трафиком) vs Стандарт (без).
+  return {
+    ok: true,
+    data: {
+      code,
+      expiresAt,
+      tariffName: sub.tariff?.name ?? null,
+      durationDays: (sub.expireAt && sub.createdAt) ? Math.max(1, Math.round((new Date(sub.expireAt).getTime() - new Date(sub.createdAt).getTime()) / 86400000)) : (sub.tariff?.durationDays ?? null),
+      trafficLimitBytes: sub.tariff?.trafficLimitBytes != null ? Number(sub.tariff.trafficLimitBytes) : null,
+    },
+  };
 }
 
 /**
  * Активирует подарок: переносит подписку на получателя.
- * Создаёт новую SecondarySubscription у получателя, обновляет giftedToClientId.
+ * Создаёт новую Subscription у получателя, обновляет giftedToClientId.
  */
 export async function redeemGiftCode(
   recipientRootClientId: string,
   rawCode: string,
-): Promise<GiftResult<{ secondarySubscriptionId: string; subscriptionIndex: number; giftMessage: string | null; creatorTelegramId: string | null; tariffName: string | null }>> {
+): Promise<GiftResult<{
+  subscriptionId: string;
+  subscriptionIndex: number;
+  giftMessage: string | null;
+  creatorTelegramId: string | null;
+  tariffName: string | null;
+  /** для красивого render-текста получателю. */
+  durationDays: number | null;
+  trafficLimitBytes: number | null;
+  subscriptionUrl: string | null;
+  tariffPrice: number | null;
+  tariffCurrency: string | null;
+}>> {
   const config = await getSystemConfig();
   if (!config.giftSubscriptionsEnabled) {
     return { ok: false, error: "Подарки отключены", status: 403 };
@@ -519,8 +621,9 @@ export async function redeemGiftCode(
       status: "ACTIVE",
     },
     include: {
-      secondarySubscription: {
-        include: { tariff: { select: { id: true, name: true } } },
+      subscription: {
+        // подгружаем durationDays + trafficLimitBytes + цену для рендера.
+        include: { tariff: { select: { id: true, name: true, durationDays: true, trafficLimitBytes: true, price: true, currency: true } } },
       },
     },
   });
@@ -548,12 +651,14 @@ export async function redeemGiftCode(
 
   // Lazy expiration check
   if (giftCode.expiresAt < new Date()) {
-    await expireGiftCode(giftCode.id, giftCode.secondarySubscriptionId);
+    await expireGiftCode(giftCode.id, giftCode.subscriptionId);
     return { ok: false, error: "Код истёк", status: 400 };
   }
 
-  // Нельзя подарить самому себе
-  if (giftCode.creatorId === recipientRootClientId) {
+  // Нельзя подарить самому себе — НО только если код создан клиентом (не админом).
+  // admin-created коды разрешены к самоактивации,
+  // потому что creator = recipient (админ создаёт подарок именно этому клиенту).
+  if (giftCode.creatorId === recipientRootClientId && !(giftCode as { createdByAdmin?: boolean }).createdByAdmin) {
     return { ok: false, error: "Нельзя использовать свой собственный подарочный код", status: 400 };
   }
 
@@ -567,7 +672,7 @@ export async function redeemGiftCode(
   }
 
   // Проверяем лимит у получателя
-  const recipientSubCount = await prisma.secondarySubscription.count({
+  const recipientSubCount = await prisma.subscription.count({
     where: { ownerId: recipientRootClientId },
   });
   if (recipientSubCount >= config.maxAdditionalSubscriptions) {
@@ -578,23 +683,12 @@ export async function redeemGiftCode(
     };
   }
 
-  // Проверка дублирования: если у получателя уже есть подписка на этот тариф
-  const sub = giftCode.secondarySubscription;
-  if (sub.tariffId) {
-    const existingDupe = await prisma.secondarySubscription.findFirst({
-      where: {
-        ownerId: recipientRootClientId,
-        tariffId: sub.tariffId,
-      },
-    });
-    if (existingDupe) {
-      return {
-        ok: false,
-        error: "У получателя уже есть подписка на этот тариф",
-        status: 409,
-      };
-    }
-  }
+  // дубль-проверка по tariffId УБРАНА.
+  // Раньше блокировала активацию подарка если у получателя уже была подписка с этим тарифом
+  // → нельзя было подарить второй раз тому же человеку. Теперь подарок активируется
+  // как ОТДЕЛЬНАЯ дополнительная подписка (без ограничений по tariffId).
+  // Ограничение по maxAdditionalSubscriptions (выше) остаётся — нельзя превышать лимит подписок.
+  const sub = giftCode.subscription;
 
   // Определяем новый индекс у получателя
   const newIndex = await getNextSubscriptionIndex(recipientRootClientId);
@@ -620,14 +714,18 @@ export async function redeemGiftCode(
   }
 
   // Теперь безопасно перепривязываем подписку — других претендентов нет.
+  // сбрасываем purchasedAsGift=false — после redeem подписка
+  // у получателя считается «своей», а не «подарочной для передачи». Иначе она показывалась
+  // бы в «🎁 Мои подарки» получателя с лейблом «(подарена)» — что неверно.
   try {
-    await prisma.secondarySubscription.update({
-      where: { id: giftCode.secondarySubscriptionId },
+    await prisma.subscription.update({
+      where: { id: giftCode.subscriptionId },
       data: {
         ownerId: recipientRootClientId,
         subscriptionIndex: newIndex,
         giftStatus: "GIFTED",
         giftedToClientId: recipientRootClientId,
+        purchasedAsGift: false,
       },
     });
   } catch (err) {
@@ -641,12 +739,12 @@ export async function redeemGiftCode(
   }
 
   // Логируем для обеих сторон
-  await logGiftEvent(giftCode.creatorId, "GIFT_SENT", giftCode.secondarySubscriptionId, {
+  await logGiftEvent(giftCode.creatorId, "GIFT_SENT", giftCode.subscriptionId, {
     code: giftCode.code,
     recipientId: recipientRootClientId,
     tariffName: sub.tariff?.name ?? null,
   });
-  await logGiftEvent(recipientRootClientId, "GIFT_RECEIVED", giftCode.secondarySubscriptionId, {
+  await logGiftEvent(recipientRootClientId, "GIFT_RECEIVED", giftCode.subscriptionId, {
     code: giftCode.code,
     senderId: giftCode.creatorId,
     tariffName: sub.tariff?.name ?? null,
@@ -673,8 +771,11 @@ export async function redeemGiftCode(
     select: { telegramId: true },
   });
 
-  // Уведомляем дарителя о том, что подарок активирован (fire-and-forget)
-  if (creator?.telegramId) {
+  // уведомляем дарителя ТОЛЬКО если:
+  //   • код создан клиентом (не админом — иначе creator = recipient, юзер сам себе шлёт)
+  //   • даритель ≠ получатель (защита от self-notify в любых случаях)
+  const isAdminCode = (giftCode as { createdByAdmin?: boolean }).createdByAdmin === true;
+  if (creator?.telegramId && !isAdminCode && giftCode.creatorId !== recipientRootClientId) {
     const recipientInfo = await prisma.client.findUnique({
       where: { id: recipientRootClientId },
       select: { telegramUsername: true, email: true },
@@ -689,14 +790,36 @@ export async function redeemGiftCode(
     );
   }
 
+  // получаем subscriptionUrl чтобы передать получателю.
+  let subscriptionUrl: string | null = null;
+  const updatedSub = await prisma.subscription.findUnique({
+    where: { id: giftCode.subscriptionId },
+    select: { remnawaveUuid: true },
+  });
+  if (updatedSub?.remnawaveUuid) {
+    try {
+      const { remnaGetUser } = await import("../remna/remna.client.js");
+      const r = await remnaGetUser(updatedSub.remnawaveUuid);
+      const inner = (r.data as { response?: Record<string, unknown>; data?: Record<string, unknown> } | null)?.response
+        ?? (r.data as { response?: Record<string, unknown>; data?: Record<string, unknown> } | null)?.data
+        ?? (r.data as Record<string, unknown> | null);
+      subscriptionUrl = (inner as { subscriptionUrl?: string } | null)?.subscriptionUrl ?? null;
+    } catch { /* ignore */ }
+  }
+
   return {
     ok: true,
     data: {
-      secondarySubscriptionId: giftCode.secondarySubscriptionId,
+      subscriptionId: giftCode.subscriptionId,
       subscriptionIndex: newIndex,
       giftMessage: giftCode.giftMessage ?? null,
       creatorTelegramId: creator?.telegramId ?? null,
       tariffName: sub.tariff?.name ?? null,
+      durationDays: (sub.expireAt && sub.createdAt) ? Math.max(1, Math.round((new Date(sub.expireAt).getTime() - new Date(sub.createdAt).getTime()) / 86400000)) : (sub.tariff?.durationDays ?? null),
+      trafficLimitBytes: sub.tariff?.trafficLimitBytes != null ? Number(sub.tariff.trafficLimitBytes) : null,
+      subscriptionUrl,
+      tariffPrice: sub.tariff?.price ?? null,
+      tariffCurrency: sub.tariff?.currency ?? null,
     },
   };
 }
@@ -729,13 +852,13 @@ export async function cancelGiftCode(
       where: { id: giftCode.id },
       data: { status: "CANCELLED" },
     }),
-    prisma.secondarySubscription.update({
-      where: { id: giftCode.secondarySubscriptionId },
+    prisma.subscription.update({
+      where: { id: giftCode.subscriptionId },
       data: { giftStatus: null },
     }),
   ]);
 
-  await logGiftEvent(rootClientId, "CODE_CANCELLED", giftCode.secondarySubscriptionId, {
+  await logGiftEvent(rootClientId, "CODE_CANCELLED", giftCode.subscriptionId, {
     code: giftCode.code,
   });
 
@@ -746,14 +869,14 @@ export async function cancelGiftCode(
  * Помечает код как истёкший и снимает резерв с подписки.
  * Вызывается при lazy check (попытка использования просроченного кода).
  */
-async function expireGiftCode(giftCodeId: string, secondarySubscriptionId: string): Promise<void> {
+async function expireGiftCode(giftCodeId: string, subscriptionId: string): Promise<void> {
   await prisma.$transaction([
     prisma.giftCode.update({
       where: { id: giftCodeId },
       data: { status: "EXPIRED" },
     }),
-    prisma.secondarySubscription.update({
-      where: { id: secondarySubscriptionId },
+    prisma.subscription.update({
+      where: { id: subscriptionId },
       data: { giftStatus: null },
     }),
   ]);
@@ -763,7 +886,7 @@ async function expireGiftCode(giftCodeId: string, secondarySubscriptionId: strin
     select: { creatorId: true, code: true },
   });
   if (gc) {
-    await logGiftEvent(gc.creatorId, "CODE_EXPIRED", secondarySubscriptionId, {
+    await logGiftEvent(gc.creatorId, "CODE_EXPIRED", subscriptionId, {
       code: gc.code,
     });
   }
@@ -779,11 +902,11 @@ export async function expireOldGiftCodes(): Promise<number> {
       status: "ACTIVE",
       expiresAt: { lt: new Date() },
     },
-    select: { id: true, secondarySubscriptionId: true },
+    select: { id: true, subscriptionId: true },
   });
 
   for (const gc of expiredCodes) {
-    await expireGiftCode(gc.id, gc.secondarySubscriptionId);
+    await expireGiftCode(gc.id, gc.subscriptionId);
   }
 
   if (expiredCodes.length > 0) {
@@ -806,7 +929,7 @@ export async function listGiftCodes(
   createdAt: Date;
   redeemedAt: Date | null;
   giftMessage: string | null;
-  secondarySubscriptionId: string;
+  subscriptionId: string;
 }>>> {
   // Lazy expire перед выдачей списка
   await expireOldGiftCodes();
@@ -821,7 +944,7 @@ export async function listGiftCodes(
       createdAt: true,
       redeemedAt: true,
       giftMessage: true,
-      secondarySubscriptionId: true,
+      subscriptionId: true,
     },
     orderBy: { createdAt: "desc" },
   });
@@ -836,7 +959,7 @@ export async function getSubscriptionUrl(
   subscriptionId: string,
   rootClientId: string,
 ): Promise<GiftResult<{ uuid: string }>> {
-  const sub = await prisma.secondarySubscription.findUnique({
+  const sub = await prisma.subscription.findUnique({
     where: { id: subscriptionId },
     select: { ownerId: true, remnawaveUuid: true, giftStatus: true },
   });
@@ -866,7 +989,7 @@ export async function getGiftHistory(
   eventType: string;
   metadata: unknown;
   createdAt: Date;
-  secondarySubscriptionId: string | null;
+  subscriptionId: string | null;
 }>; total: number; page: number; limit: number }>> {
   const skip = (page - 1) * limit;
 
@@ -881,7 +1004,7 @@ export async function getGiftHistory(
         eventType: true,
         metadata: true,
         createdAt: true,
-        secondarySubscriptionId: true,
+        subscriptionId: true,
       },
     }),
     prisma.giftHistory.count({ where: { clientId } }),
@@ -914,7 +1037,7 @@ export async function getPublicGiftCodeInfo(
       ],
     },
     include: {
-      secondarySubscription: {
+      subscription: {
         include: { tariff: { select: { name: true } } },
       },
     },
@@ -927,7 +1050,7 @@ export async function getPublicGiftCodeInfo(
   // Lazy expire
   const isExpired = gc.status === "ACTIVE" && gc.expiresAt < new Date();
   if (isExpired) {
-    await expireGiftCode(gc.id, gc.secondarySubscriptionId);
+    await expireGiftCode(gc.id, gc.subscriptionId);
   }
 
   return {
@@ -938,7 +1061,7 @@ export async function getPublicGiftCodeInfo(
       giftMessage: gc.giftMessage,
       expiresAt: gc.expiresAt,
       createdAt: gc.createdAt,
-      tariffName: gc.secondarySubscription?.tariff?.name ?? null,
+      tariffName: gc.subscription?.tariff?.name ?? null,
       isExpired: isExpired || gc.status === "EXPIRED",
     },
   };
@@ -946,13 +1069,17 @@ export async function getPublicGiftCodeInfo(
 
 /**
  * Создание подарочного кода от лица администратора.
- * Создаёт SecondarySubscription у указанного клиента + генерирует код.
+ * Создаёт Subscription у указанного клиента + генерирует код.
  */
 export async function adminCreateGiftCode(
   ownerClientId: string,
   tariffId: string,
   giftMessage?: string,
-): Promise<GiftResult<{ code: string; expiresAt: Date; secondarySubscriptionId: string }>> {
+  /** id админа который создаёт код — для отображения в админке. */
+  adminId?: string | null,
+  /** админ-override срока/трафика (как в grant-tariff). undefined → дефолт тарифа. */
+  overrides?: { durationDays?: number; trafficLimitBytes?: bigint | null },
+): Promise<GiftResult<{ code: string; expiresAt: Date; subscriptionId: string }>> {
   // Находим тариф
   const tariff = await prisma.tariff.findUnique({
     where: { id: tariffId },
@@ -961,17 +1088,27 @@ export async function adminCreateGiftCode(
     return { ok: false, error: "Тариф не найден", status: 404 };
   }
 
-  // Создаём подписку (админ обходит проверку giftSubscriptionsEnabled)
+  // admin-flow создания кода — всегда создаём НОВУЮ подписку
+  // помеченную purchasedAsGift=true. Так createGiftCode пропустит её через проверку
+  // (нельзя дарить «свои» подписки — только покупочно-подарочные).
+  // применяем админ-override срока/трафика (трафик только если у тарифа лимит>0; 0=безлимит).
+  const effDurationDays = (overrides?.durationDays != null && overrides.durationDays > 0)
+    ? overrides.durationDays
+    : tariff.durationDays;
+  const hasTariffLimit = tariff.trafficLimitBytes != null && Number(tariff.trafficLimitBytes) > 0;
+  const effTrafficLimitBytes: bigint | null = (hasTariffLimit && overrides?.trafficLimitBytes !== undefined)
+    ? overrides.trafficLimitBytes
+    : tariff.trafficLimitBytes;
   const subResult = await createAdditionalSubscription(ownerClientId, {
     id: tariff.id,
     name: tariff.name,
     price: 0, // admin-created, no cost
-    durationDays: tariff.durationDays,
-    trafficLimitBytes: tariff.trafficLimitBytes,
+    durationDays: effDurationDays,
+    trafficLimitBytes: effTrafficLimitBytes,
     deviceLimit: tariff.deviceLimit,
     internalSquadUuids: tariff.internalSquadUuids ?? [],
     trafficResetMode: tariff.trafficResetMode ?? undefined,
-  }, { skipConfigCheck: true });
+  }, { skipConfigCheck: true, purchasedAsGift: true });
   if (!subResult.ok) {
     return subResult;
   }
@@ -979,7 +1116,7 @@ export async function adminCreateGiftCode(
   // Создаём подарочный код (админ обходит проверку giftSubscriptionsEnabled)
   const codeResult = await createGiftCode(
     ownerClientId,
-    subResult.data.secondarySubscriptionId,
+    subResult.data.subscriptionId,
     giftMessage,
     { skipConfigCheck: true },
   );
@@ -987,8 +1124,15 @@ export async function adminCreateGiftCode(
     return codeResult;
   }
 
+  // помечаем код как admin-created.
+  // сохраняем id админа который создал — для отображения «Отправитель» в админке.
+  await prisma.giftCode.updateMany({
+    where: { code: codeResult.data.code },
+    data: { createdByAdmin: true, createdByAdminId: adminId ?? null },
+  }).catch(() => { /* ignore */ });
+
   // Логируем как ADMIN_CREATED
-  await logGiftEvent(ownerClientId, "ADMIN_CREATED", subResult.data.secondarySubscriptionId, {
+  await logGiftEvent(ownerClientId, "ADMIN_CREATED", subResult.data.subscriptionId, {
     tariffName: tariff.name,
     code: codeResult.data.code,
     giftMessage: giftMessage?.trim().slice(0, 200) || null,
@@ -1000,7 +1144,7 @@ export async function adminCreateGiftCode(
     data: {
       code: codeResult.data.code,
       expiresAt: codeResult.data.expiresAt,
-      secondarySubscriptionId: subResult.data.secondarySubscriptionId,
+      subscriptionId: subResult.data.subscriptionId,
     },
   };
 }

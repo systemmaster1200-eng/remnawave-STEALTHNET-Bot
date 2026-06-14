@@ -104,7 +104,6 @@ lavaWebhooksRouter.post("/", async (req: Request, res: Response) => {
     select: {
       id: true,
       clientId: true,
-      botId: true,
       amount: true,
       currency: true,
       tariffId: true,
@@ -152,7 +151,11 @@ lavaWebhooksRouter.post("/", async (req: Request, res: Response) => {
     });
     await notifyBalanceToppedUp(payment.clientId, payment.amount, payment.currency || "RUB", "Lava").catch(() => {});
   } else if (isExtraOption) {
-    await applyExtraOptionByPaymentId(payment.id);
+    const r = await applyExtraOptionByPaymentId(payment.id);
+    if (r.ok) {
+      const { notifyExtraOptionApplied } = await import("../notification/telegram-notify.service.js");
+      await notifyExtraOptionApplied(payment.clientId, payment.id).catch(() => {});
+    }
   } else if (payment.proxyTariffId) {
     const proxyResult = await createProxySlotsByPaymentId(payment.id);
     if (proxyResult.ok) {
@@ -168,6 +171,12 @@ lavaWebhooksRouter.post("/", async (req: Request, res: Response) => {
   } else {
     const activation = await activateTariffByPaymentId(payment.id);
     if (activation.ok) await notifyTariffActivated(payment.clientId, payment.id).catch(() => {});
+  }
+
+  // сжигаем одноразовую персональную скидку после продуктовой покупки.
+  if (!isTopUp) {
+    const { extinguishOneTimeDiscount } = await import("../client/personal-discount.js");
+    await extinguishOneTimeDiscount(payment.clientId).catch(() => {});
   }
 
   await distributeReferralRewards(payment.id).catch(() => {});

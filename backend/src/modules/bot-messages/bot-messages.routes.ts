@@ -33,27 +33,17 @@ interface BotMessageMeta {
   variables?: string[];
 }
 
+// редактор оставляет ТОЛЬКО текстовые блоки бота.
+// Кнопки, JSON-настройки (иконки/стили/видимость), flags (boolean/number), Telegram-ID —
+// убраны: они настраиваются в обычных секциях /admin/settings, а здесь должны быть
+// только тексты экранов бота, которые видит юзер.
 const META: BotMessageMeta[] = [
-  // меню
-  { key: "bot_menu_texts", group: "Меню и приветствие", label: "Заголовки меню (JSON)", description: "Объект с ключами welcomeTitlePrefix, balancePrefix и т.п.", valueType: "json" },
-  { key: "bot_back_label", group: "Меню и приветствие", label: "Кнопка «Назад»", description: "Текст кнопки возврата", valueType: "text" },
-  { key: "bot_buttons", group: "Меню и приветствие", label: "Тексты кнопок (JSON)", description: "Текст и emoji всех кнопок главного меню", valueType: "json" },
-  { key: "bot_emojis", group: "Меню и приветствие", label: "Иконки разделов (JSON)", description: "Emoji-префиксы для разделов меню", valueType: "json" },
-  { key: "bot_info_block", group: "Меню и приветствие", label: "Инфо-блок", description: "Произвольный текст под главным меню", valueType: "markdown" },
-
-  // тарифы и оплата
-  { key: "bot_tariffs_text", group: "Тарифы и оплата", label: "Текст «Выбор тарифа»", description: "{{TARIFFS}} = список тарифов", valueType: "markdown", variables: ["{{TARIFFS}}"] },
-  { key: "bot_tariffs_fields", group: "Тарифы и оплата", label: "Поля тарифа в списке (JSON)", description: "Какие поля тарифа показывать (price, duration, devices…)", valueType: "json" },
-  { key: "bot_payment_text", group: "Тарифы и оплата", label: "Текст «Оплата»", description: "Сообщение при выборе тарифа для оплаты", valueType: "markdown", variables: ["{{NAME}}", "{{PRICE}}", "{{ACTION}}"] },
-
-  // вёрстка/UI
-  { key: "bot_buttons_per_row", group: "UI", label: "Кнопок в ряду", description: "Сколько inline-кнопок в одной строке", valueType: "number" },
-  { key: "bot_inner_button_styles", group: "UI", label: "Стили inline-кнопок (JSON)", description: "Префиксы и стили внутренних кнопок", valueType: "json" },
-  { key: "bot_menu_line_visibility", group: "UI", label: "Видимость пунктов меню (JSON)", description: "Какие пункты меню показывать", valueType: "json" },
-
-  // прочее
-  { key: "bot_admin_telegram_ids", group: "Прочее", label: "Telegram ID администраторов", description: "Через запятую — кто получает админ-нотификации", valueType: "text" },
-  { key: "bot_auto_delete_unknown_messages", group: "Прочее", label: "Авто-удалять неизвестные сообщения", description: "Удалять любые сообщения от пользователя, не вписывающиеся в команду", valueType: "boolean" },
+  { key: "bot_info_block", group: "Тексты экранов бота", label: "Инфо-блок (главное меню)", description: "Произвольный текст под главным меню. Markdown поддерживается.", valueType: "markdown" },
+  { key: "bot_devices_text", group: "Тексты экранов бота", label: "Экран «📱 Мои устройства»", description: "Шапка экрана списка устройств. Появляется до перечня устройств по подпискам.", valueType: "markdown" },
+  { key: "bot_tariffs_text", group: "Тексты экранов бота", label: "Экран «Выбор тарифа»", description: "{{TARIFFS}} = список тарифов", valueType: "markdown", variables: ["{{TARIFFS}}"] },
+  { key: "bot_payment_text", group: "Тексты экранов бота", label: "Экран «Оплата»", description: "Сообщение при выборе тарифа для оплаты.", valueType: "markdown", variables: ["{{NAME}}", "{{PRICE}}", "{{ACTION}}"] },
+  // подсказка для юзера при выдаче subscription URL.
+  { key: "bot_instruction_fallback_text", group: "Тексты экранов бота", label: "Подсказка «Если инструкция не открылась»", description: "Показывается под ссылкой подписки и в карточке подписки — на случай если кнопка «📲 Инструкции» не открывает приложение.", valueType: "markdown" },
 ];
 
 export const botMessagesRouter = Router();

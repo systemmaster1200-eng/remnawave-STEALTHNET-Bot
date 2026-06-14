@@ -1,7 +1,6 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { randomBytes } from "crypto";
-import type { Bot } from "@prisma/client";
 import { prisma } from "../../db.js";
 import { env } from "../../config/index.js";
 import { applyMarkup } from "../bot/bot.service.js";
@@ -105,6 +104,8 @@ const SYSTEM_CONFIG_KEYS = [
   "smtp_from_email", "smtp_from_name", "public_app_url",
   "telegram_bot_token", "telegram_bot_username", "bot_admin_telegram_ids",
   "notification_telegram_group_id",
+  "notification_managers_group_id",
+  "notification_managers_topic_tickets",
   "notification_topic_new_clients",
   "notification_topic_payments",
   "notification_topic_tickets",
@@ -128,6 +129,17 @@ const SYSTEM_CONFIG_KEYS = [
   "category_emojis", // JSON: { "ordinary": "📦", "premium": "⭐" } — эмодзи категорий по коду
   "subscription_page_config",
   "support_link", "agreement_link", "offer_link", "instructions_link", // Поддержка: тех поддержка, соглашения, оферта, инструкции
+  "referral_instructions_url", // ссылка на инструкцию по рефералке (кнопка «📖 Инструкции»)
+  // T11+T13+T14 (11.05.2026): редактируемые тексты бота + URL'ы для документов и Telegram-прокси.
+  "refund_link", // Политика возврата (URL — Telegraph)
+  "support_hours_from", "support_hours_to", // Часы работы поддержки (формат "10:00")
+  "tg_proxy_text", "tg_proxy_url_primary", "tg_proxy_url_backup", "tg_proxy_servers", // Бесплатный TG-прокси: текст экрана + 2 legacy-URL + список прокси-серверов (JSON)
+  "reissue_warning_text", // T13: текст диалога «Обновление подписки»
+  "install_second_device_text", // T11: инструкция «Как подключить второе устройство»
+  "help_intro_text", // T11: блок «Цели/приоритеты» на экране Помощи (большой rich-text)
+  "gift_intro_text", // T11: приглашение на экране «Подарить подписку» (скрин 11)
+  "bot_devices_text", // текст шапки экрана «📱 Мои устройства»
+  "bot_instruction_fallback_text", // подсказка «если инструкция не открылась»
   // Приветственное сообщение бота (показывается при /start, до главного меню)
   "bot_welcome_enabled", "bot_welcome_text", "bot_welcome_image", "bot_welcome_show_once",
   // Применять выбранный дизайн (Stealth) и в обычном браузере, не только в Telegram Mini App
@@ -145,6 +157,12 @@ const SYSTEM_CONFIG_KEYS = [
   "google_analytics_id", "yandex_metrika_id", // Маркетинг: счётчики для кабинета
   "auto_broadcast_cron", // Расписание авто-рассылки (cron, например "0 9 * * *" = 9:00 каждый день)
   "skip_email_verification", // Регистрация без подтверждения почты: true/false
+  // Антибот-защита регистраций
+  "signup_protection_enabled", // Master switch: включает email-фильтр и rate-limit по IP
+  "email_domain_blocklist", // Дополнительный список доменов через запятую (расширяет встроенный)
+  "email_pattern_blocklist", // Regex-паттерны (по строке на каждый), блокируют локалпарт email
+  "signup_max_per_ip_per_hour", // Сколько регистраций с одного IP в час разрешено (default: 3)
+  "happ_crypt_enabled", // Шифровать subscriptionUrl в happ://crypt4/... (по умолчанию false: ссылка длинная)
   "use_remna_subscription_page", // Кнопка VPN в боте ведёт на страницу подписки Remna вместо кабинета: true/false
   "ai_chat_enabled", // AI-чат в кабинете включён: true/false
   // Гибкий тариф (собери сам): цена за день, устройство, трафик или безлимит, сквад
@@ -224,7 +242,7 @@ export type BotButtonConfig = { id: string; visible: boolean; label: string; ord
 export type BotEmojiEntry = { unicode?: string; tgEmojiId?: string };
 export type BotEmojisConfig = Record<string, BotEmojiEntry>;
 const DEFAULT_BOT_BUTTONS: BotButtonConfig[] = [
-  { id: "tariffs", visible: true, label: "📦 Тарифы", order: 0, style: "success", emojiKey: "PACKAGE" },
+  { id: "tariffs", visible: true, label: "💳 Купить доступ / Продлить", order: 2, style: "" },
   { id: "proxy", visible: true, label: "🌐 Прокси", order: 0.5, style: "primary", emojiKey: "SERVERS" },
   { id: "my_proxy", visible: true, label: "📋 Мои прокси", order: 0.6, style: "primary", emojiKey: "SERVERS" },
   { id: "singbox", visible: true, label: "🔑 Доступы", order: 0.55, style: "primary", emojiKey: "SERVERS" },
@@ -237,10 +255,14 @@ const DEFAULT_BOT_BUTTONS: BotButtonConfig[] = [
   { id: "vpn", visible: true, label: "🌐 Подключиться к VPN", order: 5, style: "danger", emojiKey: "SERVERS", onePerRow: true },
   { id: "cabinet", visible: true, label: "🌐 Web Кабинет", order: 6, style: "primary", emojiKey: "SERVERS" },
   { id: "tickets", visible: true, label: "🎫 Тикеты", order: 6.5, style: "primary", emojiKey: "NOTE" },
-  { id: "own_bot", visible: true, label: "🤖 Свой бот", order: 6.52, style: "primary", emojiKey: "NOTE", onePerRow: true },
   { id: "support", visible: true, label: "🆘 Поддержка", order: 7, style: "primary", emojiKey: "NOTE" },
   { id: "promocode", visible: true, label: "🎟️ Промокод", order: 8, style: "primary", emojiKey: "STAR" },
   { id: "extra_options", visible: true, label: "➕ Доп. опции", order: 9, style: "primary", emojiKey: "PACKAGE" },
+  // Кастомные кнопки. Раньше добавлялись автоматом в keyboard.ts —
+  // теперь явно в DEFAULT, чтобы они отображались в UI настроек админки.
+  { id: "my_subs", visible: true, label: "📋 Мои подписки", order: 3, style: "", onePerRow: true },
+  { id: "tg_proxy", visible: true, label: "🛡 Бесплатный Прокси для Telegram", order: 8, style: "", onePerRow: true },
+  { id: "site", visible: true, label: "🌐 Сайт", order: 10, style: "", onePerRow: true },
 ];
 
 export type BotMenuTexts = {
@@ -266,7 +288,7 @@ export type BotMenuTexts = {
 const DEFAULT_BOT_MENU_TEXTS: Required<BotMenuTexts> = {
   welcomeTitlePrefix: "🛡 ",
   welcomeGreeting: "👋 Добро пожаловать в ",
-  balancePrefix: "💰 Баланс: ",
+  balancePrefix: "💰 Ваш Баланс: ",
   tariffPrefix: "💎 Ваш тариф : ",
   subscriptionPrefix: "{{CHART}} Статус подписки — ",
   statusInactive: "{{STATUS_INACTIVE}} Истекла",
@@ -480,7 +502,30 @@ function parseBotEmojis(raw: string | undefined): BotEmojisConfig {
   }
 }
 
+// TTL-кэш для getSystemConfig.
+// Раньше каждый вызов делал prisma.systemSetting.findMany({where: { key: { in: ~200_keys }}})
+// — на тяжёлых маршрутах (broadcast 50k сообщений × 2 вызова) это давало 100k+ DB roundtrips
+// и упирало throughput в ~0.5 msg/sec + забивало api контейнер так что бот лагал.
+// Применение изменений настроек теперь задерживается ≤30 сек (приемлемо).
+// invalidate() публично экспортирован — admin-routes дёргают его после PATCH /admin/settings.
+let _systemConfigCache: { data: Awaited<ReturnType<typeof loadSystemConfigFromDb>>; ts: number } | null = null;
+const SYSTEM_CONFIG_TTL_MS = 30_000;
+
+export function invalidateSystemConfigCache(): void {
+  _systemConfigCache = null;
+}
+
 export async function getSystemConfig() {
+  const now = Date.now();
+  if (_systemConfigCache && (now - _systemConfigCache.ts) < SYSTEM_CONFIG_TTL_MS) {
+    return _systemConfigCache.data;
+  }
+  const data = await loadSystemConfigFromDb();
+  _systemConfigCache = { data, ts: now };
+  return data;
+}
+
+async function loadSystemConfigFromDb() {
   const settings = await prisma.systemSetting.findMany({
     where: { key: { in: SYSTEM_CONFIG_KEYS } },
   });
@@ -517,6 +562,8 @@ export async function getSystemConfig() {
     telegramBotUsername: map.telegram_bot_username || null,
     botAdminTelegramIds: parseBotAdminTelegramIds(map.bot_admin_telegram_ids),
     notificationTelegramGroupId: (map.notification_telegram_group_id ?? "").trim() || null,
+    notificationManagersGroupId: (map.notification_managers_group_id ?? "").trim() || null,
+    notificationManagersTopicTickets: (map.notification_managers_topic_tickets ?? "").trim() || null,
     notificationTopicNewClients: (map.notification_topic_new_clients ?? "").trim() || null,
     notificationTopicPayments: (map.notification_topic_payments ?? "").trim() || null,
     notificationTopicTickets: (map.notification_topic_tickets ?? "").trim() || null,
@@ -567,6 +614,20 @@ export async function getSystemConfig() {
     groqFallback3: (map.groq_fallback_3 ?? "").trim() || null,
     aiSystemPrompt: map.ai_system_prompt || "Ты — лучший менеджер техподдержки VPN-сервиса. Твоя цель — вежливо, быстро и точно помогать пользователям с настройкой VPN, тарифами и решением технических проблем. Отвечай кратко и по делу.",
     skipEmailVerification: map.skip_email_verification === "true" || map.skip_email_verification === "1",
+    /** Master switch для антибот-фильтра. По умолчанию включён. */
+    signupProtectionEnabled: (map.signup_protection_enabled ?? "true").trim() !== "false",
+    /** Дополнительный список заблокированных доменов (через запятую) — расширяет встроенный */
+    emailDomainBlocklist: (map.email_domain_blocklist ?? "").trim(),
+    /** Regex-паттерны (по строке) для блокировки email-локалпартов */
+    emailPatternBlocklist: (map.email_pattern_blocklist ?? "").trim(),
+    /** Лимит регистраций с одного IP в час (default 3) */
+    signupMaxPerIpPerHour: Math.max(1, parseInt(map.signup_max_per_ip_per_hour ?? "3", 10) || 3),
+    /**
+     * Шифрование subscriptionUrl в happ://crypt4/...
+     * По умолчанию ВЫКЛ: crypt4-ссылки получаются 1500+ символов и в Telegram-сообщении выглядят как простыня.
+     * Включай только если очень нужно скрыть оригинальный URL подписки.
+     */
+    happCryptEnabled: (map.happ_crypt_enabled ?? "false").trim() === "true",
     useRemnaSubscriptionPage: map.use_remna_subscription_page === "true" || map.use_remna_subscription_page === "1",
     aiChatEnabled: map.ai_chat_enabled !== "false" && map.ai_chat_enabled !== "0",
     customBuildEnabled: map.custom_build_enabled === "true" || map.custom_build_enabled === "1",
@@ -608,6 +669,39 @@ export async function getSystemConfig() {
     agreementLink: (map.agreement_link ?? "").trim() || null,
     offerLink: (map.offer_link ?? "").trim() || null,
     instructionsLink: (map.instructions_link ?? "").trim() || null,
+    // ссылка на инструкцию по рефералке.
+    // Дефолт — Telegraph-статья; админ может переопределить в настройках.
+    referralInstructionsUrl: (map.referral_instructions_url ?? "").trim() || "https://telegra.ph/Kak-polzovatsya-referalnoj-programmoj-i-zarabatyvat-05-28",
+    // T11+T13+T14 (11.05.2026): новые редактируемые поля для бота.
+    refundLink: (map.refund_link ?? "").trim() || null,
+    supportHoursFrom: (map.support_hours_from ?? "").trim() || "10:00",
+    supportHoursTo: (map.support_hours_to ?? "").trim() || "22:00",
+    tgProxyText: (map.tg_proxy_text ?? "").trim() || null,
+    tgProxyUrlPrimary: (map.tg_proxy_url_primary ?? "").trim() || null,
+    tgProxyUrlBackup: (map.tg_proxy_url_backup ?? "").trim() || null,
+    // динамический список TG-прокси (см. admin schema).
+    // Парсим JSON; если невалидно — пустой массив (бот fallback'нется на primary/backup).
+    tgProxyServers: (() => {
+      try {
+        const parsed = JSON.parse(map.tg_proxy_servers || "[]") as { flag?: string; name?: string; url?: string }[];
+        if (!Array.isArray(parsed)) return [];
+        return parsed
+          .filter((s): s is { flag?: string; name?: string; url: string } =>
+            !!s && typeof s === "object" && typeof s.url === "string" && s.url.trim() !== "",
+          )
+          .map((s) => ({
+            flag: (s.flag ?? "").trim(),
+            name: (s.name ?? "").trim() || "Прокси",
+            url: s.url.trim(),
+          }));
+      } catch { return []; }
+    })(),
+    reissueWarningText: (map.reissue_warning_text ?? "").trim() || null,
+    installSecondDeviceText: (map.install_second_device_text ?? "").trim() || null,
+    helpIntroText: (map.help_intro_text ?? "").trim() || null,
+    giftIntroText: (map.gift_intro_text ?? "").trim() || null,
+    botDevicesText: (map.bot_devices_text ?? "").trim() || null,
+    botInstructionFallbackText: (map.bot_instruction_fallback_text ?? "").trim() || null,
     videoInstructionsEnabled: map.video_instructions_enabled === "true" || map.video_instructions_enabled === "1",
     videoInstructions: (() => {
       try { return JSON.parse(map.video_instructions || "[]") as { id: string; title: string; telegramFileId: string; sortOrder: number }[]; } catch { return []; }
@@ -918,11 +1012,21 @@ function stripLeadingEmoji(label: string): string {
   return label.replace(/^\p{Extended_Pictographic}\uFE0F?\s*/u, "");
 }
 
+/**
+ * \u043F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u0442, \u043D\u0430\u0447\u0438\u043D\u0430\u0435\u0442\u0441\u044F \u043B\u0438 label \u0441 unicode-\u044D\u043C\u043E\u0434\u0437\u0438.
+ * \u0418\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0435\u0442\u0441\u044F \u0447\u0442\u043E\u0431\u044B \u041D\u0415 \u043F\u043E\u0434\u043C\u0435\u043D\u044F\u0442\u044C label \u0434\u0435\u0444\u043E\u043B\u0442\u043D\u044B\u043C emojiKey \u0435\u0441\u043B\u0438 \u0430\u0434\u043C\u0438\u043D \u0443\u0436\u0435 \u043F\u043E\u043B\u043E\u0436\u0438\u043B \u044D\u043C\u043E\u0434\u0437\u0438 \u0440\u0443\u043A\u0430\u043C\u0438
+ * (\u043D\u0430\u043F\u0440\u0438\u043C\u0435\u0440 "\uD83D\uDCB3 \u041A\u0443\u043F\u0438\u0442\u044C \u0434\u043E\u0441\u0442\u0443\u043F" \u2014 \u043E\u0441\u0442\u0430\u0432\u043B\u044F\u0435\u043C \u043A\u0430\u043A \u0435\u0441\u0442\u044C, \u043D\u0435 \u0437\u0430\u043C\u0435\u043D\u044F\u0435\u043C \u043D\u0430 \uD83D\uDCE6 \u0438\u0437 bot_emojis.PACKAGE).
+ */
+function hasLeadingEmoji(label: string): boolean {
+  return /^\p{Extended_Pictographic}/u.test(label.trim());
+}
+
 /** Публичный конфиг для сайта/бота (без паролей и секретов). botButtons с подставленными эмодзи.
- * @param forCloneBot — активный клон из заголовка `X-Telegram-Bot-Token`: наценка на цены опций/гибкого тарифа и подстановка @username/id бота для мини-аппа. */
-export async function getPublicConfig(forCloneBot?: Pick<Bot, "markupPercent" | "username" | "token"> | null) {
+ * v5.0.0: параметр forCloneBot оставлен как опциональный stub после выпила multi-bot.
+ * Раньше тут применялась наценка клона (markupPercent), теперь всегда 0. */
+export async function getPublicConfig(_forCloneBot?: { markupPercent?: number | null; username?: string | null; token?: string | null } | null) {
   const full = await getSystemConfig();
-  const markupPct = forCloneBot?.markupPercent ?? 0;
+  const markupPct = 0;
   const withMarkup = (n: number) => applyMarkup(n, markupPct);
   const trialDays = full.trialDays ?? 0;
   const trialEnabled = trialDays > 0 && Boolean(full.trialSquadUuid?.trim());
@@ -933,7 +1037,22 @@ export async function getPublicConfig(forCloneBot?: Pick<Bot, "markupPercent" | 
     support: "NOTE", tickets: "NOTE", promocode: "STAR", extra_options: "PACKAGE",
   };
   const resolvedButtons: PublicBotButton[] = (full.botButtons ?? []).map((b) => {
-    const emojiKey = b.emojiKey === "" ? null : (b.emojiKey ?? defaultEmojiKeyByButtonId[b.id]);
+    // нативная логика подмены эмодзи.
+    //   1. Если у админа в label УЖЕ есть emoji (например «💳 Купить доступ») → НЕ подменяем
+    //      ничем (явная воля админа). Это самый частый кейс — UI настройки покажет label как есть.
+    //   2. Если emojiKey задан явно ("") → ничего не подменяем (отключено вручную).
+    //   3. Если emojiKey задан другим значением → используем его (для Premium-emoji).
+    //   4. Если label БЕЗ emoji и emojiKey не задан → fallback на defaultEmojiKeyByButtonId.
+    let emojiKey: string | null;
+    if (b.emojiKey === "") {
+      emojiKey = null; // явное «не подменять»
+    } else if (b.emojiKey && b.emojiKey.trim()) {
+      emojiKey = b.emojiKey.trim(); // явный кастом
+    } else if (hasLeadingEmoji(b.label)) {
+      emojiKey = null; // в label уже есть emoji от админа — не трогаем
+    } else {
+      emojiKey = defaultEmojiKeyByButtonId[b.id] ?? null; // дефолт
+    }
     const entry = emojiKey ? botEmojis[emojiKey] : undefined;
     let label = b.label;
     let iconCustomEmojiId: string | undefined;
@@ -1034,8 +1153,8 @@ export async function getPublicConfig(forCloneBot?: Pick<Bot, "markupPercent" | 
     cabinetDesignApplyInBrowser: (full as { cabinetDesignApplyInBrowser?: boolean }).cabinetDesignApplyInBrowser ?? false,
     remnaClientUrl: full.remnaClientUrl,
     publicAppUrl: full.publicAppUrl,
-    telegramBotUsername: (forCloneBot?.username?.trim() || full.telegramBotUsername) ?? null,
-    telegramBotId: (forCloneBot?.token ? forCloneBot.token.split(":")[0] : full.telegramBotToken?.split(":")[0]) || null,
+    telegramBotUsername: full.telegramBotUsername ?? null,
+    telegramBotId: full.telegramBotToken?.split(":")[0] || null,
     botAdminTelegramIds: full.botAdminTelegramIds ?? [],
     plategaMethods: full.plategaMethods.filter((m) => m.enabled).map((m) => ({ id: m.id, label: m.label })),
     yoomoneyEnabled: Boolean(full.yoomoneyReceiverWallet?.trim()),
@@ -1053,6 +1172,10 @@ export async function getPublicConfig(forCloneBot?: Pick<Bot, "markupPercent" | 
     ),
     paymentProviders: full.paymentProviders,
     skipEmailVerification: full.skipEmailVerification ?? false,
+    // фронту нужен флаг — настроен ли SMTP.
+    // Если SMTP не настроен или skipEmailVerification=true → email привязывается
+    // мгновенно (без письма) через POST /client/link-email-direct.
+    smtpConfigured: Boolean(full.smtpHost?.trim() && full.smtpPort && full.smtpFromEmail?.trim()),
     useRemnaSubscriptionPage: full.useRemnaSubscriptionPage ?? false,
     aiChatEnabled: full.aiChatEnabled ?? true,
     trialEnabled,
@@ -1077,6 +1200,23 @@ export async function getPublicConfig(forCloneBot?: Pick<Bot, "markupPercent" | 
     agreementLink: full.agreementLink ?? null,
     offerLink: full.offerLink ?? null,
     instructionsLink: full.instructionsLink ?? null,
+    // ссылка инструкции рефералки для кнопки в боте.
+    referralInstructionsUrl: (full as { referralInstructionsUrl?: string | null }).referralInstructionsUrl ?? null,
+    // T11+T13+T14 (11.05.2026): новые поля кастомизации бота.
+    refundLink: (full as { refundLink?: string | null }).refundLink ?? null,
+    supportHoursFrom: (full as { supportHoursFrom?: string | null }).supportHoursFrom ?? "10:00",
+    supportHoursTo: (full as { supportHoursTo?: string | null }).supportHoursTo ?? "22:00",
+    tgProxyText: (full as { tgProxyText?: string | null }).tgProxyText ?? null,
+    tgProxyUrlPrimary: (full as { tgProxyUrlPrimary?: string | null }).tgProxyUrlPrimary ?? null,
+    tgProxyUrlBackup: (full as { tgProxyUrlBackup?: string | null }).tgProxyUrlBackup ?? null,
+    // динамический список TG-прокси-серверов.
+    tgProxyServers: (full as { tgProxyServers?: { flag: string; name: string; url: string }[] }).tgProxyServers ?? [],
+    reissueWarningText: (full as { reissueWarningText?: string | null }).reissueWarningText ?? null,
+    installSecondDeviceText: (full as { installSecondDeviceText?: string | null }).installSecondDeviceText ?? null,
+    helpIntroText: (full as { helpIntroText?: string | null }).helpIntroText ?? null,
+    giftIntroText: (full as { giftIntroText?: string | null }).giftIntroText ?? null,
+    botDevicesText: (full as { botDevicesText?: string | null }).botDevicesText ?? null,
+    botInstructionFallbackText: (full as { botInstructionFallbackText?: string | null }).botInstructionFallbackText ?? null,
     videoInstructionsEnabled: full.videoInstructionsEnabled ?? false,
     videoInstructions: full.videoInstructionsEnabled ? (full.videoInstructions ?? []) : [],
     ticketsEnabled: (full as { ticketsEnabled?: boolean }).ticketsEnabled ?? false,

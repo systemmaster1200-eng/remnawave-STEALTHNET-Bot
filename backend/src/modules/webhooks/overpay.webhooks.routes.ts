@@ -106,6 +106,10 @@ async function ensureTariffActivation(paymentId: string): Promise<void> {
   let activation: { ok: boolean; error?: string; slotIds?: string[] } = { ok: false };
   if (isExtraOption) {
     activation = await applyExtraOptionByPaymentId(paymentId);
+    if (activation.ok && row?.clientId) {
+      const { notifyExtraOptionApplied } = await import("../notification/telegram-notify.service.js");
+      await notifyExtraOptionApplied(row.clientId, paymentId).catch(() => {});
+    }
   } else if (row?.proxyTariffId) {
     const proxyResult = await createProxySlotsByPaymentId(paymentId);
     activation = proxyResult.ok ? { ok: true, slotIds: proxyResult.slotIds } : { ok: false, error: proxyResult.error };
@@ -195,7 +199,6 @@ async function handle(req: Request, res: Response) {
           id: string;
           status: string;
           clientId: string;
-          botId: string | null;
           amount: number;
           currency: string;
           tariffId: string | null;
@@ -210,7 +213,6 @@ async function handle(req: Request, res: Response) {
       id: true,
       status: true,
       clientId: true,
-      botId: true,
       amount: true,
       currency: true,
       tariffId: true,
@@ -312,6 +314,13 @@ async function handle(req: Request, res: Response) {
     if (payment.tariffId) {
       await notifyTariffActivated(payment.clientId, payment.id).catch(() => {});
     }
+
+    // сжигаем одноразовую персональную скидку после продуктовой покупки.
+    if (!isTopUp) {
+      const { extinguishOneTimeDiscount } = await import("../client/personal-discount.js");
+      await extinguishOneTimeDiscount(payment.clientId).catch(() => {});
+    }
+
     await distributeReferralRewards(payment.id).catch((e) => {
       console.error("[Overpay Webhook] Referral distribution error", { paymentId: payment.id, error: e });
     });

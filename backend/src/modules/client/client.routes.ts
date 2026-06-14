@@ -3226,7 +3226,6 @@ const createPlategaPaymentSchema = z.object({
   deviceCount: z.number().int().min(0).max(100).optional(),
   proxyTariffId: z.string().min(1).optional(),
   singboxTariffId: z.string().min(1).optional(),
-  wdttTariffId: z.string().min(1).optional(),
   promoCode: z.string().max(50).optional(),
   // покупка как доп. подписка — см. yookassa-схему ниже.
   asAdditional: z.boolean().optional(),
@@ -3245,12 +3244,11 @@ clientRouter.post("/payments/platega", async (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({ message: "Invalid input", errors: parsed.error.flatten() });
   }
-  const { amount: originalAmount, currency, paymentMethod, description, tariffId, proxyTariffId, singboxTariffId, wdttTariffId, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody } = parsed.data;
+  const { amount: originalAmount, currency, paymentMethod, description, tariffId, proxyTariffId, singboxTariffId, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody } = parsed.data;
 
   let tariffIdToStore: string | null = null;
   let proxyTariffIdToStore: string | null = null;
   let singboxTariffIdToStore: string | null = null;
-  let wdttTariffIdToStore: string | null = null;
   let finalAmount: number;
   let currencyToUse: string;
   let metadataExtra: Record<string, unknown> | null = null;
@@ -3410,13 +3408,6 @@ clientRouter.post("/payments/platega", async (req, res) => {
       if (originalAmount == null) finalAmount = singboxTariff.price;
       if (!currency) currencyToUse = singboxTariff.currency.toUpperCase();
     }
-    if (wdttTariffId) {
-      const wdttTariff = await prisma.wdttTariff.findUnique({ where: { id: wdttTariffId } });
-      if (!wdttTariff || !wdttTariff.enabled) return res.status(400).json({ message: "WDTT тариф не найден или отключён" });
-      wdttTariffIdToStore = wdttTariffId;
-      if (originalAmount == null) finalAmount = wdttTariff.price;
-      if (!currency) currencyToUse = wdttTariff.currency.toUpperCase();
-    }
     // После всех попыток — если до сих пор пусто, значит ни тариф ни amount не пришли = top-up без суммы
     if (finalAmount <= 0 || !currencyToUse) {
       return res.status(400).json({ message: "Укажите сумму и валюту" });
@@ -3429,7 +3420,7 @@ clientRouter.post("/payments/platega", async (req, res) => {
 
   // Персональная скидка клиента (админ мог выдать). Применяется к продуктовым
   // оплатам (тариф/прокси/singbox/кастомный билд/опции), но НЕ к чистому пополнению.
-  const isTopupOnlyPlatega = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !wdttTariffIdToStore && !customBuildBody && !extraOption;
+  const isTopupOnlyPlatega = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !customBuildBody && !extraOption;
   let personalDiscountPercent = 0;
   if (!isTopupOnlyPlatega) {
     const pd = await applyPersonalDiscount(finalAmount, clientId);
@@ -3475,7 +3466,7 @@ clientRouter.post("/payments/platega", async (req, res) => {
 
   const serviceName = config.serviceName?.trim() || "STEALTHNET";
   const orderId = randomUUID();
-  const paymentKind = tariffIdToStore ? "tariff" : proxyTariffIdToStore ? "proxy" : singboxTariffIdToStore ? "singbox" : wdttTariffIdToStore ? "wdtt" : metadataExtra ? "option" : "topup";
+  const paymentKind = tariffIdToStore ? "tariff" : proxyTariffIdToStore ? "proxy" : singboxTariffIdToStore ? "singbox" : metadataExtra ? "option" : "topup";
   const appUrl = (config.publicAppUrl || "").replace(/\/$/, "");
   const returnUrl = appUrl
     ? `${appUrl}/cabinet/dashboard?payment=success&payment_kind=${paymentKind}&oid=${orderId}`
@@ -3496,11 +3487,9 @@ clientRouter.post("/payments/platega", async (req, res) => {
       ? `Прокси ${serviceName} #${orderId}`
       : singboxTariffIdToStore
         ? `Доступы ${serviceName} #${orderId}`
-        : wdttTariffIdToStore
-          ? `WDTT ${serviceName} #${orderId}`
-          : metadataExtra
-        ? `Опция ${serviceName} #${orderId}`
-        : `Пополнение баланса ${serviceName} #${orderId}`) + plategaTgSuffix;
+        : metadataExtra
+      ? `Опция ${serviceName} #${orderId}`
+      : `Пополнение баланса ${serviceName} #${orderId}`) + plategaTgSuffix;
 
   const personalDiscountMeta = personalDiscountPercent > 0 ? { personalDiscountPercent } : null;
   const paymentMetaObj: Record<string, unknown> = {};
@@ -3525,7 +3514,6 @@ clientRouter.post("/payments/platega", async (req, res) => {
       deviceCount: parsed.data.deviceCount ?? null,
       proxyTariffId: proxyTariffIdToStore,
       singboxTariffId: singboxTariffIdToStore,
-      wdttTariffId: wdttTariffIdToStore,
       metadata: paymentMeta ? JSON.stringify(paymentMeta) : null,
     }),
   });
@@ -3569,7 +3557,6 @@ const payByBalanceSchema = z.object({
   deviceCount: z.number().int().min(0).max(100).optional(),
   proxyTariffId: z.string().min(1).optional(),
   singboxTariffId: z.string().min(1).optional(),
-  wdttTariffId: z.string().min(1).optional(),
   promoCode: z.string().max(50).optional(),
   // продление существующей secondary подписки балансом.
   extendsSecondarySubId: z.string().min(1).max(64).optional(),
@@ -3582,14 +3569,14 @@ const payByBalanceSchema = z.object({
   asAdditional: z.boolean().optional(),
   // покупка подарочной подписки — будет создана с purchasedAsGift=true.
   asGift: z.boolean().optional(),
-}).refine((d) => (d.tariffId ? 1 : 0) + (d.proxyTariffId ? 1 : 0) + (d.singboxTariffId ? 1 : 0) + (d.wdttTariffId ? 1 : 0) === 1, { message: "Укажите tariffId, proxyTariffId, singboxTariffId или wdttTariffId" });
+}).refine((d) => (d.tariffId ? 1 : 0) + (d.proxyTariffId ? 1 : 0) + (d.singboxTariffId ? 1 : 0) === 1, { message: "Укажите tariffId, proxyTariffId или singboxTariffId" });
 
 clientRouter.post("/payments/balance", async (req, res) => {
   const clientRaw = (req as unknown as { client: { id: string; remnawaveUuid: string | null; email: string | null; telegramId: string | null } }).client;
   const parsed = payByBalanceSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Invalid input", errors: parsed.error.flatten() });
 
-  const { tariffId, tariffPriceOptionId, deviceCount, proxyTariffId, singboxTariffId, wdttTariffId, promoCode: promoCodeStr, extendsSecondarySubId, removeExtrasOnActivate, asAdditional } = parsed.data;
+  const { tariffId, tariffPriceOptionId, deviceCount, proxyTariffId, singboxTariffId, promoCode: promoCodeStr, extendsSecondarySubId, removeExtrasOnActivate, asAdditional } = parsed.data;
 
   if (proxyTariffId) {
     const tariff = await prisma.proxyTariff.findUnique({ where: { id: proxyTariffId } });
@@ -3700,56 +3687,6 @@ clientRouter.post("/payments/balance", async (req, res) => {
     return res.json({
       message: `Доступы «${tariff.name}» оплачены! Списано ${singSnap.amount.toFixed(2)} ${tariff.currency.toUpperCase()} с баланса.`,
       newBalance: after?.balance ?? clientDb.balance - singSnap.amount,
-    });
-  }
-
-  if (wdttTariffId) {
-    const tariff = await prisma.wdttTariff.findUnique({ where: { id: wdttTariffId } });
-    if (!tariff || !tariff.enabled) return res.status(400).json({ message: "WDTT тариф не найден" });
-    const clientDb = await prisma.client.findUnique({ where: { id: clientRaw.id } });
-    if (!clientDb) return res.status(401).json({ message: "Unauthorized" });
-    const pd = await applyPersonalDiscount(tariff.price, clientRaw.id);
-    const finalWdttPrice = pd.amount;
-    const wdttSnap = await paymentSnapshotProduct(clientRaw.id, finalWdttPrice);
-    const debit = await prisma.client.updateMany({
-      where: { id: clientRaw.id, balance: { gte: wdttSnap.amount } },
-      data: { balance: { decrement: wdttSnap.amount } },
-    });
-    if (debit.count === 0) {
-      return res.status(400).json({ message: `Недостаточно средств. Баланс: ${clientDb.balance.toFixed(2)}, нужно: ${wdttSnap.amount.toFixed(2)}` });
-    }
-    const payment = await createPayment({
-      data: asPaymentUncheckedCreate({
-        clientId: clientRaw.id,
-        orderId: randomUUID(),
-        amount: wdttSnap.amount,
-        currency: tariff.currency.toUpperCase(),
-        status: "PAID",
-        provider: "balance",
-        wdttTariffId: tariff.id,
-        paidAt: new Date(),
-        metadata: pd.personalDiscountPercent > 0
-          ? JSON.stringify({ personalDiscountPercent: pd.personalDiscountPercent, originalPrice: tariff.price })
-          : null,
-      }),
-    });
-    const wdttResult = await createWdttSlotsByPaymentId(payment.id);
-    if (!wdttResult.ok) {
-      await prisma.client.update({ where: { id: clientRaw.id }, data: { balance: { increment: wdttSnap.amount } } }).catch(() => {});
-      return res.status(wdttResult.status).json({ message: wdttResult.error });
-    }
-    const { distributeReferralRewards } = await import("../referral/referral.service.js");
-    await distributeReferralRewards(payment.id).catch((e) => console.error("[referral] Error:", e));
-    {
-      const { extinguishOneTimeDiscount } = await import("./personal-discount.js");
-      await extinguishOneTimeDiscount(clientRaw.id).catch(() => {});
-    }
-    const { notifyWdttSlotsCreated } = await import("../notification/telegram-notify.service.js");
-    await notifyWdttSlotsCreated(clientRaw.id, wdttResult.slotIds, tariff.name).catch(() => {});
-    const after = await prisma.client.findUnique({ where: { id: clientRaw.id }, select: { balance: true } });
-    return res.json({
-      message: `WDTT «${tariff.name}» оплачен! Списано ${wdttSnap.amount.toFixed(2)} ${tariff.currency.toUpperCase()} с баланса.`,
-      newBalance: after?.balance ?? clientDb.balance - wdttSnap.amount,
     });
   }
 
@@ -4439,7 +4376,6 @@ const yoomoneyFormPaymentSchema = z.object({
   deviceCount: z.number().int().min(0).max(100).optional(),
   proxyTariffId: z.string().min(1).optional(),
   singboxTariffId: z.string().min(1).optional(),
-  wdttTariffId: z.string().min(1).optional(),
   promoCode: z.string().max(50).optional(),
   // покупка как доп. подписка — см. yookassa-схему выше.
   asAdditional: z.boolean().optional(),
@@ -4456,7 +4392,7 @@ clientRouter.post("/yoomoney/create-form-payment", async (req, res) => {
   const clientId = (req as unknown as { clientId: string }).clientId;
   const parsed = yoomoneyFormPaymentSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Укажите сумму и способ оплаты", errors: parsed.error.flatten() });
-  const { amount: amountBody, paymentType, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, wdttTariffId: wdttTariffIdBody, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody } = parsed.data;
+  const { amount: amountBody, paymentType, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody } = parsed.data;
   const config = await getSystemConfig();
   const receiver = config.yoomoneyReceiverWallet?.trim();
   if (!receiver) return res.status(503).json({ message: "ЮMoney не настроен" });
@@ -4464,7 +4400,6 @@ clientRouter.post("/yoomoney/create-form-payment", async (req, res) => {
   let tariffIdToStore: string | null = null;
   let proxyTariffIdToStore: string | null = null;
   let singboxTariffIdToStore: string | null = null;
-  let wdttTariffIdToStore: string | null = null;
   let amountRounded: number;
   let metadataObj: Record<string, unknown> = { paymentType };
   let yoomoneyPromoRecord: PromoCodeRow | null = null;
@@ -4531,7 +4466,7 @@ clientRouter.post("/yoomoney/create-form-payment", async (req, res) => {
       metadataObj = { ...metadataObj, targetSubscriptionId: parsed.data.extraOption.targetSubscriptionId };
     }
   } else {
-    if (amountBody == null && !tariffIdBody && !proxyTariffIdBody && !singboxTariffIdBody && !wdttTariffIdBody) return res.status(400).json({ message: "Укажите сумму" });
+    if (amountBody == null && !tariffIdBody && !proxyTariffIdBody && !singboxTariffIdBody) return res.status(400).json({ message: "Укажите сумму" });
     if (tariffIdBody) {
       const tariff = await prisma.tariff.findUnique({ where: { id: tariffIdBody }, include: { priceOptions: true } });
       if (!tariff) return res.status(400).json({ message: "Тариф не найден" });
@@ -4573,11 +4508,6 @@ clientRouter.post("/yoomoney/create-form-payment", async (req, res) => {
       if (!singboxTariff || !singboxTariff.enabled) return res.status(400).json({ message: "Тариф Sing-box не найден" });
       singboxTariffIdToStore = singboxTariffIdBody;
       amountRounded = Math.round((amountBody ?? singboxTariff.price) * 100) / 100;
-    } else if (wdttTariffIdBody) {
-      const wdttTariff = await prisma.wdttTariff.findUnique({ where: { id: wdttTariffIdBody } });
-      if (!wdttTariff || !wdttTariff.enabled) return res.status(400).json({ message: "WDTT тариф не найден или отключён" });
-      wdttTariffIdToStore = wdttTariffIdBody;
-      amountRounded = Math.round((amountBody ?? wdttTariff.price) * 100) / 100;
     } else {
       amountRounded = Math.round((amountBody ?? 0) * 100) / 100;
     }
@@ -4588,7 +4518,7 @@ clientRouter.post("/yoomoney/create-form-payment", async (req, res) => {
   }
 
   // Персональная скидка админа — на продуктовые оплаты, не на чистое пополнение.
-  const yoomoneyIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !wdttTariffIdToStore && !customBuildBody && !extraOption;
+  const yoomoneyIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !customBuildBody && !extraOption;
   let yoomoneyPersonalDiscount = 0;
   if (!yoomoneyIsTopup) {
     const originalBeforePersonal = amountRounded;
@@ -4624,7 +4554,6 @@ clientRouter.post("/yoomoney/create-form-payment", async (req, res) => {
       deviceCount: parsed.data.deviceCount ?? null,
       proxyTariffId: proxyTariffIdToStore,
       singboxTariffId: singboxTariffIdToStore,
-      wdttTariffId: wdttTariffIdToStore,
       // see yookassa endpoint for explanation.
       metadata: (parsed.data.asAdditional && tariffIdToStore)
         ? JSON.stringify({ ...metadataObj, isAdditionalSubscription: true, ...(parsed.data.asGift ? { purchasedAsGift: true } : {}), ...(parsed.data.extendsSecondarySubId ? { extendsSecondarySubId: parsed.data.extendsSecondarySubId } : {}) })
@@ -4641,13 +4570,11 @@ clientRouter.post("/yoomoney/create-form-payment", async (req, res) => {
       ? `Прокси ${serviceName} #${orderId}`
       : singboxTariffIdToStore
         ? `Доступы ${serviceName} #${orderId}`
-        : wdttTariffIdToStore
-          ? `WDTT ${serviceName} #${orderId}`
-          : customBuildBody
-            ? `Гибкий тариф ${serviceName} #${orderId}`
-            : extraOption
-              ? `Опция ${serviceName} #${orderId}`
-              : `Пополнение баланса ${serviceName} #${orderId}`;
+        : customBuildBody
+          ? `Гибкий тариф ${serviceName} #${orderId}`
+          : extraOption
+            ? `Опция ${serviceName} #${orderId}`
+            : `Пополнение баланса ${serviceName} #${orderId}`;
   const params = new URLSearchParams({
     receiver,
     "quickpay-form": "shop",
@@ -4716,7 +4643,6 @@ const yookassaCreatePaymentSchema = z.object({
   deviceCount: z.number().int().min(0).max(100).optional(),
   proxyTariffId: z.string().min(1).optional(),
   singboxTariffId: z.string().min(1).optional(),
-  wdttTariffId: z.string().min(1).optional(),
   promoCode: z.string().optional(),
   // покупка тарифа как ДОП. подписки (а не модификация основной).
   // На webhook'е activateTariffByPaymentId увидит metadata.isAdditionalSubscription и
@@ -4749,7 +4675,7 @@ clientRouter.post("/yookassa/create-payment", async (req, res) => {
     const clientId = (req as unknown as { clientId: string }).clientId;
     const parsed = yookassaCreatePaymentSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: "Неверные параметры", errors: parsed.error.flatten() });
-    const { amount: amountBody, currency: currencyBody, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, wdttTariffId: wdttTariffIdBody, promoCode, extraOption, customBuild: customBuildBody, extendsSecondarySubId, removeExtrasOnActivate, asGift, asAdditional } = parsed.data;
+    const { amount: amountBody, currency: currencyBody, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, promoCode, extraOption, customBuild: customBuildBody, extendsSecondarySubId, removeExtrasOnActivate, asGift, asAdditional } = parsed.data;
     const config = await getSystemConfig();
     const shopId = config.yookassaShopId?.trim();
     const secretKey = config.yookassaSecretKey?.trim();
@@ -4760,7 +4686,6 @@ clientRouter.post("/yookassa/create-payment", async (req, res) => {
     let tariffIdToStore: string | null = null;
     let proxyTariffIdToStore: string | null = null;
     let singboxTariffIdToStore: string | null = null;
-    let wdttTariffIdToStore: string | null = null;
     let metadataObj: Record<string, unknown> = promoCode ? { promoCode } : {};
 
     if (customBuildBody) {
@@ -4893,11 +4818,6 @@ clientRouter.post("/yookassa/create-payment", async (req, res) => {
         if (!singboxTariff || !singboxTariff.enabled) return res.status(400).json({ message: "Тариф Sing-box не найден" });
         singboxTariffIdToStore = singboxTariffIdBody;
         amountRounded = Math.round((amountBody ?? singboxTariff.price) * 100) / 100;
-      } else if (wdttTariffIdBody) {
-        const wdttTariff = await prisma.wdttTariff.findUnique({ where: { id: wdttTariffIdBody } });
-        if (!wdttTariff || !wdttTariff.enabled) return res.status(400).json({ message: "WDTT тариф не найден или отключён" });
-        wdttTariffIdToStore = wdttTariffIdBody;
-        amountRounded = Math.round((amountBody ?? wdttTariff.price) * 100) / 100;
     } else {
       if (amountBody == null) return res.status(400).json({ message: "Укажите сумму" });
       amountRounded = Math.round(amountBody * 100) / 100;
@@ -4909,7 +4829,7 @@ clientRouter.post("/yookassa/create-payment", async (req, res) => {
     }
 
     // Персональная скидка админа — на продуктовые оплаты, не на чистое пополнение.
-    const yookassaIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !wdttTariffIdToStore && !customBuildBody && !extraOption;
+    const yookassaIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !customBuildBody && !extraOption;
     if (!yookassaIsTopup) {
       const originalBeforePersonal = amountRounded;
       const pd = await applyPersonalDiscount(amountRounded, clientId);
@@ -4987,7 +4907,6 @@ clientRouter.post("/yookassa/create-payment", async (req, res) => {
         deviceCount: parsed.data.deviceCount ?? null,
         proxyTariffId: proxyTariffIdToStore,
         singboxTariffId: singboxTariffIdToStore,
-        wdttTariffId: wdttTariffIdToStore,
         // mark Payment as additional-subscription if requested AND
         // a tariff is being purchased. activateTariffByPaymentId reads this flag from
         // metadata.isAdditionalSubscription on the webhook and routes activation to
@@ -5029,9 +4948,7 @@ clientRouter.post("/yookassa/create-payment", async (req, res) => {
         ? `Прокси ${serviceName} #${orderId}`
         : singboxTariffIdToStore
           ? `Доступы ${serviceName} #${orderId}`
-          : wdttTariffIdToStore
-            ? `WDTT ${serviceName} #${orderId}`
-          : extraOption
+        : extraOption
           ? `Опция ${serviceName} #${orderId}`
           : `Пополнение баланса ${serviceName} #${orderId}`) + tgIdSuffix;
 
@@ -5096,7 +5013,6 @@ const cryptopayCreatePaymentSchema = z.object({
   deviceCount: z.number().int().min(0).max(100).optional(),
   proxyTariffId: z.string().min(1).optional(),
   singboxTariffId: z.string().min(1).optional(),
-  wdttTariffId: z.string().min(1).optional(),
   promoCode: z.string().max(50).optional(),
   // покупка как доп. подписка — см. yookassa-схему выше.
   asAdditional: z.boolean().optional(),
@@ -5125,13 +5041,12 @@ clientRouter.post("/cryptopay/create-payment", async (req, res) => {
     };
     if (!isCryptopayConfigured(cryptopayConfig)) return res.status(503).json({ message: "Crypto Pay не настроен" });
 
-    const { amount: amountBody, currency: currencyBody, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, wdttTariffId: wdttTariffIdBody, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody, extendsSecondarySubId, removeExtrasOnActivate, asGift, asAdditional } = parsed.data;
+    const { amount: amountBody, currency: currencyBody, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody, extendsSecondarySubId, removeExtrasOnActivate, asGift, asAdditional } = parsed.data;
     let amountRounded: number;
     let currencyUpper: string;
     let tariffIdToStore: string | null = null;
     let proxyTariffIdToStore: string | null = null;
     let singboxTariffIdToStore: string | null = null;
-    let wdttTariffIdToStore: string | null = null;
     let metadataObj: Record<string, unknown> = promoCodeStr ? { promoCode: promoCodeStr } : {};
 
     if (customBuildBody) {
@@ -5246,11 +5161,6 @@ clientRouter.post("/cryptopay/create-payment", async (req, res) => {
         if (!singboxTariff || !singboxTariff.enabled) return res.status(400).json({ message: "Тариф Sing-box не найден" });
         singboxTariffIdToStore = singboxTariffIdBody;
         amountRounded = Math.round((amountBody ?? singboxTariff.price) * 100) / 100;
-      } else if (wdttTariffIdBody) {
-        const wdttTariff = await prisma.wdttTariff.findUnique({ where: { id: wdttTariffIdBody } });
-        if (!wdttTariff || !wdttTariff.enabled) return res.status(400).json({ message: "WDTT тариф не найден или отключён" });
-        wdttTariffIdToStore = wdttTariffIdBody;
-        amountRounded = Math.round((amountBody ?? wdttTariff.price) * 100) / 100;
       } else {
         if (amountBody == null) return res.status(400).json({ message: "Укажите сумму" });
         amountRounded = Math.round(amountBody * 100) / 100;
@@ -5262,7 +5172,7 @@ clientRouter.post("/cryptopay/create-payment", async (req, res) => {
     if (amountRounded < 0.5) return res.status(400).json({ message: "Минимальная сумма — 0.5" });
 
     // Персональная скидка админа — на продуктовые оплаты, не на чистое пополнение.
-    const cryptoIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !wdttTariffIdToStore && !customBuildBody && !extraOption;
+    const cryptoIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !customBuildBody && !extraOption;
     if (!cryptoIsTopup) {
       const originalBeforePersonal = amountRounded;
       const pd = await applyPersonalDiscount(amountRounded, clientId);
@@ -5309,7 +5219,6 @@ clientRouter.post("/cryptopay/create-payment", async (req, res) => {
         deviceCount: parsed.data.deviceCount ?? null,
         proxyTariffId: proxyTariffIdToStore,
         singboxTariffId: singboxTariffIdToStore,
-        wdttTariffId: wdttTariffIdToStore,
         // see yookassa endpoint for explanation.
         metadata: (() => {
           const meta = { ...metadataObj };
@@ -5345,8 +5254,6 @@ clientRouter.post("/cryptopay/create-payment", async (req, res) => {
         ? `Прокси ${serviceName} #${orderId}`
         : singboxTariffIdToStore
           ? `Доступы ${serviceName} #${orderId}`
-          : wdttTariffIdToStore
-            ? `WDTT ${serviceName} #${orderId}`
           : customBuildBody
             ? `Гибкий тариф ${serviceName} #${orderId}`
             : extraOption
@@ -5390,7 +5297,6 @@ const heleketCreatePaymentSchema = z.object({
   deviceCount: z.number().int().min(0).max(100).optional(),
   proxyTariffId: z.string().min(1).optional(),
   singboxTariffId: z.string().min(1).optional(),
-  wdttTariffId: z.string().min(1).optional(),
   promoCode: z.string().max(50).optional(),
   // покупка как доп. подписка — см. yookassa-схему выше.
   asAdditional: z.boolean().optional(),
@@ -5420,13 +5326,12 @@ clientRouter.post("/heleket/create-payment", async (req, res) => {
     if (!isHeleketConfigured(heleketConfig)) return res.status(503).json({ message: "Heleket не настроен" });
     const { extendsSecondarySubId, removeExtrasOnActivate, asGift, asAdditional } = parsed.data;
 
-    const { amount: amountBody, currency: currencyBody, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, wdttTariffId: wdttTariffIdBody, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody } = parsed.data;
+    const { amount: amountBody, currency: currencyBody, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody } = parsed.data;
     let amountRounded: number;
     let currencyUpper: string;
     let tariffIdToStore: string | null = null;
     let proxyTariffIdToStore: string | null = null;
     let singboxTariffIdToStore: string | null = null;
-    let wdttTariffIdToStore: string | null = null;
     let metadataObj: Record<string, unknown> = promoCodeStr ? { promoCode: promoCodeStr } : {};
 
     if (customBuildBody) {
@@ -5538,11 +5443,6 @@ clientRouter.post("/heleket/create-payment", async (req, res) => {
         if (!singboxTariff || !singboxTariff.enabled) return res.status(400).json({ message: "Тариф Sing-box не найден" });
         singboxTariffIdToStore = singboxTariffIdBody;
         amountRounded = Math.round((amountBody ?? singboxTariff.price) * 100) / 100;
-      } else if (wdttTariffIdBody) {
-        const wdttTariff = await prisma.wdttTariff.findUnique({ where: { id: wdttTariffIdBody } });
-        if (!wdttTariff || !wdttTariff.enabled) return res.status(400).json({ message: "WDTT тариф не найден или отключён" });
-        wdttTariffIdToStore = wdttTariffIdBody;
-        amountRounded = Math.round((amountBody ?? wdttTariff.price) * 100) / 100;
       } else {
         if (amountBody == null) return res.status(400).json({ message: "Укажите сумму" });
         amountRounded = Math.round(amountBody * 100) / 100;
@@ -5552,7 +5452,7 @@ clientRouter.post("/heleket/create-payment", async (req, res) => {
     if (amountRounded < 1) return res.status(400).json({ message: "Минимальная сумма платежа — 1" });
 
     // Персональная скидка админа — на продуктовые оплаты, не на чистое пополнение.
-    const heleketIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !wdttTariffIdToStore && !customBuildBody && !extraOption;
+    const heleketIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !customBuildBody && !extraOption;
     if (!heleketIsTopup) {
       const originalBeforePersonal = amountRounded;
       const pd = await applyPersonalDiscount(amountRounded, clientId);
@@ -5599,7 +5499,6 @@ clientRouter.post("/heleket/create-payment", async (req, res) => {
         deviceCount: parsed.data.deviceCount ?? null,
         proxyTariffId: proxyTariffIdToStore,
         singboxTariffId: singboxTariffIdToStore,
-        wdttTariffId: wdttTariffIdToStore,
         // see yookassa endpoint for explanation.
         metadata: (() => {
           const meta = { ...metadataObj };
@@ -5672,7 +5571,6 @@ const lavaCreatePaymentSchema = z.object({
   deviceCount: z.number().int().min(0).max(100).optional(),
   proxyTariffId: z.string().min(1).optional(),
   singboxTariffId: z.string().min(1).optional(),
-  wdttTariffId: z.string().min(1).optional(),
   promoCode: z.string().max(50).optional(),
   // покупка как доп. подписка — см. yookassa-схему выше.
   asAdditional: z.boolean().optional(),
@@ -5702,13 +5600,12 @@ clientRouter.post("/lava/create-payment", async (req, res) => {
     if (!isLavaConfigured(lavaConfig)) return res.status(503).json({ message: "Lava не настроена" });
     const { extendsSecondarySubId, removeExtrasOnActivate, asGift, asAdditional } = parsed.data;
 
-    const { amount: amountBody, currency: currencyBody, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, wdttTariffId: wdttTariffIdBody, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody } = parsed.data;
+    const { amount: amountBody, currency: currencyBody, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody } = parsed.data;
     let amountRounded: number;
     let currencyUpper: string;
     let tariffIdToStore: string | null = null;
     let proxyTariffIdToStore: string | null = null;
     let singboxTariffIdToStore: string | null = null;
-    let wdttTariffIdToStore: string | null = null;
     let metadataObj: Record<string, unknown> = promoCodeStr ? { promoCode: promoCodeStr } : {};
 
     if (customBuildBody) {
@@ -5820,11 +5717,6 @@ clientRouter.post("/lava/create-payment", async (req, res) => {
         if (!singboxTariff || !singboxTariff.enabled) return res.status(400).json({ message: "Тариф Sing-box не найден" });
         singboxTariffIdToStore = singboxTariffIdBody;
         amountRounded = Math.round((amountBody ?? singboxTariff.price) * 100) / 100;
-      } else if (wdttTariffIdBody) {
-        const wdttTariff = await prisma.wdttTariff.findUnique({ where: { id: wdttTariffIdBody } });
-        if (!wdttTariff || !wdttTariff.enabled) return res.status(400).json({ message: "WDTT тариф не найден или отключён" });
-        wdttTariffIdToStore = wdttTariffIdBody;
-        amountRounded = Math.round((amountBody ?? wdttTariff.price) * 100) / 100;
       } else {
         if (amountBody == null) return res.status(400).json({ message: "Укажите сумму" });
         amountRounded = Math.round(amountBody * 100) / 100;
@@ -5837,7 +5729,7 @@ clientRouter.post("/lava/create-payment", async (req, res) => {
     if (amountRounded < 1) return res.status(400).json({ message: "Минимальная сумма платежа — 1 ₽" });
 
     // Персональная скидка админа — на продуктовые оплаты, не на чистое пополнение.
-    const lavaIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !wdttTariffIdToStore && !customBuildBody && !extraOption;
+    const lavaIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !customBuildBody && !extraOption;
     if (!lavaIsTopup) {
       const originalBeforePersonal = amountRounded;
       const pd = await applyPersonalDiscount(amountRounded, clientId);
@@ -5882,7 +5774,6 @@ clientRouter.post("/lava/create-payment", async (req, res) => {
         deviceCount: parsed.data.deviceCount ?? null,
         proxyTariffId: proxyTariffIdToStore,
         singboxTariffId: singboxTariffIdToStore,
-        wdttTariffId: wdttTariffIdToStore,
         // see yookassa endpoint for explanation.
         metadata: (() => {
           const meta = { ...metadataObj };
@@ -5957,7 +5848,6 @@ const lavatopCreatePaymentSchema = z.object({
   deviceCount: z.number().int().min(0).max(100).optional(),
   proxyTariffId: z.string().min(1).optional(),
   singboxTariffId: z.string().min(1).optional(),
-  wdttTariffId: z.string().min(1).optional(),
   promoCode: z.string().max(50).optional(),
   /** Email клиента — Lava.top требует обязательно. Если не передан, берём из client.email */
   email: z.string().email().optional(),
@@ -6005,13 +5895,12 @@ clientRouter.post("/lavatop/create-payment", async (req, res) => {
       buyerEmail = `client-${clientId}@${domain}`;
     }
 
-    const { amount: amountBody, currency: currencyBody, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, wdttTariffId: wdttTariffIdBody, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody, offerId: customOfferId } = parsed.data;
+    const { amount: amountBody, currency: currencyBody, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody, offerId: customOfferId } = parsed.data;
     let amountRounded: number;
     let currencyUpper: string;
     let tariffIdToStore: string | null = null;
     let proxyTariffIdToStore: string | null = null;
     let singboxTariffIdToStore: string | null = null;
-    let wdttTariffIdToStore: string | null = null;
     let metadataObj: Record<string, unknown> = promoCodeStr ? { promoCode: promoCodeStr } : {};
 
     if (customBuildBody) {
@@ -6123,11 +6012,6 @@ clientRouter.post("/lavatop/create-payment", async (req, res) => {
         if (!singboxTariff || !singboxTariff.enabled) return res.status(400).json({ message: "Тариф Sing-box не найден" });
         singboxTariffIdToStore = singboxTariffIdBody;
         amountRounded = Math.round((amountBody ?? singboxTariff.price) * 100) / 100;
-      } else if (wdttTariffIdBody) {
-        const wdttTariff = await prisma.wdttTariff.findUnique({ where: { id: wdttTariffIdBody } });
-        if (!wdttTariff || !wdttTariff.enabled) return res.status(400).json({ message: "WDTT тариф не найден или отключён" });
-        wdttTariffIdToStore = wdttTariffIdBody;
-        amountRounded = Math.round((amountBody ?? wdttTariff.price) * 100) / 100;
       } else {
         if (amountBody == null) return res.status(400).json({ message: "Укажите сумму" });
         amountRounded = Math.round(amountBody * 100) / 100;
@@ -6140,7 +6024,7 @@ clientRouter.post("/lavatop/create-payment", async (req, res) => {
     if (amountRounded < 1) return res.status(400).json({ message: "Минимальная сумма платежа — 1" });
 
     // Персональная скидка / промокод
-    const lavatopIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !wdttTariffIdToStore && !customBuildBody && !extraOption;
+    const lavatopIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !customBuildBody && !extraOption;
     // Lava.top — только подписка на тариф (MONTHLY auto-renew). Топ-ап баланса
     // отклоняем — для пополнения используются другие провайдеры (LAVA, ЮKassa, ЮMoney и т.д.).
     if (lavatopIsTopup) {
@@ -6199,7 +6083,6 @@ clientRouter.post("/lavatop/create-payment", async (req, res) => {
         deviceCount: parsed.data.deviceCount ?? null,
         proxyTariffId: proxyTariffIdToStore,
         singboxTariffId: singboxTariffIdToStore,
-        wdttTariffId: wdttTariffIdToStore,
         // see yookassa endpoint for explanation.
         metadata: (() => {
           const meta = { ...metadataObj };
@@ -6273,7 +6156,6 @@ const overpayCreatePaymentSchema = z.object({
   deviceCount: z.number().int().min(0).max(100).optional(),
   proxyTariffId: z.string().min(1).optional(),
   singboxTariffId: z.string().min(1).optional(),
-  wdttTariffId: z.string().min(1).optional(),
   promoCode: z.string().max(50).optional(),
   // для единообразия с другими провайдерами — поддержка extendsSecondarySubId.
   extendsSecondarySubId: z.string().min(1).max(64).optional(),
@@ -6306,7 +6188,6 @@ clientRouter.post("/overpay/create-payment", async (req, res) => {
       tariffId: tariffIdBody,
       proxyTariffId: proxyTariffIdBody,
       singboxTariffId: singboxTariffIdBody,
-      wdttTariffId: wdttTariffIdBody,
       promoCode: promoCodeStr,
       extraOption,
       customBuild: customBuildBody,
@@ -6316,7 +6197,6 @@ clientRouter.post("/overpay/create-payment", async (req, res) => {
     let tariffIdToStore: string | null = null;
     let proxyTariffIdToStore: string | null = null;
     let singboxTariffIdToStore: string | null = null;
-    let wdttTariffIdToStore: string | null = null;
     let metadataObj: Record<string, unknown> = promoCodeStr ? { promoCode: promoCodeStr } : {};
 
     if (customBuildBody) {
@@ -6428,11 +6308,6 @@ clientRouter.post("/overpay/create-payment", async (req, res) => {
         if (!singboxTariff || !singboxTariff.enabled) return res.status(400).json({ message: "Тариф Sing-box не найден" });
         singboxTariffIdToStore = singboxTariffIdBody;
         amountRounded = Math.round((amountBody ?? singboxTariff.price) * 100) / 100;
-      } else if (wdttTariffIdBody) {
-        const wdttTariff = await prisma.wdttTariff.findUnique({ where: { id: wdttTariffIdBody } });
-        if (!wdttTariff || !wdttTariff.enabled) return res.status(400).json({ message: "WDTT тариф не найден или отключён" });
-        wdttTariffIdToStore = wdttTariffIdBody;
-        amountRounded = Math.round((amountBody ?? wdttTariff.price) * 100) / 100;
       } else {
         if (amountBody == null) return res.status(400).json({ message: "Укажите сумму" });
         amountRounded = Math.round(amountBody * 100) / 100;
@@ -6441,7 +6316,7 @@ clientRouter.post("/overpay/create-payment", async (req, res) => {
 
     if (amountRounded < 1) return res.status(400).json({ message: "Минимальная сумма платежа — 1" });
 
-    const overpayIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !wdttTariffIdToStore && !customBuildBody && !extraOption;
+    const overpayIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !customBuildBody && !extraOption;
     if (!overpayIsTopup) {
       const originalBeforePersonal = amountRounded;
       const pd = await applyPersonalDiscount(amountRounded, clientId);
@@ -6485,7 +6360,6 @@ clientRouter.post("/overpay/create-payment", async (req, res) => {
         deviceCount: parsed.data.deviceCount ?? null,
         proxyTariffId: proxyTariffIdToStore,
         singboxTariffId: singboxTariffIdToStore,
-        wdttTariffId: wdttTariffIdToStore,
         metadata: Object.keys(metadataObj).length > 0 ? JSON.stringify(metadataObj) : null,
       }),
     });

@@ -134,7 +134,6 @@ export async function syncFromRemna(): Promise<{
             const refCode = "REF-" + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase();
             await prisma.client.create({
               data: {
-                botId: primaryBot.id,
                 remnawaveUuid: uuid,
                 email: email ?? null,
                 telegramId,
@@ -317,9 +316,13 @@ export async function createRemnaUsersForClientsWithoutUuid(): Promise<{
         result.linked++;
       }
       if (uuid) {
+        // НЕ ставим trialUsed=true при синхронизации!
+        // Синк только линкует Remna-юзера — это не значит что клиент брал триал.
+        // Раньше тут стоял trialUsed: true → все синканные/мигрированные получали флаг,
+        // и авто-рассылка «Пользовался триалом, но не оплатил» спамила тех кто триал не брал.
         await prisma.client.update({
           where: { id: c.id },
-          data: { remnawaveUuid: uuid, trialUsed: true },
+          data: { remnawaveUuid: uuid },
         });
       } else {
         result.errors.push(`Client ${c.id}: не удалось получить или создать UUID в Remna`);

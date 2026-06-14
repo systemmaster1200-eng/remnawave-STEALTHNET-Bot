@@ -448,7 +448,7 @@ function CategoriesTab({ token }: { token: string }) {
       <CreateCategoryDialog token={token} open={showCreateCategory} onClose={() => setShowCreateCategory(false)} onCreated={() => { setShowCreateCategory(false); fetchCategories(); }} />
       <CreateTariffDialog token={token} categories={categories} open={showCreateTariff} onClose={() => setShowCreateTariff(false)} onCreated={() => { setShowCreateTariff(false); fetchCategories(); }} />
       {editingTariff && (
-        <EditTariffDialog token={token} tariff={editingTariff} categories={categories} open={true} onClose={() => setEditingTariff(null)} onSaved={() => { setEditingTariff(null); fetchCategories(); }} />
+        <EditTariffDialog token={token} tariff={editingTariff} open={true} onClose={() => setEditingTariff(null)} onSaved={() => { setEditingTariff(null); fetchCategories(); }} />
       )}
     </div>
   );
@@ -550,7 +550,7 @@ function CreateTariffDialog({ token, categories, open, onClose, onCreated }: { t
   );
 }
 
-function EditTariffDialog({ token, tariff, categories, open, onClose, onSaved }: { token: string; tariff: WdttTariffItem; categories: WdttCategoryItem[]; open: boolean; onClose: () => void; onSaved: () => void }) {
+function EditTariffDialog({ token, tariff, open, onClose, onSaved }: { token: string; tariff: WdttTariffItem; open: boolean; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(tariff.name);
   const [proxyCount, setProxyCount] = useState(tariff.proxyCount);
   const [durationDays, setDurationDays] = useState(tariff.durationDays);

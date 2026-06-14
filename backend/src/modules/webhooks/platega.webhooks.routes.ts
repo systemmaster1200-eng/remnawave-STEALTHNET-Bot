@@ -58,7 +58,6 @@ type PaymentRow = {
   externalId: string | null;
   status: string;
   clientId: string;
-  botId: string | null;
   amount: number;
   currency: string;
   tariffId: string | null;
@@ -73,7 +72,6 @@ const PAYMENT_SELECT = {
   externalId: true,
   status: true,
   clientId: true,
-  botId: true,
   amount: true,
   currency: true,
   tariffId: true,
@@ -129,7 +127,6 @@ async function findPlategaPaymentByAnyId(candidateIds: string[]): Promise<Paymen
         externalId: byOrder.externalId,
         status: byOrder.status,
         clientId: byOrder.clientId,
-        botId: byOrder.botId,
         amount: byOrder.amount,
         currency: byOrder.currency,
         tariffId: byOrder.tariffId,
@@ -186,6 +183,10 @@ async function ensureTariffActivation(paymentId: string): Promise<void> {
   let activation: { ok: boolean; error?: string; slotIds?: string[] } = { ok: false };
   if (isExtraOption) {
     activation = await applyExtraOptionByPaymentId(paymentId);
+    if (activation.ok && row?.clientId) {
+      const { notifyExtraOptionApplied } = await import("../notification/telegram-notify.service.js");
+      await notifyExtraOptionApplied(row.clientId, paymentId).catch(() => {});
+    }
   } else if (row?.proxyTariffId) {
     const proxyResult = await createProxySlotsByPaymentId(paymentId);
     activation = proxyResult.ok ? { ok: true, slotIds: proxyResult.slotIds } : { ok: false, error: proxyResult.error };
@@ -487,6 +488,13 @@ plategaWebhooksRouter.post("/platega", async (req, res) => {
       await notifyTariffActivated(payment.clientId, payment.id).catch(() => {});
     }
     // proxyTariffId: notifyProxySlotsCreated вызывается из ensureTariffActivation
+
+    // сжигаем одноразовую персональную скидку после продуктовой покупки.
+    if (!isTopUp) {
+      const { extinguishOneTimeDiscount } = await import("../client/personal-discount.js");
+      await extinguishOneTimeDiscount(payment.clientId).catch(() => {});
+    }
+
     await distributeReferralRewards(payment.id).catch((e) => {
       console.error("[Platega Webhook] Referral distribution error", { paymentId: payment.id, error: e });
     });

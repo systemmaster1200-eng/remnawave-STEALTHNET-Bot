@@ -50,6 +50,11 @@ export const ACTION_CATALOG: ActionDef[] = [
   { key: "bulk_credit_balance", label: "Начисление баланса (bulk)", description: "POST /admin/clients/bulk action=credit_balance", group: "clients", severity: "critical" },
   { key: "bulk_debit_balance", label: "Списание баланса (bulk)", description: "POST /admin/clients/bulk action=debit_balance", group: "clients", severity: "critical" },
   { key: "bulk_reset_trial", label: "Сброс trial (bulk)", description: "POST /admin/clients/bulk action=reset_trial", group: "clients", severity: "warn" },
+  // менеджерские права на устройства клиентов.
+  { key: "change_device_limit", label: "Менять лимит устройств в подписках", description: "PATCH /admin/subscriptions/:subId/remna — поле hwidDeviceLimit. Менеджер без этого action получает 403 на смену лимита.", group: "clients", severity: "info" },
+  { key: "delete_device", label: "Удалять устройства клиентов", description: "POST /admin/clients/:id/remna/devices/delete и POST /admin/subscriptions/:subId/remna/devices/delete", group: "clients", severity: "info" },
+  // отчёт продаж только через баланс (для менеджеров-девочек).
+  { key: "view_balance_sales", label: "Видеть отчёт продаж через баланс", description: "GET /admin/balance-sales — список платежей с provider=balance (продажи через начисление баланса вручную). Доступ к странице «Продажи через баланс» в админке.", group: "payments", severity: "info" },
 
   // Security
   { key: "logout_all_admins", label: "Logout всех админов", description: "POST /admin/security/logout-all — инвалидация всех токенов", group: "security", severity: "critical" },
@@ -81,6 +86,23 @@ adminPermissionsRouter.get(
   }),
 );
 
+/**
+ * парсит allowedSections либо как JSON массив
+ * (новый формат, совместим с middleware и PATCH /admins/:id),
+ * либо как CSV (legacy от старых записей PUT /admin-permissions).
+ */
+function parseAllowedItems(raw: string | null | undefined): string[] {
+  const s = (raw ?? "").trim();
+  if (!s) return [];
+  try {
+    const p = JSON.parse(s) as unknown;
+    if (Array.isArray(p)) return p.filter((x): x is string => typeof x === "string");
+  } catch {
+    /* fall through */
+  }
+  return s.split(",").map((x) => x.trim()).filter(Boolean);
+}
+
 adminPermissionsRouter.get(
   "/:adminId",
   asyncRoute(async (req, res) => {
@@ -91,7 +113,7 @@ adminPermissionsRouter.get(
     });
     if (!admin) return res.status(404).json({ message: "Admin not found" });
 
-    const allowed = (admin.allowedSections ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    const allowed = parseAllowedItems(admin.allowedSections);
     const sections = allowed.filter((s) => !s.startsWith(ACTION_PREFIX));
     const actions = allowed.filter((s) => s.startsWith(ACTION_PREFIX)).map((s) => s.slice(ACTION_PREFIX.length));
 
@@ -129,15 +151,17 @@ adminPermissionsRouter.put(
     });
     if (!admin) return res.status(404).json({ message: "Admin not found" });
 
-    // Чистим старые actions (с префиксом) и заменяем новыми
-    const existing = (admin.allowedSections ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    // сохраняем как JSON-массив (единый формат с PATCH /admins/:id
+    // и middleware/requireAdminSection). Раньше тут писали CSV — это ломало секции, т.к. middleware
+    // читает только JSON. Парсер `parseAllowedItems` принимает оба формата для обратной совместимости.
+    const existing = parseAllowedItems(admin.allowedSections);
     const sectionsOnly = existing.filter((s) => !s.startsWith(ACTION_PREFIX));
     const prefixedActions = parsed.data.actions.map((a) => `${ACTION_PREFIX}${a}`);
     const merged = [...sectionsOnly, ...prefixedActions];
 
     await prisma.admin.update({
       where: { id: admin.id },
-      data: { allowedSections: merged.join(",") },
+      data: { allowedSections: JSON.stringify(merged) },
     });
 
     await logAdmin(req, "admin_permissions.update", { type: "admin", id: admin.id }, {

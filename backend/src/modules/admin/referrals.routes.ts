@@ -4,11 +4,24 @@ import { requireAuth, requireAdminSection } from "../auth/middleware.js";
 
 export const adminReferralsRouter = Router();
 adminReferralsRouter.use(requireAuth);
-adminReferralsRouter.use(requireAdminSection);
+adminReferralsRouter.use((req, res, next) => {
+  // роутер смонтирован на /api/admin/referrals,
+  // req.path внутри него уже без префикса (/<id>/referrer) → общий requireAdminSection брал
+  // секцией сам clientId и резал менеджеров 403. Весь под-роутер = секция "clients".
+  const ext = req as any;
+  if (ext.adminRole === "ADMIN") return next();
+  if (Array.isArray(ext.adminAllowedSections) && ext.adminAllowedSections.includes("clients")) return next();
+  return res.status(403).json({ message: "Access denied to this section." });
+});
 
 adminReferralsRouter.get("/network", async (req, res) => {
   try {
+    // в граф грузим ТОЛЬКО участников реф.сети
+    // (есть реферер ИЛИ есть рефералы), а не всех клиентов. Иначе при большой базе
+    // (154k+) Prisma превышает лимит PostgreSQL на bind-переменные (32767) при выборке
+    // вложенных payments/referralCredits и эндпоинт падает с 500 → «рефералов нет».
     const clients = await prisma.client.findMany({
+      where: { OR: [{ referrerId: { not: null } }, { referrals: { some: {} } }] },
       select: {
         id: true,
         email: true,
@@ -31,18 +44,10 @@ adminReferralsRouter.get("/network", async (req, res) => {
       }
     });
 
-    let totalSubscriptionIncome = 0;
-    let totalReferralIncome = 0;
-    let totalCampaigns = new Set<string>();
-
     const nodes = clients.map(c => {
       const paymentsCount = c.payments.length;
       const subIncome = c.payments.reduce((sum, p) => sum + p.amount, 0);
       const refIncome = c.referralCredits.reduce((sum, p) => sum + p.amount, 0);
-      
-      totalSubscriptionIncome += subIncome;
-      totalReferralIncome += refIncome;
-      if (c.utmCampaign) totalCampaigns.add(c.utmCampaign);
 
       let status = "no_sub";
       if (c._count.referrals >= 10) status = "top_referrer";
@@ -70,15 +75,25 @@ adminReferralsRouter.get("/network", async (req, res) => {
         target: c.id
       }));
 
+    // Stats считаем агрегатами по ВСЕЙ базе (а не по отфильтрованным участникам графа),
+    // чтобы цифры были корректные и не зависели от фильтра выше. Всё на стороне БД.
+    const [totalUsers, totalReferrers, campaignGroups, subAgg, refAgg] = await Promise.all([
+      prisma.client.count(),
+      prisma.client.count({ where: { referrals: { some: {} } } }),
+      prisma.client.groupBy({ by: ["utmCampaign"], where: { utmCampaign: { not: null } } }),
+      prisma.payment.aggregate({ _sum: { amount: true }, where: { status: "PAID" } }),
+      prisma.referralCredit.aggregate({ _sum: { amount: true } }),
+    ]);
+
     return res.json({
       nodes,
       links,
       stats: {
-        totalUsers: clients.length,
-        totalReferrers: clients.filter(c => c._count.referrals > 0).length,
-        totalCampaigns: totalCampaigns.size,
-        totalSubscriptionIncome,
-        totalReferralIncome
+        totalUsers,
+        totalReferrers,
+        totalCampaigns: campaignGroups.length,
+        totalSubscriptionIncome: subAgg._sum.amount ?? 0,
+        totalReferralIncome: refAgg._sum.amount ?? 0
       }
     });
   } catch (e) {

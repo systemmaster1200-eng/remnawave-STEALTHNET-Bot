@@ -72,7 +72,7 @@ const buySchema = z.object({
 });
 
 const createCodeSchema = z.object({
-  secondarySubscriptionId: z.string().min(1, "secondarySubscriptionId обязателен"),
+  subscriptionId: z.string().min(1, "subscriptionId обязателен"),
   giftMessage: z.string().max(200).optional(),
 });
 
@@ -161,6 +161,8 @@ giftRouter.post("/buy", async (req: Request, res: Response) => {
   }
 
   // Создаём дополнительную подписку с новой моделью устройств.
+  // purchasedAsGift=true → подписка попадёт ТОЛЬКО в «🎁 Мои подарки»,
+  // не будет дублироваться в «📋 Мои подписки». При activateForSelf флаг сбрасывается.
   const result = await createAdditionalSubscription(clientId, {
     id: tariff.id,
     name: tariff.name,
@@ -171,7 +173,7 @@ giftRouter.post("/buy", async (req: Request, res: Response) => {
     includedDevices: tariff.includedDevices,
     internalSquadUuids: tariff.internalSquadUuids,
     trafficResetMode: tariff.trafficResetMode ?? undefined,
-  }, { extraDevices: requestedExtras });
+  }, { extraDevices: requestedExtras, purchasedAsGift: true });
 
   if (!result.ok) {
     // Возвращаем баланс при ошибке
@@ -191,9 +193,6 @@ giftRouter.post("/buy", async (req: Request, res: Response) => {
       tariffPriceOptionId: selectedOption?.id ?? null,
       deviceCount: requestedExtras,
       amount: paySnap.amount,
-      baseAmount: paySnap.baseAmount,
-      botMarkupPercent: paySnap.botMarkupPercent,
-      botMarkupAmount: paySnap.botMarkupAmount,
       currency: tariff.currency.toUpperCase(),
       status: "PAID",
       provider: "balance",
@@ -279,7 +278,7 @@ giftRouter.post("/create-code", async (req: Request, res: Response) => {
     return res.status(400).json({ message: "Некорректные данные", errors: body.error.flatten() });
   }
 
-  const result = await createGiftCode(clientId, body.data.secondarySubscriptionId, body.data.giftMessage);
+  const result = await createGiftCode(clientId, body.data.subscriptionId, body.data.giftMessage);
   if (!result.ok) {
     return res.status(result.status).json({ message: result.error });
   }
@@ -289,6 +288,9 @@ giftRouter.post("/create-code", async (req: Request, res: Response) => {
     code: result.data.code,
     expiresAt: result.data.expiresAt,
     tariffName: result.data.tariffName,
+    // T-unify (12.05.2026) — для рендера текста подарка (стандарт без трафика / Unblock с трафиком).
+    durationDays: result.data.durationDays,
+    trafficLimitBytes: result.data.trafficLimitBytes,
   });
 });
 
@@ -325,6 +327,41 @@ giftRouter.delete("/cancel/:codeOrId", async (req: Request, res: Response) => {
   }
 
   return res.json({ message: "Подарочный код отменён" });
+});
+
+// ─── GET /active-code/:subId — Активный код для конкретной подписки ──────────
+//
+// когда юзер создал код, потом вышел в меню и вернулся
+// в «🎁 Мои подарки» — подписка имеет giftStatus=GIFT_RESERVED, но код не виден.
+// Эндпоинт возвращает существующий ACTIVE-код этой подписки чтобы бот мог снова
+// показать share-UI («Поделиться в Telegram» / «Ссылка на подарок»).
+giftRouter.get("/active-code/:subId", async (req: Request, res: Response) => {
+  const clientId = (req as AuthedReq).clientId;
+  const { subId } = req.params;
+
+  // Проверка ownership: подписка принадлежит запросившему.
+  const sub = await prisma.subscription.findUnique({
+    where: { id: subId },
+    select: { ownerId: true, tariff: { select: { name: true } } },
+  });
+  if (!sub || sub.ownerId !== clientId) {
+    return res.status(404).json({ message: "Подписка не найдена" });
+  }
+
+  const code = await prisma.giftCode.findFirst({
+    where: { subscriptionId: subId, status: "ACTIVE" },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!code) {
+    return res.status(404).json({ message: "Активный код не найден" });
+  }
+
+  return res.json({
+    code: code.code,
+    expiresAt: code.expiresAt,
+    tariffName: sub.tariff?.name ?? null,
+    subscriptionId: subId,
+  });
 });
 
 // ─── GET /codes — Список подарочных кодов клиента ────────────────────────────

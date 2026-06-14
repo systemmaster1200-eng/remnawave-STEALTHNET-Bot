@@ -66,10 +66,10 @@ async function main() {
     trigger: () => runContestDailyReminder(),
   });
   registerCron({ name: "auto-renew", cron: "*/15 * * * *", description: "Авто-продление подписок с баланса/yookassa" });
+  registerCron({ name: "wdtt-expiry", cron: "*/5 * * * *", description: "Удаление истёкших WDTT ключей с нод" });
   registerCron({ name: "gift-expiry", cron: "*/30 * * * *", description: "Истёкшие gift-коды → освобождаем зарезервированные подписки" });
   registerCron({ name: "auto-backup", cron: "0 4 * * *", description: "Автоматический бэкап БД" });
   registerCron({ name: "marketplace-heartbeat", cron: "*/10 * * * *", description: "Heartbeat в маркетплейс-хаб" });
-  registerCron({ name: "wdtt-expiry", cron: "*/5 * * * *", description: "Истёкшие WDTT слоты" });
 
   const server = app.listen(env.PORT, "0.0.0.0", () => {
     console.log(`API v5.0.0 listening on port ${env.PORT}`);

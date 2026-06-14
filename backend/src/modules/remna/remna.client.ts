@@ -380,3 +380,68 @@ export function remnaGetUserByUuid(uuid: string) {
     };
   }>(`/api/users/${uuid}`);
 }
+
+/**
+ * POST /api/system/tools/happ/encrypt — зашифровать ссылку через Happ Crypto.
+ *
+ * Использует встроенный механизм Remnawave (тот же, что обрабатывает плейсхолдер
+ * `{{HAPP_CRYPT4_LINK}}` на встроенной sub-page Remnawave). Возвращает
+ * зашифрованную ссылку вида `happ://crypt4/...` либо null, если запрос упал
+ * (на старых Remna 1.x этого эндпоинта может не быть).
+ *
+ * Кэшируем результат в памяти на 10 минут — Remnawave при шифровании одной
+ * и той же ссылки возвращает один и тот же crypt4-токен (он детерминирован
+ * относительно секрета на стороне Remna), а наш клиент дёргает /subscription
+ * на каждый рендер кабинета. Кэш экономит сетевой round-trip.
+ */
+const _happCryptCache = new Map<string, { value: string; ts: number }>();
+const HAPP_CRYPT_TTL_MS = 10 * 60 * 1000;
+
+export async function remnaEncryptHappLink(linkToEncrypt: string): Promise<string | null> {
+  const trimmed = linkToEncrypt.trim();
+  if (!trimmed) return null;
+  // Уже crypt — возвращаем как есть
+  if (trimmed.startsWith("happ://")) return trimmed;
+
+  const cached = _happCryptCache.get(trimmed);
+  if (cached && Date.now() - cached.ts < HAPP_CRYPT_TTL_MS) {
+    return cached.value;
+  }
+
+  const result = await remnaFetch<{ response?: { encryptedLink?: string } }>(
+    "/api/system/tools/happ/encrypt",
+    {
+      method: "POST",
+      body: JSON.stringify({ linkToEncrypt: trimmed }),
+    }
+  );
+
+  if (result.error || !result.data) return null;
+  const encrypted = result.data.response?.encryptedLink;
+  if (!encrypted || !encrypted.startsWith("happ://")) return null;
+
+  _happCryptCache.set(trimmed, { value: encrypted, ts: Date.now() });
+  return encrypted;
+}
+
+/**
+ * Шифрует поле `subscriptionUrl` внутри ответа Remnawave inplace.
+ * Принимает `result.data` от `remnaGetUser()` и пытается обновить URL.
+ * При неудаче — оставляет оригинал. Безопасно: try/catch внутри.
+ */
+export async function encryptSubscriptionUrlInPlace(data: unknown): Promise<void> {
+  try {
+    if (!data || typeof data !== "object") return;
+    const obj = data as Record<string, unknown>;
+    const resp = (obj.response ?? obj) as Record<string, unknown> | undefined;
+    if (!resp || typeof resp !== "object") return;
+    const rawUrl = resp.subscriptionUrl;
+    if (typeof rawUrl !== "string" || !rawUrl.trim() || rawUrl.startsWith("happ://")) return;
+    const encrypted = await remnaEncryptHappLink(rawUrl.trim());
+    if (encrypted) {
+      resp.subscriptionUrl = encrypted;
+    }
+  } catch {
+    // не падаем — оригинальная ссылка останется
+  }
+}

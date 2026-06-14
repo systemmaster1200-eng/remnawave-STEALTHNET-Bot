@@ -1,4 +1,4 @@
-import { PrismaClient, Prisma, type Payment } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 
 const globalForPrisma = globalThis as unknown as { prisma: PrismaClient | undefined };
 
@@ -11,30 +11,17 @@ const basePrisma =
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = basePrisma;
 
 /**
- * Создание платежа с автоподстановкой `botId` по `clientId`, если не задан явно.
- * Вынесено из `$extends`: расширение ломало вывод типов Prisma в IDE/TS (botId, baseAmount…).
- *
- * НЕ заполняет baseAmount / botMarkup* — это делает вызывающий код через buildPaymentMarkupSnapshot.
+ * Тонкая обёртка над prisma.payment.create — оставлена для совместимости после
+ * выпила multi-bot в v5.0.0 (раньше делала автоподстановку botId по clientId).
  */
-export async function createPayment(args: Prisma.PaymentCreateArgs): Promise<Payment> {
-  const data = args.data as Prisma.PaymentUncheckedCreateInput;
-  if (!data.botId && typeof data.clientId === "string") {
-    const c = await basePrisma.client.findUnique({
-      where: { id: data.clientId },
-      select: { botId: true },
-    });
-    if (c?.botId) {
-      (args.data as Prisma.PaymentUncheckedCreateInput).botId = c.botId;
-    }
-  }
+export async function createPayment(args: Prisma.PaymentCreateArgs) {
   return basePrisma.payment.create(args);
 }
 
 export const prisma = basePrisma;
 
-// ── Тонкая обёртка для литералов Prisma: часть IDE/анализаторов отстаёт от `prisma generate`
-// и помечает botId, baseAmount, confirmedBotId и т.д. как «лишние» поля. Литерал сначала
-// совместим с Record<string, unknown>, затем приводится к сгенерированному типу Prisma.
+// ── Тонкие обёртки для литералов Prisma: часть IDE/анализаторов отстаёт от `prisma generate`.
+// Литерал сначала совместим с Record<string, unknown>, затем приводится к сгенерированному типу Prisma.
 export function asClientUncheckedCreate(data: Record<string, unknown>): Prisma.ClientUncheckedCreateInput {
   return data as Prisma.ClientUncheckedCreateInput;
 }
@@ -62,7 +49,6 @@ export type TelegramAuthTokenRecord = {
   createdAt: Date;
   confirmedTelegramId: string | null;
   confirmedUsername: string | null;
-  confirmedBotId: string | null;
 };
 
 /** Строка Client после findFirst с select для слияния «пустого» клона */
@@ -76,13 +62,3 @@ export type ClientEmptyCloneRow = {
   balance: number;
   _count: { payments: number; ownedSubscriptions: number };
 };
-
-/** После findUnique с select { botId: true } — стабильный тип при «отстающем» выводе Prisma в IDE */
-export type ClientBotIdPick = { botId: string };
-
-export async function prismaBotFindMany<T>(args: Record<string, unknown>): Promise<T[]> {
-  const delegate = basePrisma as unknown as {
-    bot: { findMany: (a: Record<string, unknown>) => Promise<T[]> };
-  };
-  return delegate.bot.findMany(args);
-}
