@@ -1,7 +1,7 @@
 # WDTT Node Dockerfile
 # Builds both the WDTT server and the STEALTHNET API wrapper
 
-FROM golang:latest AS builder
+FROM golang:alpine AS builder
 
 ENV GOTOOLCHAIN=auto
 RUN apk add --no-cache git gcc musl-dev linux-headers
