@@ -9,7 +9,7 @@ import { useLanguageSync } from "@/i18n/use-language-sync";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { GlassSelect } from "@/components/ui/glass-select";
-import { LayoutDashboard, Package, User, LogOut, Shield, Users, Sun, Moon, PlusCircle, Globe, KeyRound, MessageSquare, Palette, Monitor, Check, Loader2, Settings, Layers, MoreHorizontal, ChevronDown, Wallet, Gift } from "lucide-react";
+import { LayoutDashboard, Package, User, LogOut, Shield, Users, Sun, Moon, PlusCircle, Globe, KeyRound, MessageSquare, Palette, Monitor, Check, Loader2, Settings, Layers, MoreHorizontal, ChevronDown, Wallet, Gift, Wifi } from "lucide-react";
 import { useTheme, ACCENT_PALETTES, type ThemeMode, type ThemeAccent } from "@/contexts/theme";
 import { cn } from "@/lib/utils";
 import { FloatingChat } from "@/components/floating-chat";
@@ -156,6 +156,7 @@ function useNavItems() {
     { to: "/cabinet/extra-options", label: t("cabinet.nav.options"), icon: PlusCircle },
     { to: "/cabinet/proxy", label: t("cabinet.nav.proxy"), icon: Globe },
     { to: "/cabinet/singbox", label: t("cabinet.nav.access"), icon: KeyRound },
+    { to: "/cabinet/wdtt", label: "WDTT / Warp", icon: Wifi },
     { to: "/cabinet/referral", label: t("cabinet.nav.referrals"), icon: Users },
     { to: "/cabinet/tickets", label: t("cabinet.nav.tickets"), icon: MessageSquare },
     { to: "/cabinet/gifts", label: "Подарки", icon: Gift },

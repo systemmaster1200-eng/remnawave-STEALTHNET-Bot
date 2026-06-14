@@ -6,6 +6,38 @@ export function setTokenRefreshFn(fn: (() => Promise<string | null>) | null) {
   tokenRefreshFn = fn;
 }
 
+// отчёт по массовой операции над клиентом.
+export interface BulkOpItem {
+  subscriptionId: string;
+  subscriptionIndex: number;
+  remnawaveUuid: string | null;
+  status: "ok" | "skipped" | "error";
+  message?: string;
+}
+export interface BulkOpReport {
+  ok: number;
+  skipped: number;
+  failed: number;
+  items: BulkOpItem[];
+}
+export interface BulkOpReportFull extends BulkOpReport {
+  clientBlocked?: boolean;
+  clientUnblocked?: boolean;
+  autoRenewDisabled?: number;
+}
+export type AuditIssueType = "MISSING_REMNA_USER" | "EXPIRE_MISMATCH" | "NO_UUID" | "EXTRA_REMNA_USER";
+export interface ClientAuditIssue {
+  subscriptionId: string;
+  subscriptionIndex: number;
+  type: AuditIssueType;
+  detail: string;
+}
+export interface ClientAuditResult {
+  issues: ClientAuditIssue[];
+  total: number;
+  checked: number;
+}
+
 export interface Admin {
   id: string;
   email: string;
@@ -40,10 +72,14 @@ export const MANAGER_SECTIONS: { key: string; label: string; category: ManagerSe
   { key: "clients", label: "Клиенты", category: "management" },
   { key: "proxy", label: "Прокси", category: "management" },
   { key: "singbox", label: "Sing-box", category: "management" },
+  { key: "wdtt", label: "WDTT / Warp", category: "management" },
   { key: "backup", label: "Бэкапы", category: "management" },
   { key: "tickets", label: "Тикеты", category: "management" },
+  { key: "withdrawals", label: "Заявки на вывод", category: "management" },
   // Подписка
   { key: "tariffs", label: "Тарифы", category: "subscription" },
+  { key: "trials", label: "Триалы", category: "subscription" },
+  { key: "auto-renew", label: "Автосписание", category: "subscription" },
   { key: "promo", label: "Промо-ссылки", category: "subscription" },
   { key: "promo-codes", label: "Промокоды", category: "subscription" },
   { key: "marketing", label: "Маркетинг", category: "subscription" },
@@ -55,12 +91,17 @@ export const MANAGER_SECTIONS: { key: string; label: string; category: ManagerSe
   { key: "auto-broadcast", label: "Авто-рассылка", category: "tools" },
   { key: "contests", label: "Конкурсы", category: "tools" },
   { key: "tour-constructor", label: "Конструктор тура", category: "tools" },
+  { key: "promo-vpn", label: "Promo VPN", category: "tools" },
   { key: "marketplace", label: "Маркетплейс", category: "tools" },
   // Настройки
   { key: "settings", label: "Настройки", category: "settings" },
   { key: "languages", label: "Языки", category: "settings" },
   { key: "api-keys", label: "API ключи", category: "settings" },
   { key: "bots", label: "Боты-клоны", category: "settings" },
+  { key: "antibot", label: "Антибот", category: "settings" },
+  { key: "diagnostics", label: "Диагностика", category: "settings" },
+  { key: "webhook-inbox", label: "Webhook inbox", category: "settings" },
+  { key: "audit", label: "Аудит-лог", category: "settings" },
 ];
 
 /** Вложение тикета. URL относительный — `/api/uploads/tickets/...`. */
@@ -88,47 +129,6 @@ export interface AdminListItem {
   allowedSections: string[];
   mustChangePassword?: boolean;
   createdAt?: string;
-}
-
-/** Наценка клона: суммы по валютам из PAID-платежей (без balance) минус выплаты. */
-export interface AdminBotEarnings {
-  earnedTotal: number;
-  earnedByCurrency: Record<string, number>;
-  paidOutTotal: number;
-  paidOutByCurrency: Record<string, number>;
-  balance: number;
-  balanceByCurrency: Record<string, number>;
-}
-
-export interface AdminBotDto {
-  id: string;
-  /** Маскированный токен (ответ API). */
-  token: string;
-  username: string | null;
-  markupPercent: number;
-  ownerTelegramId: string | null;
-  ownerName: string | null;
-  isActive: boolean;
-  isPrimary: boolean;
-  notes: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface AdminBotListItem extends AdminBotDto {
-  clientsCount: number;
-  earnings: AdminBotEarnings;
-}
-
-export interface BotPayoutDto {
-  id: string;
-  botId: string;
-  amount: number;
-  currency: string;
-  comment: string | null;
-  paidAt: string;
-  createdBy: string;
-  createdAt: string;
 }
 
 export type ContestPrizeType = "custom" | "balance" | "vpn_days";
@@ -423,6 +423,25 @@ export const api = {
     return request(`/admin/sales-report/${paymentId}`, { token, method: "DELETE" });
   },
 
+  // отчёт продаж через баланс для девочек-менеджеров.
+  async getBalanceSales(token: string, params?: { from?: string; to?: string; search?: string; page?: number; limit?: number }): Promise<{
+    items: { id: string; amount: number; currency: string; tariffName: string | null; clientId: string | null; clientEmail: string | null; clientTelegramId: string | null; clientTelegramUsername: string | null; paidAt: string | null }[];
+    total: number;
+    page: number;
+    limit: number;
+    totalAmount: number;
+    totalCount: number;
+  }> {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set("from", params.from);
+    if (params?.to) qs.set("to", params.to);
+    if (params?.search) qs.set("search", params.search);
+    if (params?.page) qs.set("page", String(params.page));
+    if (params?.limit) qs.set("limit", String(params.limit));
+    const q = qs.toString();
+    return request(`/admin/balance-sales${q ? `?${q}` : ""}`, { token });
+  },
+
   async getVideoInstructions(token: string): Promise<{ enabled: boolean; items: { id: string; title: string; telegramFileId: string; sortOrder: number }[] }> {
     return request("/admin/video-instructions", { token });
   },
@@ -600,6 +619,89 @@ export const api = {
     return request(`/admin/singbox/tariffs/${id}`, { method: "DELETE", token });
   },
 
+  // ——— WDTT Admin ———
+  async getWdttNodes(token: string): Promise<{ items: WdttNodeListItem[] }> {
+    return request("/admin/wdtt/nodes", { token });
+  },
+
+  async createWdttNode(token: string, data?: { name?: string; apiUrl?: string; apiKey?: string; dtlsPort?: number; wgPort?: number; tunPort?: number; capacity?: number | null }): Promise<CreateWdttNodeResponse> {
+    return request("/admin/wdtt/nodes", { method: "POST", body: JSON.stringify(data ?? {}), token });
+  },
+
+  async getWdttNode(token: string, id: string): Promise<WdttNodeDetail> {
+    return request(`/admin/wdtt/nodes/${id}`, { token });
+  },
+
+  async updateWdttNode(token: string, id: string, data: { name?: string; status?: string; apiUrl?: string; capacity?: number | null; dtlsPort?: number; wgPort?: number; tunPort?: number }): Promise<unknown> {
+    return request(`/admin/wdtt/nodes/${id}`, { method: "PATCH", body: JSON.stringify(data), token });
+  },
+
+  async deleteWdttNode(token: string, id: string): Promise<void> {
+    return request(`/admin/wdtt/nodes/${id}`, { method: "DELETE", token });
+  },
+
+  async testWdttNode(token: string, id: string): Promise<{ success: boolean; nodeStatus?: string; data?: unknown; error?: string }> {
+    return request(`/admin/wdtt/nodes/${id}/test`, { method: "POST", token });
+  },
+
+  async getWdttCategories(token: string): Promise<{ items: WdttCategoryItem[] }> {
+    return request("/admin/wdtt/categories", { token });
+  },
+  async createWdttCategory(token: string, data: { name: string; sortOrder?: number }): Promise<{ id: string; name: string; sortOrder: number }> {
+    return request("/admin/wdtt/categories", { method: "POST", body: JSON.stringify(data), token });
+  },
+  async updateWdttCategory(token: string, id: string, data: { name?: string; sortOrder?: number }): Promise<unknown> {
+    return request(`/admin/wdtt/categories/${id}`, { method: "PATCH", body: JSON.stringify(data), token });
+  },
+  async deleteWdttCategory(token: string, id: string): Promise<void> {
+    return request(`/admin/wdtt/categories/${id}`, { method: "DELETE", token });
+  },
+
+  async getWdttTariffs(token: string, categoryId?: string): Promise<{ items: WdttTariffItem[] }> {
+    const q = categoryId ? `?categoryId=${encodeURIComponent(categoryId)}` : "";
+    return request(`/admin/wdtt/tariffs${q}`, { token });
+  },
+  async createWdttTariff(
+    token: string,
+    data: { categoryId: string; name: string; proxyCount: number; durationDays: number; trafficLimitBytes?: string | number | null; price: number; currency: string; sortOrder?: number; enabled?: boolean; nodeIds?: string[] }
+  ): Promise<unknown> {
+    return request("/admin/wdtt/tariffs", { method: "POST", body: JSON.stringify(data), token });
+  },
+  async updateWdttTariff(
+    token: string,
+    id: string,
+    data: { categoryId?: string; name?: string; proxyCount?: number; durationDays?: number; trafficLimitBytes?: string | number | null; price?: number; currency?: string; sortOrder?: number; enabled?: boolean; nodeIds?: string[] }
+  ): Promise<unknown> {
+    return request(`/admin/wdtt/tariffs/${id}`, { method: "PATCH", body: JSON.stringify(data), token });
+  },
+  async deleteWdttTariff(token: string, id: string): Promise<void> {
+    return request(`/admin/wdtt/tariffs/${id}`, { method: "DELETE", token });
+  },
+
+  async getWdttSlotsAdmin(token: string): Promise<{ items: WdttSlotAdminItem[] }> {
+    return request("/admin/wdtt/slots", { token });
+  },
+
+  async updateWdttSlotAdmin(token: string, id: string, data: { status?: string; expiresAt?: string }): Promise<unknown> {
+    return request(`/admin/wdtt/slots/${id}`, { method: "PATCH", body: JSON.stringify(data), token });
+  },
+
+  async revokeWdttSlotAdmin(token: string, id: string): Promise<{ success: boolean; message: string }> {
+    return request(`/admin/wdtt/slots/${id}/revoke`, { method: "POST", token });
+  },
+
+  async deleteWdttSlotAdmin(token: string, id: string): Promise<void> {
+    return request(`/admin/wdtt/slots/${id}`, { method: "DELETE", token });
+  },
+
+  // ——— WDTT Client ———
+  async getWdttSlots(token: string): Promise<{ items: WdttClientSlotItem[] }> {
+    return request("/client/wdtt/slots", { token });
+  },
+  async getWdttClientTariffs(token: string): Promise<{ items: WdttClientCategoryItem[] }> {
+    return request("/client/wdtt/tariffs", { token });
+  },
+
   /** Скачивает CSV со списком прокси-слотов. */
   async downloadProxySlotsCsv(token: string): Promise<void> {
     const res = await fetch(`${API_BASE}/admin/proxy/slots/export?format=csv`, {
@@ -626,6 +728,11 @@ export const api = {
     if (params?.isBlocked === true) sp.set("isBlocked", "true");
     if (params?.isBlocked === false) sp.set("isBlocked", "false");
     return request(`/admin/clients?${sp.toString()}`, { token });
+  },
+
+  /** детальная карточка клиента (с реферером). */
+  async getClientDetail(token: string, id: string): Promise<ClientRecord> {
+    return request(`/admin/clients/${encodeURIComponent(id)}`, { token });
   },
 
   /** Лёгкий поллинг онлайн-статусов: принимает массив remnawaveUuid, возвращает { [uuid]: { onlineAt } } */
@@ -690,11 +797,59 @@ export const api = {
     return request(`/admin/clients/${clientId}/remna/reset-traffic`, { method: "POST", token });
   },
 
+  // ─── массовые операции над клиентом ─────
+  async clientBulkDisable(token: string, clientId: string): Promise<BulkOpReportFull> {
+    return request(`/admin/clients/${clientId}/disable`, { method: "POST", token });
+  },
+  async clientBulkEnable(token: string, clientId: string): Promise<BulkOpReportFull> {
+    return request(`/admin/clients/${clientId}/enable`, { method: "POST", token });
+  },
+  async clientBulkDisableAll(token: string, clientId: string): Promise<BulkOpReport> {
+    return request(`/admin/clients/${clientId}/disable-all`, { method: "POST", token });
+  },
+  async clientBulkEnableAll(token: string, clientId: string): Promise<BulkOpReport> {
+    return request(`/admin/clients/${clientId}/enable-all`, { method: "POST", token });
+  },
+  async clientBulkResetAllTraffic(token: string, clientId: string): Promise<BulkOpReport> {
+    return request(`/admin/clients/${clientId}/reset-all-traffic`, { method: "POST", token });
+  },
+  async clientBulkRevokeAll(token: string, clientId: string): Promise<BulkOpReport> {
+    return request(`/admin/clients/${clientId}/revoke-all-subscriptions`, { method: "POST", token });
+  },
+  async clientBulkSyncPush(token: string, clientId: string): Promise<BulkOpReport> {
+    return request(`/admin/clients/${clientId}/sync-push`, { method: "POST", token });
+  },
+  async clientBulkSyncPull(token: string, clientId: string): Promise<BulkOpReport & { foundExtraInRemna?: number }> {
+    return request(`/admin/clients/${clientId}/sync-pull`, { method: "POST", token });
+  },
+  async clientBulkSyncFull(token: string, clientId: string): Promise<{ pull: BulkOpReport & { foundExtraInRemna?: number }; push: BulkOpReport }> {
+    return request(`/admin/clients/${clientId}/sync`, { method: "POST", token });
+  },
+  async clientBulkWipe(token: string, clientId: string): Promise<BulkOpReport> {
+    return request(`/admin/clients/${clientId}/wipe-subscriptions`, { method: "POST", token });
+  },
+  async clientAudit(token: string, clientId: string): Promise<ClientAuditResult> {
+    return request(`/admin/clients/${clientId}/audit`, { method: "GET", token });
+  },
+
+  async getClientAllDevices(token: string, clientId: string): Promise<ClientAllDevicesResponse> {
+    return request(`/admin/clients/${clientId}/all-devices`, { method: "GET", token });
+  },
+  async getClientSubsOverview(token: string, clientId: string): Promise<ClientSubsOverviewResponse> {
+    return request(`/admin/clients/${clientId}/subscriptions-overview`, { method: "GET", token });
+  },
+
   async grantClientTariff(
     token: string,
     clientId: string,
     payload: { tariffId: string; tariffPriceOptionId?: string;
-      deviceCount?: number; note?: string; createPaymentRecord?: boolean }
+      deviceCount?: number; note?: string; createPaymentRecord?: boolean;
+      /** override лимита трафика в БАЙТАХ.
+       *  null/undefined → лимит тарифа. 0 → безлимит. Применяется только если тариф НЕ безлимит. */
+      trafficLimitBytes?: number | null;
+      /** override длительности в днях (1..3650). Если задано,
+       *  перебивает selectedOption / tariff.durationDays. Для компенсаций/бонусов. */
+      customDurationDays?: number }
   ): Promise<{ ok: boolean; paymentId: string | null; tariff: { id: string; name: string; durationDays: number }; message?: string }> {
     return request(`/admin/clients/${clientId}/grant-tariff`, {
       method: "POST",
@@ -731,6 +886,49 @@ export const api = {
     return request("/admin/remna/squads/internal", { token });
   },
 
+  /** убрать все доп. устройства с подписки клиента. */
+  async clientRemoveExtraDevices(token: string, subType: "root" | "secondary", subId: string): Promise<{ ok: boolean; extraDevicesRemoved: number; hwidKicked: number; newDeviceLimit: number }> {
+    return request(`/client/subscription/${subType}/${subId}/remove-extra-devices`, { method: "POST", token });
+  },
+
+  // ─── per-subscription Remna ──
+  async getClientSubscriptionsList(token: string, clientId: string): Promise<{ items: AdminClientSubscriptionItem[] }> {
+    return request(`/admin/clients/${clientId}/subscriptions`, { token });
+  },
+  async getSubscriptionRemna(token: string, subId: string): Promise<unknown> {
+    return request(`/admin/subscriptions/${subId}/remna`, { token });
+  },
+  async updateSubscriptionRemna(token: string, subId: string, data: UpdateClientRemnaPayload): Promise<unknown> {
+    return request(`/admin/subscriptions/${subId}/remna`, { method: "PATCH", body: JSON.stringify(data), token });
+  },
+  async subscriptionRemnaUnlink(token: string, subId: string): Promise<{ ok: boolean }> {
+    return request(`/admin/subscriptions/${subId}/remna/unlink`, { method: "POST", token });
+  },
+  async subscriptionRemnaRevokeSubscription(token: string, subId: string): Promise<unknown> {
+    return request(`/admin/subscriptions/${subId}/remna/revoke-subscription`, { method: "POST", token });
+  },
+  async subscriptionRemnaDisable(token: string, subId: string): Promise<unknown> {
+    return request(`/admin/subscriptions/${subId}/remna/disable`, { method: "POST", token });
+  },
+  async subscriptionRemnaEnable(token: string, subId: string): Promise<unknown> {
+    return request(`/admin/subscriptions/${subId}/remna/enable`, { method: "POST", token });
+  },
+  async subscriptionRemnaResetTraffic(token: string, subId: string): Promise<unknown> {
+    return request(`/admin/subscriptions/${subId}/remna/reset-traffic`, { method: "POST", token });
+  },
+  async subscriptionRemnaSquadAdd(token: string, subId: string, squadUuid: string): Promise<unknown> {
+    return request(`/admin/subscriptions/${subId}/remna/squads/add`, { method: "POST", body: JSON.stringify({ squadUuid }), token });
+  },
+  async subscriptionRemnaSquadRemove(token: string, subId: string, squadUuid: string): Promise<unknown> {
+    return request(`/admin/subscriptions/${subId}/remna/squads/remove`, { method: "POST", body: JSON.stringify({ squadUuid }), token });
+  },
+  async getSubscriptionRemnaDevices(token: string, subId: string): Promise<RemnaHwidDevicesResponse> {
+    return request(`/admin/subscriptions/${subId}/remna/devices`, { token });
+  },
+  async deleteSubscriptionRemnaDevice(token: string, subId: string, hwid: string): Promise<unknown> {
+    return request(`/admin/subscriptions/${subId}/remna/devices/delete`, { method: "POST", body: JSON.stringify({ hwid }), token });
+  },
+
   async getSettings(token: string): Promise<AdminSettings> {
     return request("/admin/settings", { token });
   },
@@ -757,6 +955,85 @@ export const api = {
     return request("/admin/referrals/network", { token });
   },
 
+  // ─── Referrals admin (16.05.2026) ──────────────────────
+  async lookupReferralClient(token: string, q: string): Promise<{
+    clients: Array<{
+      id: string;
+      telegramId: string | null;
+      telegramUsername: string | null;
+      email: string | null;
+      referralCode: string | null;
+      referrerId: string | null;
+      balance: number;
+      _count: { referrals: number; referralCredits: number };
+    }>;
+  }> {
+    return request(`/admin/referrals/lookup?q=${encodeURIComponent(q)}`, { token });
+  },
+
+  async getReferralDetail(token: string, clientId: string): Promise<{
+    client: {
+      id: string;
+      telegramId: string | null;
+      telegramUsername: string | null;
+      email: string | null;
+      referralCode: string | null;
+      referralPercent: number | null;
+      referrerId: string | null;
+      balance: number;
+      createdAt: string;
+    };
+    referrer: {
+      id: string;
+      telegramId: string | null;
+      telegramUsername: string | null;
+      email: string | null;
+      referralCode: string | null;
+    } | null;
+    referrals: Array<{
+      id: string;
+      telegramId: string | null;
+      telegramUsername: string | null;
+      email: string | null;
+      createdAt: string;
+      _count: { referrals: number };
+    }>;
+    earnings: {
+      totalAll: number;
+      totalCount: number;
+      byLevel: Record<number, { amount: number; count: number }>;
+    };
+    recentCredits: Array<{
+      id: string;
+      amount: number;
+      level: number;
+      createdAt: string;
+      paymentId: string;
+      payment: {
+        id: string;
+        amount: number;
+        status: string;
+        clientId: string;
+        client: { id: string; telegramId: string | null; telegramUsername: string | null } | null;
+      } | null;
+    }>;
+  }> {
+    return request(`/admin/referrals/${encodeURIComponent(clientId)}`, { token });
+  },
+
+  async setReferralReferrer(
+    token: string,
+    clientId: string,
+    referrerId: string | null,
+    lookupBy?: "id" | "tgid" | "username" | "referralCode",
+  ): Promise<{ ok: true; referrerId: string | null; previousReferrerId: string | null }> {
+    return request(`/admin/referrals/${encodeURIComponent(clientId)}/referrer`, {
+      token,
+      method: "PATCH",
+      body: JSON.stringify({ referrerId, lookupBy }),
+    });
+  },
+
   async getTrafficAbuseAnalytics(
     token: string,
     params?: { days?: number; threshold?: number; minBytes?: number }
@@ -772,8 +1049,28 @@ export const api = {
   async getApiKeys(token: string): Promise<ApiKeyListItem[]> {
     return request("/admin/api-keys", { token });
   },
-  async createApiKey(token: string, data: { name: string; description?: string }): Promise<ApiKeyCreated> {
+  async createApiKey(
+    token: string,
+    data: {
+      name: string;
+      description?: string;
+      expiresAt?: string | null;
+      allowedIps?: string[] | null;
+    }
+  ): Promise<ApiKeyCreated> {
     return request("/admin/api-keys", { method: "POST", body: JSON.stringify(data), token });
+  },
+  async updateApiKey(
+    token: string,
+    id: string,
+    data: {
+      name?: string;
+      description?: string | null;
+      expiresAt?: string | null;
+      allowedIps?: string[] | null;
+    }
+  ): Promise<ApiKeyListItem> {
+    return request(`/admin/api-keys/${id}`, { method: "PATCH", body: JSON.stringify(data), token });
   },
   async toggleApiKey(token: string, id: string, isActive: boolean): Promise<void> {
     return request(`/admin/api-keys/${id}/toggle`, { method: "PATCH", body: JSON.stringify({ isActive }), token });
@@ -781,56 +1078,8 @@ export const api = {
   async deleteApiKey(token: string, id: string): Promise<void> {
     return request(`/admin/api-keys/${id}`, { method: "DELETE", token });
   },
-
-  async getAdminBots(token: string): Promise<{ items: AdminBotListItem[] }> {
-    return request("/admin/bots", { token });
-  },
-  async getAdminBot(token: string, id: string): Promise<AdminBotListItem> {
-    return request(`/admin/bots/${id}`, { token });
-  },
-  async createAdminBot(
-    token: string,
-    data: {
-      token: string;
-      username?: string;
-      markupPercent?: number;
-      ownerTelegramId?: string;
-      ownerName?: string;
-      notes?: string;
-    },
-  ): Promise<AdminBotDto> {
-    return request("/admin/bots", { method: "POST", body: JSON.stringify(data), token });
-  },
-  async updateAdminBot(
-    token: string,
-    id: string,
-    data: Partial<{
-      token: string;
-      username: string | null;
-      markupPercent: number;
-      ownerTelegramId: string | null;
-      ownerName: string | null;
-      isActive: boolean;
-      notes: string | null;
-    }>,
-  ): Promise<AdminBotDto> {
-    return request(`/admin/bots/${id}`, { method: "PATCH", body: JSON.stringify(data), token });
-  },
-  async deleteAdminBot(token: string, id: string): Promise<{ ok: boolean }> {
-    return request(`/admin/bots/${id}`, { method: "DELETE", token });
-  },
-  async getAdminBotPayouts(token: string, botId: string): Promise<{ items: BotPayoutDto[] }> {
-    return request(`/admin/bots/${botId}/payouts`, { token });
-  },
-  async createAdminBotPayout(
-    token: string,
-    botId: string,
-    data: { amount: number; currency?: string; comment?: string; paidAt?: string },
-  ): Promise<BotPayoutDto> {
-    return request(`/admin/bots/${botId}/payouts`, { method: "POST", body: JSON.stringify(data), token });
-  },
-  async deleteAdminBotPayout(token: string, botId: string, payoutId: string): Promise<{ ok: boolean }> {
-    return request(`/admin/bots/${botId}/payouts/${payoutId}`, { method: "DELETE", token });
+  async getApiKeyUsage(token: string, id: string, limit = 100): Promise<ApiKeyUsageItem[]> {
+    return request(`/admin/api-keys/${id}/usage?limit=${limit}`, { token });
   },
 
   async getAdmins(token: string): Promise<AdminListItem[]> {
@@ -872,6 +1121,19 @@ export const api = {
   async deleteSecondarySubscription(token: string, id: string): Promise<{ success: boolean }> {
     return request(`/admin/secondary-subscriptions/${id}`, { method: "DELETE", token });
   },
+  /** редактирование доп. подписки админом —
+   *  addDays (+/− дней к текущему expireAt), trafficLimitBytes (0 = безлимит, null = не менять). */
+  async editSecondarySubscription(
+    token: string,
+    id: string,
+    body: { addDays?: number; trafficLimitBytes?: number | null }
+  ): Promise<{ success: boolean; expireAt: string | null; trafficLimitBytes: number | null }> {
+    return request(`/admin/secondary-subscriptions/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+      token,
+    });
+  },
   async deleteSecondarySubscriptionsBulk(token: string, ids: string[]): Promise<{ success: boolean; deleted: number }> {
     return request("/admin/secondary-subscriptions/bulk", {
       method: "DELETE",
@@ -888,8 +1150,8 @@ export const api = {
   // ────── Admin Gift Code Creation ──────
   async adminCreateGiftCode(
     token: string,
-    data: { clientId: string; tariffId: string; giftMessage?: string },
-  ): Promise<{ code: string; expiresAt: string; secondarySubscriptionId: string }> {
+    data: { clientId: string; tariffId: string; giftMessage?: string; durationDays?: number; trafficGb?: number; notify?: boolean },
+  ): Promise<{ code: string; expiresAt: string; subscriptionId: string; giftUrl?: string | null }> {
     return request("/admin/gift-codes/create", {
       method: "POST",
       body: JSON.stringify(data),
@@ -934,9 +1196,13 @@ export const api = {
     return request(`/admin/contests/${id}`, { method: "DELETE", token });
   },
 
-  /** Базовый конфиг страницы подписки для визуального редактора (subpage-*.json) */
-  async getDefaultSubscriptionPageConfig(token: string): Promise<SubscriptionPageConfig | null> {
-    return request("/admin/default-subscription-page-config", { token });
+  /**
+   * Базовый конфиг страницы подписки для визуального редактора (subpage-*.json).
+   * @param fresh — true: бэкенд игнорирует in-memory кэш и читает файл заново
+   *                (используется при кнопке «Перезагрузить с сервера»).
+   */
+  async getDefaultSubscriptionPageConfig(token: string, fresh = false): Promise<SubscriptionPageConfig | null> {
+    return request(`/admin/default-subscription-page-config${fresh ? "?fresh=1" : ""}`, { token });
   },
 
   async updateSettings(token: string, data: UpdateSettingsPayload): Promise<AdminSettings> {
@@ -1015,7 +1281,7 @@ export const api = {
    */
   async broadcast(
     token: string,
-    body: { channel: "telegram" | "email" | "both"; subject?: string; message: string; buttonText?: string; buttonUrl?: string },
+    body: { channel: "telegram" | "email" | "both"; subject?: string; message: string; buttonText?: string; buttonUrl?: string; targetGroup?: string },
     attachment?: File | null
   ): Promise<{ jobId: string }> {
     const form = new FormData();
@@ -1024,6 +1290,7 @@ export const api = {
     if (body.subject != null && body.subject !== "") form.append("subject", body.subject);
     if (body.buttonText?.trim()) form.append("buttonText", body.buttonText.trim());
     if (body.buttonUrl?.trim()) form.append("buttonUrl", body.buttonUrl.trim());
+    if (body.targetGroup) form.append("targetGroup", body.targetGroup);
     if (attachment) form.append("attachment", attachment, attachment.name);
     const headers = new Headers();
     headers.set("Authorization", `Bearer ${token}`);
@@ -1049,14 +1316,52 @@ export const api = {
   /** Проверить статус фоновой рассылки. */
   async broadcastStatus(token: string, jobId: string): Promise<{
     id: string;
-    status: "running" | "completed" | "error";
+    status: "running" | "completed" | "error" | "cancelled";
     progress: BroadcastProgress;
-    result: BroadcastResult | null;
+    result: (BroadcastResult & { cancelled?: boolean }) | null;
     error: string | null;
     startedAt: string;
     finishedAt: string | null;
+    /** true если админ нажал «Отмена», но задача ещё не остановилась. */
+    cancelRequested?: boolean;
   }> {
     return request(`/admin/broadcast/status/${encodeURIComponent(jobId)}`, { token });
+  },
+
+  /** отмена активной рассылки. Остановится между сообщениями. */
+  async cancelBroadcast(token: string, jobId: string): Promise<{ ok: true }> {
+    return request(`/admin/broadcast/cancel/${encodeURIComponent(jobId)}`, { token, method: "POST" });
+  },
+
+  /** скачать CSV получателей рассылки. */
+  async downloadBroadcastRecipientsCsv(token: string, jobId: string): Promise<void> {
+    const res = await fetch(`/api/admin/broadcast/${encodeURIComponent(jobId)}/recipients?format=csv`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `broadcast-${jobId}-recipients.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  },
+
+  /** возобновить ранее прерванную рассылку (без дублей). */
+  async resumeBroadcast(token: string, jobId: string, file?: File): Promise<{ jobId: string; resumedFrom: string }> {
+    const fd = new FormData();
+    if (file) fd.append("attachment", file);
+    return request(`/admin/broadcast/${encodeURIComponent(jobId)}/resume`, {
+      token,
+      method: "POST",
+      body: fd,
+    });
   },
 
   /** История рассылок (пагинация). */
@@ -1335,6 +1640,46 @@ export const api = {
     return request(`/admin/tariffs/${id}`, { method: "DELETE", token });
   },
 
+  // ─── Trial-пресеты ───
+  async getTrials(token: string): Promise<{ items: TrialRecord[] }> {
+    return request("/admin/trials", { token });
+  },
+  async createTrial(token: string, data: CreateTrialPayload): Promise<TrialRecord> {
+    return request("/admin/trials", { method: "POST", body: JSON.stringify(data), token });
+  },
+  async updateTrial(token: string, id: string, data: UpdateTrialPayload): Promise<TrialRecord> {
+    return request(`/admin/trials/${id}`, { method: "PATCH", body: JSON.stringify(data), token });
+  },
+  async deleteTrial(token: string, id: string): Promise<{ success: boolean }> {
+    return request(`/admin/trials/${id}`, { method: "DELETE", token });
+  },
+
+  // ─── Конструктор уведомлений автосписания ───
+  async getAutoRenewNotifications(token: string): Promise<{ items: AutoRenewNotificationRecord[] }> {
+    return request("/admin/auto-renew-notifications", { token });
+  },
+  async createAutoRenewNotification(token: string, data: CreateAutoRenewNotificationPayload): Promise<{ id: string }> {
+    return request("/admin/auto-renew-notifications", { method: "POST", body: JSON.stringify(data), token });
+  },
+  async updateAutoRenewNotification(token: string, id: string, data: Partial<CreateAutoRenewNotificationPayload>): Promise<{ ok: boolean }> {
+    return request(`/admin/auto-renew-notifications/${id}`, { method: "PATCH", body: JSON.stringify(data), token });
+  },
+  async deleteAutoRenewNotification(token: string, id: string): Promise<{ ok: boolean }> {
+    return request(`/admin/auto-renew-notifications/${id}`, { method: "DELETE", token });
+  },
+
+  // ─── Заявки на вывод USDT TRC20 ───
+  async getWithdrawals(token: string, status?: "PENDING" | "APPROVED" | "REJECTED"): Promise<{ items: WithdrawalRequestRecord[] }> {
+    const qs = status ? `?status=${status}` : "";
+    return request(`/admin/withdrawals${qs}`, { token });
+  },
+  async approveWithdrawal(token: string, id: string, comment?: string): Promise<{ message: string }> {
+    return request(`/admin/withdrawals/${id}/approve`, { method: "POST", body: JSON.stringify({ comment: comment ?? null }), token });
+  },
+  async rejectWithdrawal(token: string, id: string, comment?: string): Promise<{ message: string }> {
+    return request(`/admin/withdrawals/${id}/reject`, { method: "POST", body: JSON.stringify({ comment: comment ?? null }), token });
+  },
+
   // ——— Кабинет клиента (клиентский API) ———
   async clientLogin(email: string, password: string): Promise<ClientAuthResponse | ClientAuthRequires2FA> {
     return request("/client/auth/login", {
@@ -1428,6 +1773,12 @@ export const api = {
       subscription: unknown;
       tariffDisplayName: string;
       remnawaveUuid: string | null;
+      tariffId?: string | null;
+      trialId?: string | null;
+      autoRenewEnabled?: boolean;
+      tariffMenuEmoji?: string | null;
+      extraDevices?: number;
+      extraDevicesMonthlyPrice?: number;
     }>;
   }> {
     return request("/client/subscription/all", { token });
@@ -1442,9 +1793,19 @@ export const api = {
     return request("/client/devices", { token });
   },
 
-  /** Удалить устройство по HWID */
-  async deleteClientDevice(token: string, hwid: string): Promise<{ ok: boolean; message?: string }> {
-    return request("/client/devices/delete", { method: "POST", body: JSON.stringify({ hwid }), token });
+  // устройства ВСЕХ подписок текущего клиента с группировкой.
+  // На бэке `/devices/all` уже исключает дубль root vs Subscription с тем же uuid.
+  async getMyAllDevices(token: string): Promise<{ total: number; items: ClientDeviceItem[] }> {
+    return request("/client/devices/all", { token });
+  },
+
+  /** Удалить устройство по HWID (опционально с указанием подписки) */
+  async deleteClientDevice(token: string, hwid: string, subscription?: { type: "root" | "secondary"; id: string }): Promise<{ ok: boolean; message?: string }> {
+    return request("/client/devices/delete", {
+      method: "POST",
+      body: JSON.stringify(subscription ? { hwid, subscriptionType: subscription.type, subscriptionId: subscription.id } : { hwid }),
+      token,
+    });
   },
 
   /** Запуск настройки 2FA: возвращает secret и otpauthUrl для QR */
@@ -1473,8 +1834,15 @@ export const api = {
       proxyTariffId?: string;
       singboxTariffId?: string;
       promoCode?: string;
-      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string };
+      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string; targetSubscriptionId?: string };
       customBuild?: { days: number; devices: number; trafficGb?: number };
+      // мульти-подписки как в боте.
+      // extendsSecondarySubId — продлить КОНКРЕТНУЮ подписку; asAdditional — купить НОВУЮ доп.;
+      // asGift — подарочная; removeExtrasOnActivate — сбросить доп. устройства при активации.
+      extendsSecondarySubId?: string;
+      asAdditional?: boolean;
+      asGift?: boolean;
+      removeExtrasOnActivate?: boolean;
     }
   ): Promise<{ paymentUrl: string; orderId: string; paymentId: string; discountApplied?: boolean; finalAmount?: number }> {
     return request("/client/payments/platega", { method: "POST", body: JSON.stringify(data), token });
@@ -1529,15 +1897,18 @@ export const api = {
   async clientPayByBalance(
     token: string,
     data: { tariffId?: string; tariffPriceOptionId?: string;
-      deviceCount?: number; proxyTariffId?: string; singboxTariffId?: string; promoCode?: string }
+      deviceCount?: number; proxyTariffId?: string; singboxTariffId?: string; promoCode?: string;
+      // мульти-подписки как в боте.
+      extendsSecondarySubId?: string; asAdditional?: boolean; asGift?: boolean; removeExtrasOnActivate?: boolean }
   ): Promise<{ message: string; paymentId: string; newBalance: number }> {
     return request("/client/payments/balance", { method: "POST", body: JSON.stringify(data), token });
   },
 
-  /** Оплата опции (доп. трафик/устройства/сервер) с баланса */
+  /** Оплата опции (доп. трафик/устройства/сервер) с баланса.
+   *  targetSubscriptionId — к какой подписке применить (на верхнем уровне body, как в schema). */
   async clientPayOptionByBalance(
     token: string,
-    data: { extraOption: { kind: "traffic" | "devices" | "servers"; productId: string } }
+    data: { extraOption: { kind: "traffic" | "devices" | "servers"; productId: string }; targetSubscriptionId?: string }
   ): Promise<{ message: string; paymentId: string; newBalance: number }> {
     return request("/client/payments/balance/option", { method: "POST", body: JSON.stringify(data), token });
   },
@@ -1565,8 +1936,15 @@ export const api = {
       proxyTariffId?: string;
       singboxTariffId?: string;
       promoCode?: string;
-      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string };
+      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string; targetSubscriptionId?: string };
       customBuild?: { days: number; devices: number; trafficGb?: number };
+      // мульти-подписки как в боте.
+      // extendsSecondarySubId — продлить КОНКРЕТНУЮ подписку; asAdditional — купить НОВУЮ доп.;
+      // asGift — подарочная; removeExtrasOnActivate — сбросить доп. устройства при активации.
+      extendsSecondarySubId?: string;
+      asAdditional?: boolean;
+      asGift?: boolean;
+      removeExtrasOnActivate?: boolean;
     }
   ): Promise<{ paymentId: string; paymentUrl: string; form: { receiver: string; sum: number; label: string; paymentType: string; successURL: string }; successURL: string }> {
     return request("/client/yoomoney/create-form-payment", { method: "POST", body: JSON.stringify(data), token });
@@ -1596,8 +1974,15 @@ export const api = {
       proxyTariffId?: string;
       singboxTariffId?: string;
       promoCode?: string;
-      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string };
+      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string; targetSubscriptionId?: string };
       customBuild?: { days: number; devices: number; trafficGb?: number };
+      // мульти-подписки как в боте.
+      // extendsSecondarySubId — продлить КОНКРЕТНУЮ подписку; asAdditional — купить НОВУЮ доп.;
+      // asGift — подарочная; removeExtrasOnActivate — сбросить доп. устройства при активации.
+      extendsSecondarySubId?: string;
+      asAdditional?: boolean;
+      asGift?: boolean;
+      removeExtrasOnActivate?: boolean;
     }
   ): Promise<{ paymentId: string; confirmationUrl: string; yookassaPaymentId: string }> {
     return request("/client/yookassa/create-payment", { method: "POST", body: JSON.stringify(data), token });
@@ -1620,8 +2005,15 @@ export const api = {
       proxyTariffId?: string;
       singboxTariffId?: string;
       promoCode?: string;
-      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string };
+      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string; targetSubscriptionId?: string };
       customBuild?: { days: number; devices: number; trafficGb?: number };
+      // мульти-подписки как в боте.
+      // extendsSecondarySubId — продлить КОНКРЕТНУЮ подписку; asAdditional — купить НОВУЮ доп.;
+      // asGift — подарочная; removeExtrasOnActivate — сбросить доп. устройства при активации.
+      extendsSecondarySubId?: string;
+      asAdditional?: boolean;
+      asGift?: boolean;
+      removeExtrasOnActivate?: boolean;
     }
   ): Promise<{ paymentId: string; payUrl: string; miniAppPayUrl?: string; webAppPayUrl?: string }> {
     return request("/client/cryptopay/create-payment", { method: "POST", body: JSON.stringify(data), token });
@@ -1639,8 +2031,15 @@ export const api = {
       proxyTariffId?: string;
       singboxTariffId?: string;
       promoCode?: string;
-      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string };
+      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string; targetSubscriptionId?: string };
       customBuild?: { days: number; devices: number; trafficGb?: number };
+      // мульти-подписки как в боте.
+      // extendsSecondarySubId — продлить КОНКРЕТНУЮ подписку; asAdditional — купить НОВУЮ доп.;
+      // asGift — подарочная; removeExtrasOnActivate — сбросить доп. устройства при активации.
+      extendsSecondarySubId?: string;
+      asAdditional?: boolean;
+      asGift?: boolean;
+      removeExtrasOnActivate?: boolean;
     }
   ): Promise<{ paymentId: string; payUrl: string }> {
     return request("/client/heleket/create-payment", { method: "POST", body: JSON.stringify(data), token });
@@ -1658,8 +2057,15 @@ export const api = {
       proxyTariffId?: string;
       singboxTariffId?: string;
       promoCode?: string;
-      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string };
+      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string; targetSubscriptionId?: string };
       customBuild?: { days: number; devices: number; trafficGb?: number };
+      // мульти-подписки как в боте.
+      // extendsSecondarySubId — продлить КОНКРЕТНУЮ подписку; asAdditional — купить НОВУЮ доп.;
+      // asGift — подарочная; removeExtrasOnActivate — сбросить доп. устройства при активации.
+      extendsSecondarySubId?: string;
+      asAdditional?: boolean;
+      asGift?: boolean;
+      removeExtrasOnActivate?: boolean;
     }
   ): Promise<{ paymentId: string; payUrl: string }> {
     return request("/client/lava/create-payment", { method: "POST", body: JSON.stringify(data), token });
@@ -1679,8 +2085,15 @@ export const api = {
       promoCode?: string;
       email?: string;
       offerId?: string;
-      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string };
+      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string; targetSubscriptionId?: string };
       customBuild?: { days: number; devices: number; trafficGb?: number };
+      // мульти-подписки как в боте.
+      // extendsSecondarySubId — продлить КОНКРЕТНУЮ подписку; asAdditional — купить НОВУЮ доп.;
+      // asGift — подарочная; removeExtrasOnActivate — сбросить доп. устройства при активации.
+      extendsSecondarySubId?: string;
+      asAdditional?: boolean;
+      asGift?: boolean;
+      removeExtrasOnActivate?: boolean;
     }
   ): Promise<{ paymentId: string; payUrl: string }> {
     return request("/client/lavatop/create-payment", { method: "POST", body: JSON.stringify(data), token });
@@ -1698,8 +2111,15 @@ export const api = {
       proxyTariffId?: string;
       singboxTariffId?: string;
       promoCode?: string;
-      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string };
+      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string; targetSubscriptionId?: string };
       customBuild?: { days: number; devices: number; trafficGb?: number };
+      // мульти-подписки как в боте.
+      // extendsSecondarySubId — продлить КОНКРЕТНУЮ подписку; asAdditional — купить НОВУЮ доп.;
+      // asGift — подарочная; removeExtrasOnActivate — сбросить доп. устройства при активации.
+      extendsSecondarySubId?: string;
+      asAdditional?: boolean;
+      asGift?: boolean;
+      removeExtrasOnActivate?: boolean;
     }
   ): Promise<{ paymentId: string; payUrl: string }> {
     return request("/client/overpay/create-payment", { method: "POST", body: JSON.stringify(data), token });
@@ -1707,6 +2127,14 @@ export const api = {
 
   async clientActivateTrial(token: string): Promise<{ message: string; client: ClientProfile | null }> {
     return request("/client/trial", { method: "POST", token });
+  },
+
+  // ─── Новая мульти-триал система ───
+  async getClientAvailableTrials(token: string): Promise<{ items: ClientTrialOption[]; hasAnyEnabled: boolean }> {
+    return request("/client/trials/available", { token });
+  },
+  async clientActivateTrialById(token: string, trialId: string): Promise<ClientTrialActivateResponse> {
+    return request(`/client/trials/${trialId}/activate`, { method: "POST", token });
   },
 
   async clientUpdateProfile(token: string, data: { preferredLang?: string; preferredCurrency?: string }): Promise<ClientProfile> {
@@ -1744,6 +2172,12 @@ export const api = {
     return request("/client/link-email-request", { method: "POST", body: JSON.stringify(data), token });
   },
 
+  // мгновенная привязка email без верификации.
+  // Доступно когда SMTP не настроен или skipEmailVerification=true.
+  async clientLinkEmailDirect(token: string, data: { email: string }): Promise<{ message: string; client: ClientProfile | null }> {
+    return request("/client/link-email-direct", { method: "POST", body: JSON.stringify(data), token });
+  },
+
   /** Подтвердить привязку email по токену из письма (без Bearer; возвращает token и client) */
   async clientVerifyLinkEmail(verificationToken: string): Promise<ClientAuthResponse | ClientAuthRequires2FA> {
     return request("/client/auth/verify-link-email", { method: "POST", body: JSON.stringify({ token: verificationToken }) });
@@ -1759,7 +2193,7 @@ export const api = {
   async giftBuySubscription(
     token: string,
     payload: { tariffId: string; tariffPriceOptionId?: string; extraDevices?: number },
-  ): Promise<{ message: string; secondarySubscriptionId: string; subscriptionIndex: number }> {
+  ): Promise<{ message: string; subscriptionId: string; subscriptionIndex: number }> {
     return request("/client/gift/buy", { token, method: "POST", body: JSON.stringify(payload) });
   },
 
@@ -1784,12 +2218,12 @@ export const api = {
   },
 
   /** Create gift code for a subscription */
-  async giftCreateCode(token: string, secondarySubscriptionId: string, giftMessage?: string): Promise<{ message: string; code: string; expiresAt: string }> {
-    return request("/client/gift/create-code", { token, method: "POST", body: JSON.stringify({ secondarySubscriptionId, giftMessage }) });
+  async giftCreateCode(token: string, subscriptionId: string, giftMessage?: string): Promise<{ message: string; code: string; expiresAt: string }> {
+    return request("/client/gift/create-code", { token, method: "POST", body: JSON.stringify({ subscriptionId, giftMessage }) });
   },
 
   /** Redeem a gift code */
-  async giftRedeemCode(token: string, code: string): Promise<{ message: string; secondarySubscriptionId: string; subscriptionIndex: number }> {
+  async giftRedeemCode(token: string, code: string): Promise<{ message: string; subscriptionId: string; subscriptionIndex: number }> {
     return request("/client/gift/redeem", { token, method: "POST", body: JSON.stringify({ code }) });
   },
 
@@ -1799,12 +2233,12 @@ export const api = {
   },
 
   /** List gift codes created by the client */
-  async giftListCodes(token: string): Promise<{ codes: Array<{ id: string; code: string; status: string; expiresAt: string; createdAt: string; redeemedAt: string | null; giftMessage: string | null; secondarySubscriptionId: string }> }> {
+  async giftListCodes(token: string): Promise<{ codes: Array<{ id: string; code: string; status: string; expiresAt: string; createdAt: string; redeemedAt: string | null; giftMessage: string | null; subscriptionId: string }> }> {
     return request("/client/gift/codes", { token });
   },
 
   /** Get gift history with pagination */
-  async giftGetHistory(token: string, page: number = 1, limit: number = 20): Promise<{ items: Array<{ id: string; eventType: string; metadata: unknown; createdAt: string; secondarySubscriptionId: string | null }>; total: number; page: number; limit: number }> {
+  async giftGetHistory(token: string, page: number = 1, limit: number = 20): Promise<{ items: Array<{ id: string; eventType: string; metadata: unknown; createdAt: string; subscriptionId: string | null }>; total: number; page: number; limit: number }> {
     return request(`/client/gift/history?page=${page}&limit=${limit}`, { token });
   },
 
@@ -2300,6 +2734,8 @@ export interface BroadcastResult {
   failedTelegram: number;
   failedEmail: number;
   errors: string[];
+  /** true если рассылку отменил админ. */
+  cancelled?: boolean;
 }
 
 export interface BroadcastProgress {
@@ -2316,7 +2752,8 @@ export interface BroadcastHistoryItem {
   id: string;
   startedAt: string;
   finishedAt: string | null;
-  status: "running" | "completed" | "error";
+  // добавили "cancelled" + "pending" (worker queue).
+  status: "running" | "completed" | "error" | "cancelled" | "pending";
   channel: "telegram" | "email" | "both";
   subject: string;
   message: string;
@@ -2342,7 +2779,11 @@ export type AutoBroadcastTriggerType =
   | "trial_used_never_paid"
   | "no_traffic"
   | "subscription_expired"
-  | "subscription_ending_soon";
+  | "subscription_ending_soon"
+  | "subscription_ending_minutes"
+  // пассивные пользователи без действий.
+  | "inactive_no_subscription"
+  | "inactive_with_subscription";
 
 export interface AutoBroadcastRule {
   id: string;
@@ -2354,7 +2795,21 @@ export interface AutoBroadcastRule {
   message: string;
   buttonText: string | null;
   buttonUrl: string | null;
+  /** T-promo (13.05.2026) — вторая кнопка. */
+  button2Text: string | null;
+  button2Url: string | null;
   enabled: boolean;
+  /** T-promo (13.05.2026) — индивидуальная скидка / промокод для рассылки. */
+  promoCodeId: string | null;
+  personalDiscountPercent: number | null;
+  /** T-one-time-discount (14.05.2026) — если true, скидка сгорает после первой покупки клиента. */
+  personalDiscountIsOneTime?: boolean;
+  maxRecipients: number | null;
+  /** T-cron-per-rule (13.05.2026) — индивидуальный cron, null = дефолт по триггеру. */
+  cronExpression?: string | null;
+  /** T-event-driven (14.05.2026) — если true, правило срабатывает по событию (не по крону). */
+  eventDriven?: boolean;
+  lastRunAt?: string | null;
   sentCount?: number;
 }
 
@@ -2367,7 +2822,18 @@ export interface AutoBroadcastRulePayload {
   message: string;
   buttonText?: string | null;
   buttonUrl?: string | null;
+  button2Text?: string | null;
+  button2Url?: string | null;
   enabled?: boolean;
+  promoCodeId?: string | null;
+  personalDiscountPercent?: number | null;
+  /** T-one-time-discount (14.05.2026) — выставлять выданную скидку как одноразовую. */
+  personalDiscountIsOneTime?: boolean;
+  maxRecipients?: number | null;
+  /** T-cron-per-rule — node-cron expression. null/пусто = дефолт по триггеру. */
+  cronExpression?: string | null;
+  /** T-event-driven (14.05.2026) — если true, правило не идёт по крону. */
+  eventDriven?: boolean;
 }
 
 export interface RunRuleResult {
@@ -2408,6 +2874,8 @@ export type UpdateSettingsPayload = {
   telegramBotUsername?: string | null;
   botAdminTelegramIds?: string[] | null;
   notificationTelegramGroupId?: string | null;
+  notificationManagersGroupId?: string | null;
+  notificationManagersTopicTickets?: string | null;
   notificationTopicNewClients?: string | null;
   notificationTopicPayments?: string | null;
   notificationTopicTickets?: string | null;
@@ -2466,6 +2934,23 @@ export type UpdateSettingsPayload = {
   agreementLink?: string | null;
   offerLink?: string | null;
   instructionsLink?: string | null;
+  /** ссылка инструкции по рефералке. */
+  referralInstructionsUrl?: string | null;
+  // T11+T13+T14 (11.05.2026): кастомизация
+  refundLink?: string | null;
+  supportHoursFrom?: string | null;
+  supportHoursTo?: string | null;
+  tgProxyText?: string | null;
+  tgProxyUrlPrimary?: string | null;
+  tgProxyUrlBackup?: string | null;
+  // JSON-строка для PATCH (бэк zod schema = string).
+  // Сериализуем массив в settings.tsx перед отправкой.
+  tgProxyServers?: string | null;
+  reissueWarningText?: string | null;
+  installSecondDeviceText?: string | null;
+  helpIntroText?: string | null;
+  /** текст шапки «📱 Мои устройства» в боте. */
+  botDevicesText?: string | null;
   ticketsEnabled?: boolean;
   themeAccent?: string;
   forceSubscribeEnabled?: boolean;
@@ -2486,6 +2971,11 @@ export type UpdateSettingsPayload = {
   autoBroadcastCron?: string | null;
   adminFrontNotificationsEnabled?: boolean;
   skipEmailVerification?: boolean;
+  signupProtectionEnabled?: boolean;
+  emailDomainBlocklist?: string;
+  emailPatternBlocklist?: string;
+  signupMaxPerIpPerHour?: number;
+  happCryptEnabled?: boolean;
   useRemnaSubscriptionPage?: boolean;
   aiChatEnabled?: boolean;
   customBuildEnabled?: boolean;
@@ -2650,6 +3140,8 @@ export interface ClientRecord {
   referralPercent: number | null;
   /** Персональная скидка клиента, % (0–100). null = без скидки. */
   personalDiscountPercent: number | null;
+  /** если true, скидка сгорит после первой продуктовой покупки. */
+  personalDiscountIsOneTime?: boolean;
   createdAt: string;
   /** Количество приглашённых рефералов (приходит с бэкенда) */
   _count?: { referrals: number };
@@ -2657,6 +3149,9 @@ export interface ClientRecord {
   activeNode?: string | null;
   /** Время последнего подключения к VPN (ISO timestamp) */
   onlineAt?: string | null;
+  /** реферер клиента (кто привёл). Только в детальной карточке. */
+  referrerId?: string | null;
+  referrer?: { id: string; email: string | null; telegramUsername: string | null; telegramId: string | null; referralCode: string | null } | null;
 }
 
 export type UpdateClientPayload = {
@@ -2668,6 +3163,8 @@ export type UpdateClientPayload = {
   blockReason?: string | null;
   referralPercent?: number | null;
   personalDiscountPercent?: number | null;
+  /** T-one-time-discount (14.05.2026). */
+  personalDiscountIsOneTime?: boolean;
 };
 
 export type UpdateClientRemnaPayload = {
@@ -2678,6 +3175,24 @@ export type UpdateClientRemnaPayload = {
   activeInternalSquads?: string[];
   status?: "ACTIVE" | "DISABLED";
 };
+
+/** запись одной подписки клиента для UI. */
+export interface AdminClientSubscriptionItem {
+  id: string;
+  subscriptionIndex: number;
+  isPrimary: boolean;
+  remnawaveUuid: string | null;
+  tariffId: string | null;
+  tariffName: string | null;
+  giftStatus: string | null;
+  // для бейджа «Подарочная»/«Получена в подарок» в инлайн-блоке.
+  purchasedAsGift?: boolean;
+  ownerId?: string;
+  giftedToClientId?: string | null;
+  autoRenewEnabled: boolean;
+  expireAt: string | null;
+  createdAt: string;
+}
 
 export interface RemnaUserFull {
   uuid: string;
@@ -2728,6 +3243,51 @@ export interface RemnaHwidDevicesResponse {
   };
 }
 
+// устройства со всех подписок клиента.
+export interface ClientDevicesGroup {
+  subscriptionId: string;
+  subscriptionIndex: number;
+  tariffName: string | null;
+  tariffEmoji: string | null;
+  remnawaveUuid: string | null;
+  devices: RemnaHwidDevice[];
+  deviceLimit: number | null;
+}
+export interface ClientAllDevicesResponse {
+  groups: ClientDevicesGroup[];
+  total: number;
+}
+
+// T-tabs-rework: сводка по подпискам клиента + Remna-данные.
+export interface ClientSubOverviewItem {
+  subscriptionId: string;
+  subscriptionIndex: number;
+  tariffName: string | null;
+  tariffEmoji: string | null;
+  isTrial: boolean;
+  trialName: string | null;
+  purchasedAsGift: boolean;
+  giftStatus: string | null;
+  autoRenewEnabled: boolean;
+  customPrice: number | null;
+  remnawaveUuid: string | null;
+  remna: {
+    username: string | null;
+    status: string | null;
+    expireAt: string | null;
+    trafficLimitBytes: number | null;
+    trafficUsedBytes: number | null;
+    hwidDeviceLimit: number | null;
+    deviceCount: number;
+    activeSquadsCount: number;
+    subscriptionUrl: string | null;
+    onlineAt: string | null;
+  } | null;
+}
+export interface ClientSubsOverviewResponse {
+  items: ClientSubOverviewItem[];
+}
+
 export interface RemnaUserUsageResponse {
   response: {
     categories: string[];
@@ -2775,6 +3335,8 @@ export interface AdminSettings {
   botAdminTelegramIds?: string[] | null;
   /** Группа для уведомлений: Chat ID (например -1001234567890). Бот должен быть в группе. */
   notificationTelegramGroupId?: string | null;
+  notificationManagersGroupId?: string | null;
+  notificationManagersTopicTickets?: string | null;
   notificationTopicNewClients?: string | null;
   notificationTopicPayments?: string | null;
   notificationTopicTickets?: string | null;
@@ -2842,6 +3404,23 @@ export interface AdminSettings {
   agreementLink?: string | null;
   offerLink?: string | null;
   instructionsLink?: string | null;
+  /** ссылка инструкции по рефералке. */
+  referralInstructionsUrl?: string | null;
+  // T11+T13+T14 (11.05.2026): кастомизация
+  refundLink?: string | null;
+  supportHoursFrom?: string | null;
+  supportHoursTo?: string | null;
+  tgProxyText?: string | null;
+  tgProxyUrlPrimary?: string | null;
+  tgProxyUrlBackup?: string | null;
+  // массив прокси {flag,name,url}[]. Бэк уже отдаёт
+  // распарсенный array (см. client.service.ts → tgProxyServers нормализация).
+  tgProxyServers?: { flag: string; name: string; url: string }[] | null;
+  reissueWarningText?: string | null;
+  installSecondDeviceText?: string | null;
+  helpIntroText?: string | null;
+  /** текст шапки «📱 Мои устройства» в боте. */
+  botDevicesText?: string | null;
   /** Тикет-система включена (кабинет + мини-апп) */
   ticketsEnabled?: boolean;
   /** Глобальная цветовая тема */
@@ -2874,6 +3453,16 @@ export interface AdminSettings {
   adminFrontNotificationsEnabled?: boolean;
   /** Регистрация без подтверждения почты */
   skipEmailVerification?: boolean;
+  /** Master switch для антибот-защиты регистраций */
+  signupProtectionEnabled?: boolean;
+  /** Доп. список заблокированных email-доменов (через запятую) */
+  emailDomainBlocklist?: string;
+  /** Regex-паттерны для блокировки email (по строке на каждый) */
+  emailPatternBlocklist?: string;
+  /** Макс. регистраций с одного IP в час */
+  signupMaxPerIpPerHour?: number;
+  /** Шифровать subscriptionUrl в happ://crypt4/... (длинная ссылка, по умолчанию выкл) */
+  happCryptEnabled?: boolean;
   /** Кнопка VPN в боте ведёт на страницу подписки Remna */
   useRemnaSubscriptionPage?: boolean;
   /** AI-чат в кабинете включён */
@@ -3110,12 +3699,27 @@ export interface ApiKeyListItem {
   prefix: string;
   isActive: boolean;
   lastUsedAt: string | null;
+  lastUsedIp: string | null;
+  expiresAt: string | null;
+  /** JSON-string of CIDR list, e.g. '["192.0.2.0/24"]' or null */
+  allowedIps: string | null;
   createdAt: string;
 }
 
 export interface ApiKeyCreated extends ApiKeyListItem {
   keyHash: string;
   rawKey: string;
+}
+
+export interface ApiKeyUsageItem {
+  id: string;
+  apiKeyId: string;
+  ts: string;
+  ip: string | null;
+  ua: string | null;
+  method: string;
+  path: string;
+  statusCode: number;
 }
 
 export interface TrafficAbuser {
@@ -3136,6 +3740,8 @@ export interface TrafficAbuser {
   createdAt: string;
   expireAt: string;
   abuseScore: number;
+  /** Имена internal squads пользователя в Remnawave (для фильтра в UI). */
+  squadNames: string[];
 }
 
 export interface TrafficAbuseStats {
@@ -3195,12 +3801,17 @@ export interface AdminSecondarySubscription {
   tariffId: string | null;
   giftStatus: string | null;
   giftedToClientId: string | null;
+  /** true = куплена для подарка, false = куплена себе. */
+  purchasedAsGift: boolean;
   createdAt: string;
   updatedAt: string;
   owner: AdminSecondarySubscriptionOwner;
   giftedToClient: AdminSecondarySubscriptionOwner | null;
   tariff: AdminSecondarySubscriptionTariff | null;
   latestGiftCode: AdminGiftCodeBrief | null;
+  /** отправитель подарка (creator из последнего gift code).
+   *  isAdmin=true если код создан админом через UI — тогда вместо username показываем «Администратор». */
+  giftSender: { id: string; email: string | null; telegramUsername: string | null; isAdmin?: boolean } | null;
 }
 
 export interface AdminSecondarySubscriptionsResponse {
@@ -3217,7 +3828,7 @@ export interface AdminSecondarySubscriptionDetail extends AdminSecondarySubscrip
   history: {
     id: string;
     clientId: string;
-    secondarySubscriptionId: string | null;
+    subscriptionId: string | null;
     eventType: string;
     metadata: Record<string, unknown> | null;
     createdAt: string;
@@ -3506,9 +4117,126 @@ export interface TariffRecord {
   currency: string;
   sortOrder: number;
   lavatopOfferId?: string | null;
+  /** T11+T12 (11.05.2026) — rich-text список локаций тарифа. */
+  locations?: string | null;
+  /** T16 (12.05.2026) — эмодзи-префикс в главном меню бота перед названием подписки. */
+  menuEmoji?: string | null;
+  /** T-cooldown (13.05.2026) — кулдаун покупки тарифа в днях (null/0 = без ограничения). */
+  purchaseCooldownDays?: number | null;
   priceOptions: TariffPriceOption[];
   createdAt: string;
   updatedAt: string;
+}
+
+// ─── Trial-пресеты ───
+export interface TrialRecord {
+  id: string;
+  name: string;
+  tariffId: string;
+  tariffName: string | null;
+  durationDays: number;
+  /** T16 (12.05.2026) — опциональный лимит трафика триала в байтах (null = из тарифа). */
+  trafficLimitBytes: number | null;
+  enabled: boolean;
+  sortOrder: number;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CreateTrialPayload = {
+  name: string;
+  tariffId: string;
+  durationDays: number;
+  /** T16 (12.05.2026) — опциональный лимит трафика триала в байтах. */
+  trafficLimitBytes?: number | null;
+  enabled?: boolean;
+  sortOrder?: number;
+  description?: string | null;
+};
+
+export type UpdateTrialPayload = Partial<CreateTrialPayload>;
+
+// ─── клиентские триал-опции для модалки выбора ───
+// устройство с пометкой откуда.
+export interface ClientDeviceItem {
+  hwid: string;
+  platform?: string;
+  deviceModel?: string;
+  /** приложение (Hiddify / v2rayN / Streisand …). */
+  appName?: string;
+  createdAt?: string;
+  subscriptionType: "root" | "secondary";
+  subscriptionId: string;
+  subscriptionIndex: number;
+  tariffName: string | null;
+}
+
+export interface ClientTrialOption {
+  id: string;
+  name: string;
+  tariffId: string;
+  tariffName: string | null;
+  durationDays: number;
+  description: string | null;
+  sortOrder: number;
+  /** BigInt as string (JSON-safe). Null = безлимит. */
+  trafficLimitBytes: string | null;
+  deviceLimit: number | null;
+  includedDevices: number | null;
+}
+
+export interface ClientTrialActivateResponse {
+  message: string;
+  subscriptionId: string;
+  trialId: string;
+  durationDays: number;
+  tariffId: string;
+  tariffHasLocations: boolean;
+  subscriptionUrl: string | null;
+}
+
+// ─── Конструктор уведомлений автосписания ───
+export type AutoRenewTriggerType = "UPCOMING" | "SUCCESS" | "FAILED" | "RETRY" | "EXPIRED";
+
+export interface AutoRenewNotificationRecord {
+  id: string;
+  name: string;
+  triggerType: AutoRenewTriggerType;
+  offsetMinutes: number;
+  messageText: string;
+  enabled: boolean;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CreateAutoRenewNotificationPayload = {
+  name: string;
+  triggerType: AutoRenewTriggerType;
+  offsetMinutes: number;
+  messageText: string;
+  enabled?: boolean;
+  sortOrder?: number;
+};
+
+// ─── Заявки на вывод USDT TRC20 ───
+export interface WithdrawalRequestRecord {
+  id: string;
+  clientId: string;
+  amount: number;
+  walletTrc20: string;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  adminComment: string | null;
+  processedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  client: {
+    id: string;
+    email: string | null;
+    telegramId: string | null;
+    telegramUsername: string | null;
+  };
 }
 
 export type CreateTariffPayload = {
@@ -3528,6 +4256,12 @@ export type CreateTariffPayload = {
   currency?: string;
   sortOrder?: number;
   lavatopOfferId?: string | null;
+  /** T11+T12 (11.05.2026) */
+  locations?: string | null;
+  /** T16 (12.05.2026) — эмодзи-префикс в главном меню бота. */
+  menuEmoji?: string | null;
+  /** T-cooldown (13.05.2026) — кулдаун покупки в днях (null/0 = без ограничения). */
+  purchaseCooldownDays?: number | null;
   priceOptions?: { durationDays: number; price: number }[];
 };
 
@@ -3547,6 +4281,12 @@ export type UpdateTariffPayload = {
   currency?: string;
   sortOrder?: number;
   lavatopOfferId?: string | null;
+  /** T11+T12 (11.05.2026) */
+  locations?: string | null;
+  /** T16 (12.05.2026) — эмодзи-префикс в главном меню бота. */
+  menuEmoji?: string | null;
+  /** T-cooldown (13.05.2026) — кулдаун покупки в днях (null/0 = без ограничения). */
+  purchaseCooldownDays?: number | null;
   priceOptions?: { durationDays: number; price: number }[];
 };
 
@@ -3896,6 +4636,8 @@ export interface PublicConfig {
   googleAnalyticsId?: string | null;
   yandexMetrikaId?: string | null;
   skipEmailVerification?: boolean;
+  /** true = SMTP настроен и можно слать письма верификации. */
+  smtpConfigured?: boolean;
   useRemnaSubscriptionPage?: boolean;
   aiChatEnabled?: boolean;
   customBuildConfig?: {
@@ -3951,4 +4693,132 @@ export interface PublicConfig {
   giftMessageMaxLength?: number;
   /** Кастомный инфо-блок (тех. работы, акции, контакты). Пусто = скрыт. Поддерживает многострочный текст. */
   botInfoBlock?: string | null;
+}
+
+// ——— WDTT types ———
+export interface WdttNodeListItem {
+  id: string;
+  name: string;
+  status: string;
+  lastSeenAt: string | null;
+  publicHost: string | null;
+  apiUrl: string;
+  dtlsPort: number;
+  wgPort: number;
+  tunPort: number;
+  capacity: number | null;
+  currentSlots: number;
+  slotsCount: number;
+  createdAt: string;
+}
+
+export interface CreateWdttNodeResponse {
+  node: { id: string; name: string; status: string; apiUrl: string; apiKey: string; dtlsPort: number; wgPort: number; tunPort: number; capacity: number | null; createdAt: string };
+  instructions: string;
+}
+
+export interface WdttNodeDetail {
+  id: string;
+  name: string;
+  status: string;
+  lastSeenAt: string | null;
+  publicHost: string | null;
+  apiUrl: string;
+  apiKey: string;
+  dtlsPort: number;
+  wgPort: number;
+  tunPort: number;
+  capacity: number | null;
+  currentSlots: number;
+  createdAt: string;
+  updatedAt: string;
+  slots: Array<{
+    id: string;
+    password: string;
+    vkHash: string;
+    wdttLink: string;
+    expiresAt: string;
+    trafficLimitBytes: string | null;
+    trafficUsedBytes: string;
+    status: string;
+    client: { id: string; email: string | null; telegramUsername: string | null; telegramId: string | null };
+    createdAt: string;
+  }>;
+}
+
+export interface WdttSlotAdminItem {
+  id: string;
+  nodeId: string;
+  nodeName: string;
+  publicHost: string | null;
+  dtlsPort: number;
+  wgPort: number;
+  tunPort: number;
+  clientId: string;
+  clientEmail: string | null;
+  clientTelegram: string | null;
+  clientTelegramId: string | null;
+  password: string;
+  vkHash: string;
+  wdttLink: string;
+  expiresAt: string;
+  trafficLimitBytes: string | null;
+  trafficUsedBytes: string;
+  status: string;
+  revokeReason: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+}
+
+export interface WdttTariffItem {
+  id: string;
+  categoryId: string;
+  categoryName?: string;
+  name: string;
+  proxyCount: number;
+  durationDays: number;
+  trafficLimitBytes: string | null;
+  price: number;
+  currency: string;
+  sortOrder: number;
+  enabled: boolean;
+  nodeIds?: string[];
+}
+
+export interface WdttCategoryItem {
+  id: string;
+  name: string;
+  sortOrder: number;
+  tariffs: WdttTariffItem[];
+}
+
+export interface WdttClientSlotItem {
+  id: string;
+  nodeName: string;
+  publicHost: string | null;
+  dtlsPort: number;
+  wgPort: number;
+  tunPort: number;
+  password: string;
+  vkHash: string;
+  wdttLink: string;
+  expiresAt: string;
+  trafficLimitBytes: string | null;
+  trafficUsedBytes: string;
+  status: string;
+  createdAt: string;
+}
+
+export interface WdttClientCategoryItem {
+  id: string;
+  name: string;
+  tariffs: Array<{
+    id: string;
+    name: string;
+    proxyCount: number;
+    durationDays: number;
+    trafficLimitBytes: string | null;
+    price: number;
+    currency: string;
+  }>;
 }

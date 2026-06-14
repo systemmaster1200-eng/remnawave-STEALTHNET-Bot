@@ -23,16 +23,6 @@ type AdminNotificationPreferenceRow = {
   notifyNewTicket: boolean;
 };
 
-/** Токен активного бота-клона клиента; иначе undefined → используется основной токен из настроек. */
-async function getBotApiTokenForClient(clientId: string): Promise<string | undefined> {
-  const row = await prisma.client.findUnique({
-    where: { id: clientId },
-    select: { bot: { select: { token: true, isActive: true } } },
-  });
-  const t = row?.bot?.isActive ? row.bot.token?.trim() : undefined;
-  return t && t.length > 0 ? t : undefined;
-}
-
 export type TelegramUserSendOptions = { clientIdForBotToken?: string };
 
 export async function sendTelegramToUser(
@@ -40,13 +30,11 @@ export async function sendTelegramToUser(
   text: string,
   messageThreadId?: number | null,
   replyMarkup?: Record<string, unknown>,
-  opts?: TelegramUserSendOptions,
+  _opts?: TelegramUserSendOptions,
 ): Promise<void> {
+  // v5.0.0: единственный бот, токен берётся из system_settings (или env).
   let token: string | undefined;
-  if (opts?.clientIdForBotToken) {
-    token = await getBotApiTokenForClient(opts.clientIdForBotToken);
-  }
-  if (!token) {
+  {
     const config = await getSystemConfig();
     token = config.telegramBotToken?.trim() ?? undefined;
   }
@@ -103,6 +91,24 @@ function getTopicIdForEvent(config: Record<string, unknown>, eventType: AdminNot
 
 async function sendTelegramToAdminsForEvent(eventType: AdminNotificationEventType, text: string): Promise<void> {
   const config = await getSystemConfig();
+  // ── manager-notify дубль new_ticket в отдельную группу менеджеров.
+  // Группу читаем напрямую из systemSetting (не через allowlist getSystemConfig) — устойчивее к пересборкам.
+  if (eventType === "new_ticket") {
+    try {
+      const mg = await prisma.systemSetting.findFirst({ where: { key: "notification_managers_group_id" } });
+      const managersGroupId = mg?.value?.trim();
+      if (managersGroupId) {
+        const tp = await prisma.systemSetting.findFirst({ where: { key: "notification_managers_topic_tickets" } });
+        const tpNum = tp?.value?.trim() ? parseInt(tp.value.trim(), 10) : NaN;
+        const managersTopicId = Number.isFinite(tpNum) ? tpNum : undefined;
+        await sendTelegramToUser(managersGroupId, text, managersTopicId).catch((e) => {
+          console.warn("[Telegram notify] send to managers group failed", e);
+        });
+      }
+    } catch (e) {
+      console.warn("[Telegram notify] managers-group lookup failed", e);
+    }
+  }
   const groupId = config.notificationTelegramGroupId?.trim();
   if (groupId) {
     const topicId = getTopicIdForEvent(config as unknown as Record<string, unknown>, eventType);
@@ -197,15 +203,139 @@ export async function notifyTariffActivated(clientId: string, paymentId: string)
       amount: true,
       currency: true,
       provider: true,
-      tariff: { select: { name: true, durationDays: true, price: true } },
+      subscriptionId: true,
+      tariffId: true,
+      metadata: true,
+      tariff: { select: { name: true, durationDays: true, price: true, locations: true, trafficLimitBytes: true } },
       tariffPriceOption: { select: { durationDays: true } },
     },
   });
   const tariffName = payment?.tariff?.name?.trim() || "Тариф";
-  if (client.telegramId) {
-    const textClient = `✅ <b>Тариф «${escapeHtml(tariffName)}»</b> оплачен и активирован.\n\nМожете подключаться к VPN.`;
+  // если оплачена подарочная подписка — автогенерируем GiftCode
+  // и шлём клиенту текст по ТЗ (Стандарт / Unblock с трафиком) с готовой ссылкой.
+  // если выдан админом — меняем заголовок «Тариф ... оплачен и активирован»
+  // на «Администратор выдал Вам подписку Тариф «...»».
+  // админский комментарий — показываем клиенту в уведомлении.
+  let isGiftPurchase = false;
+  let isAdminGrant = false;
+  let adminNote: string | null = null;
+  try {
+    const meta = payment?.metadata ? JSON.parse(payment.metadata) as Record<string, unknown> : null;
+    isGiftPurchase = meta?.purchasedAsGift === true;
+    isAdminGrant = meta?.kind === "admin_grant";
+    if (typeof meta?.note === "string" && meta.note.trim()) {
+      adminNote = meta.note.trim();
+    }
+  } catch { /* ignore */ }
+
+  if (client.telegramId && isGiftPurchase && payment?.subscriptionId) {
+    // Авто-создание gift code сразу после оплаты.
+    try {
+      const { createGiftCode } = await import("../gift/gift.service.js");
+      const codeResult = await createGiftCode(clientId, payment.subscriptionId, undefined, { skipConfigCheck: true });
+      if (codeResult.ok) {
+        const cfg = await getSystemConfig();
+        const botToken = (cfg.telegramBotToken || "").trim();
+        const botUsernameRes = botToken
+          ? await fetch(`https://api.telegram.org/bot${botToken}/getMe`).then((r) => r.json() as Promise<{ ok: boolean; result?: { username?: string } }>).catch(() => null)
+          : null;
+        const botUsername = botUsernameRes?.result?.username ?? "bot";
+        const giftUrl = `https://t.me/${botUsername}?start=gift_${codeResult.data.code}`;
+        const durationDays = codeResult.data.durationDays ?? payment.tariff?.durationDays ?? 0;
+        const trafficBytes = codeResult.data.trafficLimitBytes ?? (payment.tariff?.trafficLimitBytes != null ? Number(payment.tariff.trafficLimitBytes) : 0);
+        const hasTraffic = trafficBytes > 0;
+        let giftText: string;
+        if (hasTraffic) {
+          const trafficGb = Math.round(trafficBytes / 1024 ** 3);
+          giftText =
+            `💝 Подарочная ${tariffName} готова!\n\n` +
+            `✅ Оплата прошла успешно.\n📅 ${durationDays} дней, ${trafficGb} GB\n\n` +
+            `👉 Перешлите ссылку человеку, которому хотите подарить подписку ⬇️\n\n` +
+            `💡 Чтобы скопировать ссылку, нажмите на неё один раз.\n\n` +
+            `${giftUrl}\n\n` +
+            `🎉 При переходе по ссылке подписка автоматически активируется!`;
+        } else {
+          giftText =
+            `💝 Подарочная подписка готова!\n\n` +
+            `✅ Оплата прошла успешно.\nКод: ${codeResult.data.code}\nТариф: ${tariffName}\n📅 ${durationDays} дней\n\n` +
+            `👉 Перешлите ссылку человеку, которому хотите подарить подписку ⬇️\n\n` +
+            `${giftUrl}\n\n` +
+            `🎉 При переходе по ссылке подписка автоматически активируется!`;
+        }
+        // `?url=` обязателен — иначе share-окно не открывается.
+        // новый текст шеринга подарка.
+        const shareText = `У меня для тебя подарок 🎁\n \nПодписка на сервис безопасного удалённого доступа 🛡 \n\n💡 Нажми на ссылку, чтобы активировать:\n\n${giftUrl}`;
+        const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(giftUrl)}&text=${encodeURIComponent(shareText)}`;
+        if (botToken) {
+          await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: client.telegramId,
+              text: giftText,
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "📤 Поделиться в Telegram", url: shareUrl }],
+                  [{ text: "🎁 Мои подарки", callback_data: "gift:subscriptions" }],
+                  [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+                ],
+              },
+            }),
+          }).catch((e) => console.error("[notify] gift purchase send failed:", e));
+        }
+      }
+    } catch (e) {
+      console.error("[notify] gift purchase auto-create failed:", e);
+    }
+    // Для подарочной не шлём «Тариф оплачен и активирован» — клиент получил красивый gift-текст выше.
+    // Админ-уведомление шлётся в конце функции в любом случае.
+  } else if (client.telegramId) {
+    // после успешной оплаты — выдаём ту же UX что после триала:
+    // ссылка подписки + кнопки «📲 Инструкции по установке» и «🌐 Локации» (если есть).
+    let subscriptionUrl: string | null = null;
+    if (payment?.subscriptionId) {
+      const sub = await prisma.subscription.findUnique({
+        where: { id: payment.subscriptionId },
+        select: { remnawaveUuid: true },
+      });
+      if (sub?.remnawaveUuid) {
+        try {
+          const { remnaGetUser } = await import("../remna/remna.client.js");
+          const r = await remnaGetUser(sub.remnawaveUuid);
+          const inner = (r.data as { response?: Record<string, unknown>; data?: Record<string, unknown> } | null)?.response
+            ?? (r.data as { response?: Record<string, unknown>; data?: Record<string, unknown> } | null)?.data
+            ?? (r.data as Record<string, unknown> | null);
+          subscriptionUrl = (inner as { subscriptionUrl?: string } | null)?.subscriptionUrl ?? null;
+        } catch { /* ignore */ }
+      }
+    }
     const cfg = await getSystemConfig();
-    await sendTelegramToUser(client.telegramId, textClient, null, backToMenuMarkup(cfg.botBackLabel), {
+    // подсказка «если инструкция не открылась»
+    // (платная/админская подписка). Текст из настроек (Тексты бота) или дефолт.
+    const instrFallback = ((cfg as { botInstructionFallbackText?: string | null }).botInstructionFallbackText ?? "").trim()
+      || "💡 Если инструкции не открываются: скопируйте ссылку подписки и вставьте её в приложение Happ вручную или обратитесь в поддержку.";
+    const linkBlock = subscriptionUrl
+      ? `\n\n🔗 Ссылка подписки:\n${subscriptionUrl}\n\nДля подключения нажмите кнопку «📲 Инструкции по установке»:\n\n${instrFallback}`
+      : "";
+    // два заголовка в зависимости от источника подписки.
+    const headline = isAdminGrant
+      ? `✅ Администратор выдал Вам подписку Тариф «<b>${escapeHtml(tariffName)}</b>»`
+      : `✅ <b>Тариф «${escapeHtml(tariffName)}»</b> оплачен и активирован`;
+    // если админ оставил комментарий — показываем клиенту.
+    const noteBlock = (isAdminGrant && adminNote)
+      ? `\n\n💬 <i>${escapeHtml(adminNote)}</i>`
+      : "";
+    const textClient = `${headline}.${noteBlock}${linkBlock}`;
+    const hasLocations = !!(payment?.tariff?.locations?.trim());
+    type Row = ({ text: string; callback_data: string } | { text: string; url: string })[];
+    const rows: Row[] = [];
+    if (subscriptionUrl) rows.push([{ text: "📲 Инструкции по установке", url: subscriptionUrl }]);
+    if (hasLocations && payment?.tariffId) {
+      rows.push([{ text: "🌐 Локации", callback_data: `menu:locations:${payment.tariffId}` }]);
+    }
+    rows.push([{ text: "📋 Мои подписки", callback_data: "menu:my_subs" }]);
+    rows.push([{ text: cfg.botBackLabel ?? "🏠 Главное меню", callback_data: "menu:main" }]);
+    await sendTelegramToUser(client.telegramId, textClient, null, { inline_keyboard: rows }, {
       clientIdForBotToken: clientId,
     });
   }
@@ -224,6 +354,67 @@ export async function notifyTariffActivated(clientId: string, paymentId: string)
   if (payment?.provider) lines.push(`🏦 Провайдер: ${escapeHtml(payment.provider)}`);
   lines.push(`🕐 ${formatDate(new Date())}`);
   await sendTelegramToAdminsForEvent("tariff_payment", lines.join("\n"));
+}
+
+/**
+ * уведомление клиенту об успешной активации
+ * extra-option (доп. устройства / трафик / серверы), после оплаты картой / криптой / etc.
+ */
+export async function notifyExtraOptionApplied(clientId: string, paymentId: string): Promise<void> {
+  const client = await prisma.client.findUnique({
+    where: { id: clientId },
+    select: { telegramId: true },
+  });
+  if (!client?.telegramId) return;
+  const payment = await prisma.payment.findUnique({
+    where: { id: paymentId },
+    select: { amount: true, currency: true, metadata: true, provider: true },
+  });
+  if (!payment) return;
+  // Парсим extraOption.kind из metadata.
+  let kind: "traffic" | "devices" | "servers" | null = null;
+  try {
+    const meta = payment.metadata ? JSON.parse(payment.metadata) as { extraOption?: { kind?: string } } : null;
+    const k = meta?.extraOption?.kind;
+    if (k === "traffic" || k === "devices" || k === "servers") kind = k;
+  } catch { /* ignore */ }
+
+  // Текст по типу опции. verb согласован с родом title-а.
+  let title: string;
+  let verb: string;
+  if (kind === "traffic") { title = "Дополнительный трафик"; verb = "добавлен"; }
+  else if (kind === "devices") { title = "Дополнительное устройство"; verb = "добавлено"; }
+  else if (kind === "servers") { title = "Дополнительный сервер"; verb = "добавлен"; }
+  else { title = "Дополнительная опция"; verb = "добавлена"; }
+
+  const amount = payment.amount ?? 0;
+  const currency = (payment.currency ?? "RUB").toUpperCase();
+  const lines = [
+    `✅ <b>${escapeHtml(title)}</b> успешно ${verb} к вашей подписке.`,
+  ];
+  if (amount > 0) lines.push(`💵 Списано: <b>${formatMoney(amount, currency)}</b>`);
+  lines.push("", "Изменения вступили в силу мгновенно — можете пользоваться.");
+
+  const cfg = await getSystemConfig();
+  const botToken = cfg.telegramBotToken?.trim();
+  if (!botToken) return;
+  const replyMarkup = {
+    inline_keyboard: [
+      [{ text: "📋 Мои подписки", callback_data: "menu:my_subs" }],
+      [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+    ],
+  };
+  await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: client.telegramId,
+      text: lines.join("\n"),
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: replyMarkup,
+    }),
+  }).catch((e) => console.error("[notifyExtraOptionApplied] send failed:", e));
 }
 
 /** Человекочитаемый маркер «к сообщению приложены фото». */
@@ -394,6 +585,78 @@ export async function notifyAdminsAboutNewClient(clientId: string): Promise<void
   await sendTelegramToAdminsForEvent("new_client", lines.join("\n"));
 }
 
+/**
+ * уведомление админам о новой заявке на вывод реф. баланса.
+ */
+export async function notifyAdminsAboutWithdrawal(withdrawalId: string): Promise<void> {
+  const wr = await prisma.withdrawalRequest.findUnique({
+    where: { id: withdrawalId },
+    include: { client: { select: { id: true, telegramId: true, telegramUsername: true, email: true } } },
+  });
+  if (!wr) return;
+  const config = await getSystemConfig();
+  const baseUrl = (config.publicAppUrl || "").replace(/\/+$/, "");
+  const clientLabel = formatClientLabel(wr.client);
+  const lines = [
+    `💰 <b>Заявка на вывод (USDT TRC20)</b>`,
+    ``,
+    `👤 Клиент: ${escapeHtml(clientLabel)}`,
+  ];
+  if (wr.client.telegramId) lines.push(`🆔 TG ID: <code>${escapeHtml(wr.client.telegramId)}</code>`);
+  lines.push(`💸 Сумма: <b>${wr.amount.toFixed(2)} ₽</b>`);
+  lines.push(`🏦 Кошелёк TRC20: <code>${escapeHtml(wr.walletTrc20)}</code>`);
+  lines.push(`🕐 ${formatDate(wr.createdAt)}`);
+  if (baseUrl) lines.push(`\n🔗 <a href="${escapeHtml(`${baseUrl}/admin/withdrawals`)}">Открыть в админке</a>`);
+  await sendTelegramToAdminsForEvent("new_client", lines.join("\n"));
+}
+
+/**
+ * уведомление клиенту что вывод средств выполнен.
+ */
+export async function notifyClientAboutWithdrawalApproved(withdrawalId: string): Promise<void> {
+  const wr = await prisma.withdrawalRequest.findUnique({
+    where: { id: withdrawalId },
+    include: { client: { select: { id: true, telegramId: true } } },
+  });
+  if (!wr || !wr.client.telegramId) return;
+  const text = [
+    `✅ Заявка на вывод средств успешно исполнена.`,
+    ``,
+    `В течение 48 часов средства поступят на указанный Вами кошелёк.`,
+    ``,
+    `Благодарим за сотрудничество 🤝`,
+  ].join("\n");
+  // добавили кнопку «🏠 Главное меню» — чтобы клиент мог
+  // одним кликом вернуться в бот после получения уведомления о выплате.
+  const replyMarkup = {
+    inline_keyboard: [
+      [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+    ],
+  };
+  // Используем функцию sendTelegramMessage если есть, иначе через прямой fetch к Telegram API.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mod = await import("../bot/bot.service.js") as any;
+    const sendFn = mod.sendTelegramMessage ?? mod.sendMessage;
+    if (typeof sendFn === "function") {
+      // Передаём reply_markup опциональным 3-м параметром — если функция не поддерживает,
+      // он будет проигнорирован (но мы дублируем в fallback).
+      await sendFn(wr.client.telegramId, text, { reply_markup: replyMarkup });
+      return;
+    }
+  } catch {
+    // ignore
+  }
+  // Фолбэк через Bot API напрямую.
+  const botToken = process.env.BOT_TOKEN;
+  if (!botToken) return;
+  await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: wr.client.telegramId, text, reply_markup: replyMarkup }),
+  }).catch(() => {});
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -468,6 +731,28 @@ export async function notifySingboxSlotsCreated(clientId: string, slotIds: strin
     text += `• <code>${escapeHtml(link)}</code>\n\n`;
   }
   text += "Скопируйте ссылку в приложение (v2rayN, Nekoray, Shadowrocket и др.).";
+
+  const cfg = await getSystemConfig();
+  await sendTelegramToUser(client.telegramId, text, null, backToMenuMarkup(cfg.botBackLabel), { clientIdForBotToken: client.id });
+}
+
+export async function notifyWdttSlotsCreated(clientId: string, slotIds: string[], tariffName?: string): Promise<void> {
+  const client = await prisma.client.findUnique({ where: { id: clientId }, select: { telegramId: true, id: true } });
+  if (!client?.telegramId || slotIds.length === 0) return;
+
+  const slots = await prisma.wdttSlot.findMany({
+    where: { id: { in: slotIds } },
+    select: { wdttLink: true, node: { select: { publicHost: true } } },
+    orderBy: { createdAt: "asc" },
+  });
+
+  const name = tariffName?.trim() || "WDTT";
+  let text = `✅ <b>WDTT-доступ «${escapeHtml(name)}»</b> оплачен.\n\n`;
+  text += "Ссылка для подключения:\n\n";
+  for (const s of slots) {
+    text += `<code>${escapeHtml(s.wdttLink)}</code>\n\n`;
+  }
+  text += "Скопируйте ссылку и откройте в приложении proxy-turn-vk-android-main.";
 
   const cfg = await getSystemConfig();
   await sendTelegramToUser(client.telegramId, text, null, backToMenuMarkup(cfg.botBackLabel), { clientIdForBotToken: client.id });

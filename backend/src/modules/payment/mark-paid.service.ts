@@ -9,9 +9,11 @@ import { distributeReferralRewards } from "../referral/referral.service.js";
 import { activateTariffByPaymentId } from "../tariff/tariff-activation.service.js";
 import { createProxySlotsByPaymentId } from "../proxy/proxy-slots-activation.service.js";
 import { createSingboxSlotsByPaymentId } from "../singbox/singbox-slots-activation.service.js";
+import { createWdttSlotsByPaymentId } from "../wdtt/wdtt-slots-activation.service.js";
 import { applyExtraOptionByPaymentId } from "../extra-options/extra-options.service.js";
-import { notifyProxySlotsCreated, notifySingboxSlotsCreated } from "../notification/telegram-notify.service.js";
+import { notifyProxySlotsCreated, notifySingboxSlotsCreated, notifyWdttSlotsCreated } from "../notification/telegram-notify.service.js";
 import { auditPaymentClientBotAlignment } from "./payment-webhook-audit.util.js";
+import { extinguishOneTimeDiscount } from "../client/personal-discount.js";
 
 function hasExtraOptionInMetadata(metadata: string | null): boolean {
   if (!metadata?.trim()) return false;
@@ -41,7 +43,6 @@ export async function markPaymentPaid(paymentId: string): Promise<MarkPaymentPai
   await auditPaymentClientBotAlignment({
     id: payment.id,
     clientId: payment.clientId,
-    botId: payment.botId,
   });
   if (payment.status === "PAID") {
     const result = await distributeReferralRewards(paymentId);
@@ -55,6 +56,7 @@ export async function markPaymentPaid(paymentId: string): Promise<MarkPaymentPai
     !payment.tariffId &&
     !payment.proxyTariffId &&
     !payment.singboxTariffId &&
+    !payment.wdttTariffId &&
     !isExtraOption;
 
   // Idempotent flip: PENDING → PAID. Если параллельный webhook (или повторный
@@ -85,6 +87,10 @@ export async function markPaymentPaid(paymentId: string): Promise<MarkPaymentPai
   if (isExtraOption) {
     const extraResult = await applyExtraOptionByPaymentId(paymentId);
     activation = extraResult.ok ? { ok: true } : { ok: false, error: (extraResult as { error?: string }).error };
+    if (extraResult.ok && payment.clientId) {
+      const { notifyExtraOptionApplied } = await import("../notification/telegram-notify.service.js");
+      await notifyExtraOptionApplied(payment.clientId, paymentId).catch(() => {});
+    }
   } else if (payment.tariffId) {
     activation = await activateTariffByPaymentId(paymentId);
   } else if (payment.proxyTariffId) {
@@ -119,13 +125,35 @@ export async function markPaymentPaid(paymentId: string): Promise<MarkPaymentPai
     } else {
       proxySlots = { ok: false, error: singboxResult.error };
     }
+  } else if (payment.wdttTariffId) {
+    const wdttResult = await createWdttSlotsByPaymentId(paymentId);
+    if (wdttResult.ok) {
+      proxySlots = { ok: true, slotsCreated: wdttResult.slotsCreated };
+      const tariff = await prisma.wdttTariff.findUnique({
+        where: { id: payment.wdttTariffId },
+        select: { name: true },
+      });
+      await notifyWdttSlotsCreated(
+        payment.clientId,
+        wdttResult.slotIds,
+        tariff?.name ?? undefined
+      ).catch(() => {});
+    } else {
+      proxySlots = { ok: false, error: wdttResult.error };
+    }
   }
 
-  if (payment.tariffId || payment.proxyTariffId || payment.singboxTariffId) {
+  if (payment.tariffId || payment.proxyTariffId || payment.singboxTariffId || payment.wdttTariffId) {
     await prisma.client.update({
       where: { id: payment.clientId },
       data: { trialUsed: true },
     }).catch(() => {});
+  }
+
+  // сжигаем одноразовую персональную
+  // скидку после продуктовой покупки. Топ-ап баланса НЕ сжигает.
+  if (!isTopUp) {
+    await extinguishOneTimeDiscount(payment.clientId);
   }
 
   const referral = await distributeReferralRewards(paymentId);

@@ -46,65 +46,6 @@ model SystemSetting {
   @@map("system_settings")
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Боты-клоны: «1:1 копия» основного бота, отличается только Telegram-токеном
-// и наценкой (markupPercent). Витрина (тарифы, бренд, тексты) — общая.
-// База клиентов изолирована: один TG-юзер в каждом клоне = разный Client.
-// Деньги от наценки копятся как долг перед владельцем клона (см. BotPayout).
-// ─────────────────────────────────────────────────────────────────────────────
-model Bot {
-  id              String   @id @default(cuid())
-  /// Telegram Bot API token. Уникальный — один токен = один клон.
-  token           String   @unique
-  /// Username бота без @ (заполняется при первом успешном getMe).
-  username        String?
-  /// Наценка в процентах (0..1000). Применяется к итоговой цене перед скидками.
-  /// Сохраняется snapshot'ом в Payment.botMarkupPercent на момент платежа.
-  markupPercent   Float    @default(0) @map("markup_percent")
-  /// Telegram-ID владельца клона (для отчёта «к выплате»). Может быть null —
-  /// тогда клон считается «платформенным», markup всё равно идёт в отчёт.
-  ownerTelegramId String?  @map("owner_telegram_id")
-  /// Имя/название владельца — отображается в админке.
-  ownerName       String?  @map("owner_name")
-  /// Бот активен — обработчики поднимаются на старте/hot-reload.
-  isActive        Boolean  @default(true) @map("is_active")
-  /// Главный бот инсталляции (создаётся миграцией из исходного BOT_TOKEN).
-  /// Используется как fallback botId для legacy-данных и для broadcast-default.
-  isPrimary       Boolean  @default(false) @map("is_primary")
-  /// Свободные заметки админа.
-  notes           String?  @db.Text
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
-
-  clients  Client[]
-  payments Payment[]
-  payouts  BotPayout[]
-
-  @@index([isActive])
-  @@map("bots")
-}
-
-// Ручная выплата владельцу клона (root-админ → партнёр).
-// Заработано клоном = SUM(payments.botMarkupAmount). К выплате = заработано − SUM(payouts).
-model BotPayout {
-  id        String   @id @default(cuid())
-  botId     String   @map("bot_id")
-  amount    Float
-  currency  String   @default("rub")
-  comment   String?  @db.Text
-  /// Фактическая дата выплаты (может отличаться от createdAt, если задним числом).
-  paidAt    DateTime @default(now()) @map("paid_at")
-  /// Email/id админа, оформившего выплату — для аудита.
-  createdBy String   @map("created_by")
-  createdAt DateTime @default(now()) @map("created_at")
-
-  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
-
-  @@index([botId])
-  @@index([paidAt])
-  @@map("bot_payouts")
-}
-
 model AdminNotificationPreference {
   id                  String   @id @default(cuid())
   telegramId          String   @unique @map("telegram_id")
@@ -131,11 +72,7 @@ model Client {
   balance                    Float     @default(0)
   preferredLang              String    @default("ru") @map("preferred_lang")
   preferredCurrency          String    @default("usd") @map("preferred_currency")
-  /// FK на Bot (клон, через который пользователь зарегистрировался).
-  /// Все legacy-клиенты при миграции получают botId = primary bot.
-  /// Один TG-юзер может быть в нескольких клонах — это РАЗНЫЕ Client (разный balance, история, рефералка).
-  botId                      String    @map("bot_id")
-  telegramId                 String?   @map("telegram_id")
+  telegramId                 String?   @unique @map("telegram_id")
   telegramUsername           String?   @map("telegram_username")
   isBlocked                  Boolean   @default(false) @map("is_blocked")
   blockReason                String?   @map("block_reason")
@@ -149,6 +86,10 @@ model Client {
   /// оплаты (тариф, прокси, singbox, кастомный билд, доп-опции) и стэкается с промокодом.
   /// На пополнение баланса и на отправку поощрений рефералам не влияет.
   personalDiscountPercent    Float?    @map("personal_discount_percent")
+  /// T-one-time-discount (14.05.2026, WolfVPN): если true — скидка сгорает после первой
+  /// продуктовой покупки (см. mark-paid.service.ts: сброс personalDiscountPercent=0 и флага в false).
+  /// Используется для скидок, выданных авторассылкой. Ручные скидки админа = false (бессрочно).
+  personalDiscountIsOneTime  Boolean   @default(false) @map("personal_discount_is_one_time")
   trialUsed                  Boolean   @default(false) @map("trial_used")
   yoomoneyAccessToken        String?   @map("yoomoney_access_token")
   utmSource                  String?   @map("utm_source")
@@ -167,20 +108,37 @@ model Client {
   autoRenewExtraDevices      Int       @default(0) @map("auto_renew_extra_devices") // Сколько доп. устройств продлевать
   autoRenewRetryCount        Int       @default(0) @map("auto_renew_retry_count")
   autoRenewNotifiedAt        DateTime? @map("auto_renew_notified_at")
+  // T-autorenew (12.05.2026, WolfVPN): dedup-ключ для конструктора уведомлений (root).
+  // Формат: `<templateId>:<bucketId>` — bucketId = floor(now / ttl). Шаблон не отправляется
+  // повторно пока bucketId совпадает. Аналог `secondary_subscriptions.last_notified_key`.
+  lastArnNotifiedKey         String?   @map("last_arn_notified_key")
   autoRenewPromoCode         String?   @map("auto_renew_promo_code")
   currentTariffId            String?   @map("current_tariff_id")
   currentPricePerDay         Float?    @map("current_price_per_day")
+  // T7c (11.05.2026, WolfVPN): персональная цена primary-подписки (накопительная).
+  // Аналог SecondarySubscription.customPrice — для основной подписки клиента.
+  // При apply extra-option увеличивается; при продлении используется вместо tariff.price.
+  customPrimaryPrice         Float?    @map("custom_primary_price")
   yookassaPaymentMethodId    String?   @map("yookassa_payment_method_id")
   yookassaPaymentMethodTitle String?   @map("yookassa_payment_method_title")
+  /// IP, с которого был создан аккаунт. Используется для антибот-фильтра
+  /// (массовое удаление подозрительных регистраций по IP).
+  registrationIp             String?   @map("registration_ip")
+  /// User-Agent на момент регистрации — помогает отличить headless-бота от настоящего браузера.
+  registrationUa             String?   @map("registration_ua") @db.Text
+  /// Источник регистрации: "web" | "telegram" | "google" | "apple" | "miniapp"
+  /// Полезно для фильтра "удалить всех веб-регистраций за час"
+  registrationSource         String?   @map("registration_source") @db.VarChar(20)
   createdAt                  DateTime  @default(now()) @map("created_at")
   updatedAt                  DateTime  @updatedAt @map("updated_at")
 
-  referrer              Client?                 @relation("ClientReferrer", fields: [referrerId], references: [id])
-  referrals             Client[]                @relation("ClientReferrer")
+  referrer              Client?             @relation("ClientReferrer", fields: [referrerId], references: [id])
+  referrals             Client[]            @relation("ClientReferrer")
   payments              Payment[]
-  autoRenewTariff       Tariff?                 @relation("ClientAutoRenewTariff", fields: [autoRenewTariffId], references: [id], onDelete: SetNull)
-  currentTariff         Tariff?                 @relation("ClientCurrentTariff", fields: [currentTariffId], references: [id], onDelete: SetNull)
+  autoRenewTariff       Tariff?             @relation("ClientAutoRenewTariff", fields: [autoRenewTariffId], references: [id], onDelete: SetNull)
+  currentTariff         Tariff?             @relation("ClientCurrentTariff", fields: [currentTariffId], references: [id], onDelete: SetNull)
   referralCredits       ReferralCredit[]
+  withdrawalRequests    WithdrawalRequest[]
   promoActivations      PromoActivation[]
   promoCodeUsages       PromoCodeUsage[]
   autoBroadcastLogs     AutoBroadcastLog[]
@@ -188,21 +146,24 @@ model Client {
   singboxSlots          SingboxSlot[]
   tickets               Ticket[]
   contestWinners        ContestWinner[]
-  giftCodesCreated      GiftCode[]              @relation("GiftCodeCreator")
-  giftCodesRedeemed     GiftCode[]              @relation("GiftCodeRedeemer")
-  ownedSubscriptions    SecondarySubscription[] @relation("OwnerSubscriptions")
-  receivedSubscriptions SecondarySubscription[] @relation("ReceivedSubscriptions")
+  giftCodesCreated      GiftCode[]          @relation("GiftCodeCreator")
+  giftCodesRedeemed     GiftCode[]          @relation("GiftCodeRedeemer")
+  ownedSubscriptions    Subscription[]      @relation("OwnerSubscriptions")
+  receivedSubscriptions Subscription[]      @relation("ReceivedSubscriptions")
   giftHistory           GiftHistory[]
-  bot                   Bot                     @relation(fields: [botId], references: [id])
+  // T15 (11.05.2026, WolfVPN): какие триалы клиент уже активировал.
+  trialUsages           ClientTrialUsage[]
+  // WDTT кредиты для покупки WDTT/Warp прокси
+  wdttCredits           Float     @default(0) @map("wdtt_credits")
+  wdttCreditsExpiresAt  DateTime? @map("wdtt_credits_expires_at")
+  // WDTT слоты
+  wdttSlots             WdttSlot[]
 
-  // Один TG-юзер = один Client в каждом клоне (но разные клоны — разные Client).
-  // Email/google/apple/referralCode остаются глобально-уникальными (см. поля выше),
-  // потому что веб-регистрация и cross-bot-логин по email должен находить клиента однозначно.
-  @@unique([botId, telegramId], map: "clients_bot_id_telegram_id_unique")
-  @@index([telegramId])
+  // Email/google/apple/referralCode/telegramId глобально уникальны.
   @@index([email])
   @@index([utmSource])
-  @@index([botId])
+  @@index([registrationIp], map: "clients_registration_ip_idx")
+  @@index([createdAt(sort: Desc)], map: "clients_created_at_idx")
   @@map("clients")
 }
 
@@ -294,33 +255,22 @@ model PendingEmailRegistration {
 model Payment {
   id                    String    @id @default(cuid())
   clientId              String    @map("client_id")
-  /// FK на Bot — какому клону принадлежит платёж. Snapshot на момент создания
-  /// (если позже клиента «переселят» в другой бот, этот платёж останется с прежним botId).
-  /// Заполняется при миграции: для legacy-Payment берётся botId из связанного Client.
-  botId                 String?   @map("bot_id")
   orderId               String    @unique @map("order_id")
-  /// Итоговая сумма платежа = baseAmount × (1 + botMarkupPercent/100) − discount.
-  /// Это то, что списывается с баланса/выставляется в платёжном провайдере.
+  /// Итоговая сумма платежа (то, что списывается с баланса / выставляется в платёжном провайдере).
   amount                Float
-  /// Базовая цена БЕЗ наценки клона. Используется реферальным расчётом
-  /// (рефералка считается от базы, наценка не размывается выплатами рефералам).
-  /// Для legacy-Payment = amount (наценки не было).
-  baseAmount            Float?    @map("base_amount")
-  /// Snapshot наценки клона на момент создания платежа (%). Не меняется,
-  /// даже если позже Bot.markupPercent поменяют.
-  botMarkupPercent      Float?    @map("bot_markup_percent")
-  /// Сумма наценки клона = amount − baseAmount (в валюте платежа).
-  /// Для отчёта «заработано клоном за период».
-  botMarkupAmount       Float?    @map("bot_markup_amount")
   currency              String
   status                String    @default("PENDING") // PENDING, PAID, FAILED, REFUNDED
   provider              String? // yookassa, cryptobot, etc.
   externalId            String?   @map("external_id")
   tariffId              String?   @map("tariff_id")
   tariffPriceOptionId   String?   @map("tariff_price_option_id")
+  /// T-unify (12.05.2026, WolfVPN): FK на Subscription. Заполнено → webhook продлевает её
+  /// (extend). null → создание новой подписки (используется metadata.tariffId).
+  subscriptionId        String?   @map("subscription_id")
   deviceCount           Int?      @map("device_count") // сколько устройств куплено в этом платеже (1..tariff.maxDevices)
   proxyTariffId         String?   @map("proxy_tariff_id")
   singboxTariffId       String?   @map("singbox_tariff_id")
+  wdttTariffId          String?   @map("wdtt_tariff_id")
   remnawaveUserId       String?   @map("remnawave_user_id")
   metadata              String?   @db.Text // JSON
   createdAt             DateTime  @default(now()) @map("created_at")
@@ -328,24 +278,50 @@ model Payment {
   referralDistributedAt DateTime? @map("referral_distributed_at")
 
   client            Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  bot               Bot?               @relation(fields: [botId], references: [id], onDelete: SetNull)
   tariff            Tariff?            @relation(fields: [tariffId], references: [id], onDelete: SetNull)
   tariffPriceOption TariffPriceOption? @relation(fields: [tariffPriceOptionId], references: [id], onDelete: SetNull)
   proxyTariff       ProxyTariff?       @relation(fields: [proxyTariffId], references: [id], onDelete: SetNull)
   singboxTariff     SingboxTariff?     @relation(fields: [singboxTariffId], references: [id], onDelete: SetNull)
+  wdttTariff        WdttTariff?        @relation("WdttTariffPayments", fields: [wdttTariffId], references: [id], onDelete: SetNull)
+  subscription      Subscription?      @relation("PaymentSubscription", fields: [subscriptionId], references: [id], onDelete: SetNull)
   referralCredits   ReferralCredit[]
+  wdttSlots         WdttSlot[]
 
   @@index([clientId])
-  @@index([botId])
   @@index([status])
   @@index([tariffId])
   @@index([tariffPriceOptionId])
   @@index([proxyTariffId])
   @@index([singboxTariffId])
+  @@index([wdttTariffId])
+  @@index([subscriptionId])
   @@map("payments")
 }
 
 // Начисление реферального бонуса (для отчёта «заработок с рефералов»)
+// T6 (11.05.2026, WolfVPN): заявка на вывод реферального баланса (USDT TRC20).
+// Минимум 3000₽ за раз. Юзер вводит сумму + кошелёк TRC20 → создаёт заявку (баланс
+// замораживается) → админ approve/reject. При approve — клиенту уведомление,
+// средства уходят (вне бота, ручной перевод USDT админом). При reject — баланс возвращается.
+model WithdrawalRequest {
+  id           String    @id @default(cuid())
+  clientId     String    @map("client_id")
+  amount       Float
+  walletTrc20  String    @map("wallet_trc20")
+  status       String    @default("PENDING") // PENDING | APPROVED | REJECTED
+  adminComment String?   @map("admin_comment")
+  processedAt  DateTime? @map("processed_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("withdrawal_requests")
+}
+
 model ReferralCredit {
   id         String   @id @default(cuid())
   referrerId String   @map("referrer_id")
@@ -418,7 +394,9 @@ model PromoCode {
   createdAt         DateTime  @default(now()) @map("created_at")
   updatedAt         DateTime  @updatedAt @map("updated_at")
 
-  usages PromoCodeUsage[]
+  usages             PromoCodeUsage[]
+  /// T-promo (13.05.2026, WolfVPN): авторассылки которые шлют этот промокод клиентам.
+  autoBroadcastRules AutoBroadcastRule[]
 
   @@map("promo_codes")
 }
@@ -454,39 +432,56 @@ model TariffCategory {
 // Тариф внутри категории: название, описание (опционально), срок, сквады, лимиты, цена
 // trafficResetMode: no_reset (по умолчанию), on_purchase (сброс при покупке), monthly (ежемесячный сброс через Remna MONTH-стратегию)
 model Tariff {
-  id                  String   @id @default(cuid())
-  categoryId          String   @map("category_id")
-  name                String
-  description         String?  @db.Text
-  durationDays        Int      @map("duration_days")
-  internalSquadUuids  String[] @map("internal_squad_uuids")
-  trafficLimitBytes   BigInt?  @map("traffic_limit_bytes")
-  trafficResetMode    String   @default("no_reset") @map("traffic_reset_mode")
-  deviceLimit         Int?     @map("device_limit") // legacy: «фиксированный лимит». Не используется в новой модели.
+  id                   String   @id @default(cuid())
+  categoryId           String   @map("category_id")
+  name                 String
+  description          String?  @db.Text
+  durationDays         Int      @map("duration_days")
+  internalSquadUuids   String[] @map("internal_squad_uuids")
+  trafficLimitBytes    BigInt?  @map("traffic_limit_bytes")
+  trafficResetMode     String   @default("no_reset") @map("traffic_reset_mode")
+  deviceLimit          Int?     @map("device_limit") // legacy: «фиксированный лимит». Не используется в новой модели.
   // Новая модель устройств:
   //   priceOption.price = базовая цена тарифа, в которую УЖЕ включено `includedDevices` устройств.
   //   Клиент может докупить до `maxExtraDevices` доп. устройств по цене `pricePerExtraDevice` за штуку.
   //   К количеству доп. устройств применяется лесенка скидок `deviceDiscountTiers`.
   //   HWID лимит на Remna = includedDevices + extraDevices (выбранных клиентом).
-  includedDevices     Int      @default(1) @map("included_devices")
-  pricePerExtraDevice Float    @default(0) @map("price_per_extra_device")
-  maxExtraDevices     Int      @default(0) @map("max_extra_devices")
-  deviceDiscountTiers Json?    @map("device_discount_tiers") // [{ minExtraDevices: number, discountPercent: number }]
-  price               Float    @default(0)
-  currency            String   @default("usd") @map("currency")
-  sortOrder           Int      @default(0) @map("sort_order")
+  includedDevices      Int      @default(1) @map("included_devices")
+  pricePerExtraDevice  Float    @default(0) @map("price_per_extra_device")
+  maxExtraDevices      Int      @default(0) @map("max_extra_devices")
+  deviceDiscountTiers  Json?    @map("device_discount_tiers") // [{ minExtraDevices: number, discountPercent: number }]
+  price                Float    @default(0)
+  currency             String   @default("usd") @map("currency")
+  sortOrder            Int      @default(0) @map("sort_order")
   /// UUID оффера в Lava.top для этого тарифа. Если null — используется system_settings.lavatop_default_offer_id.
   /// При оплате через Lava.top инвойс выписывается с periodicity=MONTHLY (subscription с авто-списанием).
-  lavatopOfferId      String?  @map("lavatop_offer_id")
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  lavatopOfferId       String?  @map("lavatop_offer_id")
+  /// T11+T12 (11.05.2026, WolfVPN): rich-text список локаций для этого тарифа.
+  /// Показывается клиенту по кнопке «🌐 Локации» в детали подписки / после активации триала.
+  /// Пустое значение — кнопка «Локации» в боте не появляется.
+  locations            String?  @map("locations") @db.Text
+  /// T16 (12.05.2026, WolfVPN): эмодзи-префикс для отображения в главном меню бота
+  /// перед названием подписки (напр. 🌐, 🔒, ♾️🔒). Если null/пусто — используется
+  /// fallback по типу подписки (root → 🌐, secondary → 🔒).
+  menuEmoji            String?  @map("menu_emoji")
+  /// T-cooldown (13.05.2026, WolfVPN): кулдаун между покупками этого тарифа одним клиентом.
+  /// null или 0 — без ограничения (default). Число > 0 — клиент может покупать этот тариф
+  /// не чаще раз в N дней. Используется для дорогих/безлимитных тарифов чтобы избежать
+  /// злоупотреблений (например, Unblock-безлимит → раз в 10 дней).
+  purchaseCooldownDays Int?     @map("purchase_cooldown_days")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
 
-  category               TariffCategory          @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  category               TariffCategory      @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   payments               Payment[]
-  autoRenewClients       Client[]                @relation("ClientAutoRenewTariff")
-  currentTariffClients   Client[]                @relation("ClientCurrentTariff")
-  secondarySubscriptions SecondarySubscription[]
+  autoRenewClients       Client[]            @relation("ClientAutoRenewTariff")
+  currentTariffClients   Client[]            @relation("ClientCurrentTariff")
+  subscriptions          Subscription[]      @relation("SubscriptionTariff")
+  /// T-unify: подписки, у которых этот тариф настроен на автопродление.
+  autoRenewSubscriptions Subscription[]      @relation("SubscriptionAutoRenewTariff")
   priceOptions           TariffPriceOption[]
+  // T15 (11.05.2026, WolfVPN): пресеты пробных подписок, привязанные к этому тарифу.
+  trials                 Trial[]
 
   @@index([categoryId])
   @@map("tariffs")
@@ -515,34 +510,88 @@ model TariffPriceOption {
 
 // ——— Авто-рассылка (настраиваемые правила для удержания клиентов) ———
 model AutoBroadcastRule {
-  id          String   @id @default(cuid())
-  name        String   @map("name") // Название правила для админки
-  triggerType String   @map("trigger_type") // after_registration | inactivity | no_payment | trial_not_connected | trial_used_never_paid | no_traffic | subscription_expired
-  delayDays   Int      @map("delay_days") // Дней после триггера (для after_registration / no_payment) или без платежа (inactivity)
-  channel     String   @map("channel") // telegram | email | both
-  subject     String?  @map("subject") // Тема письма (для email)
-  message     String   @db.Text // Текст (до 4096)
-  buttonText  String?  @map("button_text") // Текст кнопки под сообщением
-  buttonUrl   String?  @map("button_url") // URL кнопки
-  enabled     Boolean  @default(true) @map("enabled")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id          String  @id @default(cuid())
+  name        String  @map("name") // Название правила для админки
+  triggerType String  @map("trigger_type") // after_registration | inactivity | no_payment | trial_not_connected | trial_used_never_paid | no_traffic | subscription_expired | subscription_ending_soon | subscription_ending_minutes
+  delayDays   Int     @map("delay_days") // Дней после триггера (для after_registration / no_payment) или без платежа (inactivity)
+  channel     String  @map("channel") // telegram | email | both
+  subject     String? @map("subject") // Тема письма (для email)
+  message     String  @db.Text // Текст (до 4096). Поддерживает плейсхолдеры: {{PROMOCODE}}, {{DISCOUNT}}.
+  buttonText  String? @map("button_text") // Текст кнопки #1 под сообщением
+  buttonUrl   String? @map("button_url") // URL кнопки #1. Поддерживает плейсхолдер {{SUBSCRIPTION_ID}} для динамического renew-deep-link.
+  /// T-promo (13.05.2026, WolfVPN): вторая кнопка под сообщением.
+  /// Используется для рассылки «подписка истекла» — обычно «🏠 Главное меню» или ссылка на правила.
+  button2Text String? @map("button2_text")
+  button2Url  String? @map("button2_url")
+  enabled     Boolean @default(true) @map("enabled")
 
-  logs AutoBroadcastLog[]
+  /// T-promo (13.05.2026, WolfVPN): если задан — в текст сообщения подставляется код этого промо.
+  /// При отправке cron проверяет: оставшиеся использования промокода (maxUses - count(usages))
+  /// должны покрывать число получателей. Иначе отправка обрезается до доступного лимита.
+  promoCodeId               String? @map("promo_code_id")
+  /// T-promo: индивидуальная скидка % выставляется каждому получателю (Client.personalDiscountPercent).
+  /// Используется ВМЕСТО промокода (если promoCodeId не задан) — мгновенная скидка на следующую покупку.
+  personalDiscountPercent   Float?  @map("personal_discount_percent")
+  /// T-one-time-discount (14.05.2026, WolfVPN): если true — выданная клиенту скидка
+  /// помечается одноразовой (Client.personalDiscountIsOneTime = true) и сгорает после
+  /// первой продуктовой покупки. По умолчанию true (логика авторассылки — для разового стимула).
+  personalDiscountIsOneTime Boolean @default(true) @map("personal_discount_is_one_time")
+  /// T-promo: жёсткий лимит получателей рассылки. Если null → нет лимита.
+  /// Если задан, cron берёт min(eligible, maxRecipients - alreadySent).
+  /// Используется автоматически: если promoCodeId есть, дефолт = PromoCode.maxUses.
+  maxRecipients             Int?    @map("max_recipients")
 
+  /// T-cron-per-rule (13.05.2026, WolfVPN): индивидуальное расписание срабатывания этого правила.
+  /// Формат cron (5 полей: minute hour day month weekday). Если null — берётся дефолт по типу триггера:
+  ///   subscription_ending_minutes → "* * * * *"  (каждую минуту, для точного окна ±1 мин)
+  ///   subscription_expired        → "0 * * * *"  (каждый час)
+  ///   остальные                   → "0 9 * * *"  (раз в день в 9:00)
+  /// Per-rule scheduler регистрирует отдельный node-cron task для каждого правила.
+  cronExpression String?   @map("cron_expression")
+  /// T-cron-per-rule: метка последнего запуска (для аудита и UI).
+  lastRunAt      DateTime? @map("last_run_at")
+  /// T-event-driven (14.05.2026, WolfVPN): если true — правило НЕ запускается по
+  /// крону (scheduler пропускает), а триггерится событием из бота. Сейчас
+  /// поддерживается только для after_registration (бот вызывает
+  /// /api/client/auth/fire-on-registration после регистрации НОВОГО клиента →
+  /// welcome летит мгновенно). Один и тот же триггер может иметь правила с
+  /// разным значением флага: одно мгновенное при /start, второе по крону через
+  /// N дней с фильтром «вообще ничего не сделал».
+  eventDriven    Boolean   @default(false) @map("event_driven")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  promoCode PromoCode?         @relation(fields: [promoCodeId], references: [id], onDelete: SetNull)
+  logs      AutoBroadcastLog[]
+
+  @@index([promoCodeId])
   @@map("auto_broadcast_rules")
 }
 
 model AutoBroadcastLog {
-  id       String   @id @default(cuid())
-  ruleId   String   @map("rule_id")
-  clientId String   @map("client_id")
-  sentAt   DateTime @default(now()) @map("sent_at")
+  id               String    @id @default(cuid())
+  ruleId           String    @map("rule_id")
+  clientId         String    @map("client_id")
+  /// T-per-sub-dedup (14.05.2026, WolfVPN): для триггеров subscription_* пишем
+  /// ID конкретной подписки. Дедуп для этих триггеров теперь по (ruleId, subscriptionId).
+  /// Для прочих триггеров (after_registration, no_purchase, inactivity) — null,
+  /// дедуп по (ruleId, clientId).
+  subscriptionId   String?   @map("subscription_id")
+  /// T-smart-dedup (14.05.2026, WolfVPN): snapshot текущего Subscription.expireAt
+  /// в момент отправки. Дедуп для subscription_* триггеров теперь по
+  /// (ruleId, subscriptionId, expireAtSnapshot) — это значит после ПРОДЛЕНИЯ
+  /// подписки (expireAt изменился) правило сработает повторно для нового цикла.
+  /// Для прочих триггеров (after_registration, inactivity и т.п.) поле = null.
+  expireAtSnapshot DateTime? @map("expire_at_snapshot")
+  sentAt           DateTime  @default(now()) @map("sent_at")
 
   rule   AutoBroadcastRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
   client Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
   @@index([ruleId, clientId])
+  @@index([ruleId, subscriptionId])
+  @@index([ruleId, subscriptionId, expireAtSnapshot])
   @@index([ruleId])
   @@index([clientId])
   @@index([sentAt])
@@ -551,29 +600,59 @@ model AutoBroadcastLog {
 
 // История ручных рассылок: сохраняем дату, контент и результаты для аудита.
 model BroadcastHistory {
-  id             String    @id @default(cuid())
-  startedAt      DateTime  @default(now()) @map("started_at")
-  finishedAt     DateTime? @map("finished_at")
-  status         String    @default("running") // running | completed | error
-  channel        String // telegram | email | both
-  subject        String    @default("")
-  message        String    @db.Text
-  buttonText     String?   @map("button_text")
-  buttonUrl      String?   @map("button_url")
-  attachmentName String?   @map("attachment_name")
-  totalTelegram  Int       @default(0) @map("total_telegram")
-  sentTelegram   Int       @default(0) @map("sent_telegram")
-  failedTelegram Int       @default(0) @map("failed_telegram")
-  totalEmail     Int       @default(0) @map("total_email")
-  sentEmail      Int       @default(0) @map("sent_email")
-  failedEmail    Int       @default(0) @map("failed_email")
-  errors         Json?
-  error          String?   @db.Text
-  startedByAdmin String?   @map("started_by_admin") // admin id, без FK чтобы запись пережила удаление админа
+  id              String    @id @default(cuid())
+  startedAt       DateTime  @default(now()) @map("started_at")
+  finishedAt      DateTime? @map("finished_at")
+  /// pending — лежит в очереди, ждёт worker'а
+  /// running — worker подхватил, отправляет
+  /// completed | error | cancelled — финал
+  status          String    @default("pending")
+  channel         String // telegram | email | both
+  subject         String    @default("")
+  message         String    @db.Text
+  buttonText      String?   @map("button_text")
+  buttonUrl       String?   @map("button_url")
+  attachmentName  String?   @map("attachment_name")
+  /// 25.05.2026, WolfVPN — путь к файлу-вложению на shared volume (для broadcast-worker).
+  attachmentPath  String?   @map("attachment_path")
+  /// MIME-тип сохранённого вложения.
+  attachmentMime  String?   @map("attachment_mime")
+  /// Целевая группа из API запроса (нужна worker'у).
+  targetGroup     String?   @map("target_group")
+  /// Флаг отмены: API ставит true → worker видит и прерывает рассылку.
+  cancelRequested Boolean   @default(false) @map("cancel_requested")
+  totalTelegram   Int       @default(0) @map("total_telegram")
+  sentTelegram    Int       @default(0) @map("sent_telegram")
+  failedTelegram  Int       @default(0) @map("failed_telegram")
+  totalEmail      Int       @default(0) @map("total_email")
+  sentEmail       Int       @default(0) @map("sent_email")
+  failedEmail     Int       @default(0) @map("failed_email")
+  errors          Json?
+  error           String?   @db.Text
+  startedByAdmin  String?   @map("started_by_admin") // admin id, без FK чтобы запись пережила удаление админа
+
+  sentLog BroadcastSentLog[]
 
   @@index([startedAt(sort: Desc)])
   @@index([status])
   @@map("broadcast_history")
+}
+
+/// 25.05.2026, WolfVPN — per-recipient лог: пишется на КАЖДУЮ успешную отправку
+/// в Telegram. Позволяет resume рассылки если api перезапустился посередине:
+/// runBroadcast() на старте читает уже отправленные tgid'ы и skip'ает их.
+/// Не пишем failures — их можно ретраить отдельно через retry-логику.
+model BroadcastSentLog {
+  id          BigInt   @id @default(autoincrement())
+  broadcastId String   @map("broadcast_id")
+  tgid        String
+  sentAt      DateTime @default(now()) @map("sent_at")
+
+  broadcast BroadcastHistory @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+
+  @@unique([broadcastId, tgid])
+  @@index([broadcastId])
+  @@map("broadcast_sent_log")
 }
 
 // ——— Прокси-ноды и продажа прокси ———
@@ -598,6 +677,30 @@ model ProxyNode {
   tariffAssignments ProxyTariffNode[]
 
   @@map("proxy_nodes")
+}
+
+// ——— WDTT (Warp/WireGuard) ноды ———
+// Интеграция с proxy-turn-vk-android-main
+model WdttNode {
+  id                 String    @id @default(cuid())
+  name               String    @default("")
+  apiUrl             String    @map("api_url")
+  apiKey             String    @map("api_key")
+  status             String    @default("OFFLINE") // ONLINE | OFFLINE | DISABLED
+  lastSeenAt         DateTime? @map("last_seen_at")
+  publicHost         String?   @map("public_host")
+  dtlsPort           Int       @default(56000) @map("dtls_port")
+  wgPort             Int       @default(56001) @map("wg_port")
+  tunPort            Int       @default(9000)  @map("tun_port")
+  capacity           Int?
+  currentSlots       Int       @default(0) @map("current_slots")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  slots             WdttSlot[]
+  tariffAssignments WdttTariffNode[]
+
+  @@map("wdtt_nodes")
 }
 
 model ProxyCategory {
@@ -833,11 +936,35 @@ model ApiKey {
   prefix      String    @map("prefix")
   isActive    Boolean   @default(true) @map("is_active")
   lastUsedAt  DateTime? @map("last_used_at")
+  lastUsedIp  String?   @map("last_used_ip")
+  expiresAt   DateTime? @map("expires_at")
+  // JSON array of CIDR ranges, e.g. ["192.0.2.0/24","203.0.113.5/32"].
+  // null = no IP restriction.
+  allowedIps  String?   @map("allowed_ips")
   createdAt   DateTime  @default(now()) @map("created_at")
+
+  usage ApiKeyUsage[]
 
   @@index([keyHash], map: "api_keys_key_hash_idx")
   @@index([prefix], map: "api_keys_prefix_idx")
   @@map("api_keys")
+}
+
+model ApiKeyUsage {
+  id         String   @id @default(cuid())
+  apiKeyId   String   @map("api_key_id")
+  ts         DateTime @default(now())
+  ip         String?
+  ua         String?  @db.Text
+  method     String   @db.VarChar(10)
+  path       String   @db.Text
+  statusCode Int      @map("status_code")
+
+  apiKey ApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@index([apiKeyId, ts(sort: Desc)], map: "api_key_usage_api_key_id_ts_idx")
+  @@index([ts(sort: Desc)], map: "api_key_usage_ts_idx")
+  @@map("api_key_usage")
 }
 
 model ContestWinner {
@@ -858,69 +985,186 @@ model ContestWinner {
   @@map("contest_winners")
 }
 
-// Дополнительная подписка: отдельная VPN-подписка, привязанная к root-клиенту
-// Используется для подарков и дополнительных аккаунтов (другой пул серверов)
-model SecondarySubscription {
-  id                String   @id @default(cuid())
-  ownerId           String   @map("owner_id")
-  remnawaveUuid     String?  @map("remnawave_uuid")
-  subscriptionIndex Int      @map("subscription_index") // 1, 2, 3...
-  tariffId          String?  @map("tariff_id")
-  giftStatus        String?  @map("gift_status") // null = owned | GIFT_RESERVED | GIFT_CODE_ACTIVE | GIFTED
-  giftedToClientId  String?  @map("gifted_to_client_id") // если подарено — кому
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+// T-unify (12.05.2026, WolfVPN): УНИФИЦИРОВАННАЯ модель подписок.
+// До этого: Client.remnawaveUuid+currentTariffId+autoRenew* (primary) + SecondarySubscription (доп.).
+// Теперь: ВСЕ подписки клиента живут в одной таблице. subscriptionIndex=0 — главная.
+// Поля Client.remnawaveUuid / currentTariffId / autoRenew* помечены deprecated (читаются для совместимости кабинета).
+model Subscription {
+  id                       String    @id @default(cuid())
+  ownerId                  String    @map("owner_id")
+  remnawaveUuid            String?   @map("remnawave_uuid")
+  /// subscriptionIndex=0 — «главная» (бывш. root). 1..N — дополнительные.
+  /// Первая созданная любого типа всегда получает 0. После «обнуления» главной
+  /// (tariffId=null) запись остаётся, новая покупка продлевает её.
+  subscriptionIndex        Int       @map("subscription_index")
+  tariffId                 String?   @map("tariff_id")
+  giftStatus               String?   @map("gift_status") // null = owned | GIFT_RESERVED | GIFT_CODE_ACTIVE | GIFTED
+  giftedToClientId         String?   @map("gifted_to_client_id") // если подарено — кому
+  // T15 (11.05.2026, WolfVPN): если эта sub была создана через активацию пробного триала —
+  // здесь ID использованного Trial. Позволяет показывать пометку «🎁 Пробная» в боте,
+  // и кнопку «Конвертировать» (продлить = купить тариф этого триала и заменить triald).
+  trialId                  String?   @map("trial_id")
+  // T7c (11.05.2026, WolfVPN): персональная цена подписки (накопительная).
+  // Стартует = базовая цена тарифа при покупке. При apply каждой extra-option (+устройство/трафик)
+  // увеличивается на стоимость опции. При продлении используется ЭТА цена (а не базовая тарифа).
+  customPrice              Float?    @map("custom_price")
+  // T17 (11.05.2026, WolfVPN): чёткое разграничение «купил себе» vs «купил, чтобы подарить».
+  // true  → подписка куплена через раздел «🎁 Подарки» (отображается ТОЛЬКО в gift menu)
+  // false → обычная купленная подписка (отображается в «Мои подписки» / menu:vpn)
+  // Меняется на false при явной кнопке «Забрать себе» (activateGiftForSelf).
+  // Не зависит от giftStatus — те описывают жизненный цикл кода, а это — намерение покупки.
+  purchasedAsGift          Boolean   @default(false) @map("purchased_as_gift")
+  // T-autorenew: индивидуальное автосписание на эту подписку.
+  autoRenewEnabled         Boolean   @default(false) @map("auto_renew_enabled")
+  /// T-unify: тариф для автопродления (если null → продлеваем текущий tariffId).
+  autoRenewTariffId        String?   @map("auto_renew_tariff_id")
+  /// T-unify: опция длительности для автопродления.
+  autoRenewPriceOptionId   String?   @map("auto_renew_price_option_id")
+  /// T-unify: количество доп. устройств при автопродлении.
+  autoRenewExtraDevices    Int       @default(0) @map("auto_renew_extra_devices")
+  /// T-unify: счётчик retry автопродления (cron сбрасывает после успеха).
+  autoRenewRetryCount      Int       @default(0) @map("auto_renew_retry_count")
+  /// T-unify: метка последнего уведомления (старая логика, не дублировать с lastNotifiedKey).
+  autoRenewNotifiedAt      DateTime? @map("auto_renew_notified_at")
+  /// T-unify: промокод применяемый при автопродлении.
+  autoRenewPromoCode       String?   @map("auto_renew_promo_code")
+  /// T-unify: цена за день — аналитический snapshot для отображения.
+  currentPricePerDay       Float?    @map("current_price_per_day")
+  /// T-extras-counter (14.05.2026, WolfVPN): количество докупленных доп. устройств.
+  /// Заменяет старый customPrice-накопитель для устройств.
+  extraDevices             Int       @default(0) @map("extra_devices")
+  /// T-extras-monthly-price (14.05.2026, WolfVPN): суммарная цена за ВСЕ доп.
+  /// устройства этой подписки на 30 дней. Берётся из sell-options-products (цена пакета).
+  /// При продлении формула: option.price + extraDevicesMonthlyPrice × (days/30).
+  /// НЕ привязано к tariff.pricePerExtraDevice (это отдельная админская фича для
+  /// выбора устройств при покупке тарифа — НЕ наша логика sell-options).
+  /// При apply пакета +N устройств: extraDevices += N, monthlyPrice += pkg.price.
+  /// При «Убрать дополнительные» → monthlyPrice = 0.
+  extraDevicesMonthlyPrice Float     @default(0) @map("extra_devices_monthly_price")
+  /// T-autorenew (12.05.2026, WolfVPN): метка последнего уведомления (notif_template_id:timestamp)
+  /// — чтобы не слать одно и то же уведомление дважды в течение N часов.
+  lastNotifiedKey          String?   @map("last_notified_key")
+  /// T-expire-sync (13.05.2026, WolfVPN): дата истечения подписки в Remnawave.
+  /// Кешируем в БД для быстрых фильтров (broadcast «Активные/Истёкшие», auto-renew cron).
+  /// Синхронизируется при каждом upsert/extend через extractCurrentExpireAt из Remna-ответа.
+  /// null = подписка ещё не привязана к Remna user или дата неизвестна.
+  expireAt                 DateTime? @map("expire_at")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @updatedAt @map("updated_at")
 
-  owner          Client     @relation("OwnerSubscriptions", fields: [ownerId], references: [id], onDelete: Cascade)
-  giftedToClient Client?    @relation("ReceivedSubscriptions", fields: [giftedToClientId], references: [id], onDelete: SetNull)
-  tariff         Tariff?    @relation(fields: [tariffId], references: [id], onDelete: SetNull)
-  giftCodes      GiftCode[] @relation("GiftCodeSubscription")
+  owner           Client     @relation("OwnerSubscriptions", fields: [ownerId], references: [id], onDelete: Cascade)
+  giftedToClient  Client?    @relation("ReceivedSubscriptions", fields: [giftedToClientId], references: [id], onDelete: SetNull)
+  tariff          Tariff?    @relation("SubscriptionTariff", fields: [tariffId], references: [id], onDelete: SetNull)
+  autoRenewTariff Tariff?    @relation("SubscriptionAutoRenewTariff", fields: [autoRenewTariffId], references: [id], onDelete: SetNull)
+  trial           Trial?     @relation(fields: [trialId], references: [id], onDelete: SetNull)
+  giftCodes       GiftCode[] @relation("GiftCodeSubscription")
+  payments        Payment[]  @relation("PaymentSubscription")
 
   @@unique([ownerId, subscriptionIndex])
   @@index([ownerId])
   @@index([remnawaveUuid])
   @@index([giftStatus])
-  @@map("secondary_subscriptions")
+  @@index([trialId])
+  @@index([autoRenewEnabled])
+  @@index([expireAt])
+  @@map("subscriptions")
+}
+
+// T15 (11.05.2026, WolfVPN): пресет пробной подписки.
+// Админ создаёт несколько триалов; каждый привязан к одному из тарифов.
+// Длительность задаётся отдельно (не наследуется из тарифа).
+// Юзер может активировать каждый триал максимум 1 раз (см. ClientTrialUsage).
+// Когда юзер активировал ВСЕ доступные триалы — кнопка «Получить пробную» в меню скрывается.
+model Trial {
+  id                String   @id @default(cuid())
+  name              String // отображаемое название триала (напр. "🎁 Пробная Стандартная")
+  tariffId          String   @map("tariff_id") // настройки сквадов / устройств наследуются
+  durationDays      Int      @map("duration_days") // длительность пробного периода
+  /// T16 (12.05.2026, WolfVPN): отдельный лимит трафика для триала (опционально).
+  /// Если null — используется trafficLimitBytes тарифа (старое поведение).
+  /// Например 5 ГБ = 5368709120. При конвертации триала в платную подписку
+  /// (extendSecondarySubscription) применяется полный лимит ТАРИФА, не триала.
+  trafficLimitBytes BigInt?  @map("traffic_limit_bytes")
+  enabled           Boolean  @default(true)
+  sortOrder         Int      @default(0) @map("sort_order")
+  description       String?  @db.Text // опц. описание для клиента (что включено / условия)
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  tariff        Tariff             @relation(fields: [tariffId], references: [id], onDelete: Cascade)
+  usages        ClientTrialUsage[]
+  subscriptions Subscription[]
+
+  @@index([tariffId])
+  @@map("trials")
+}
+
+// T15 (11.05.2026, WolfVPN): запись «клиент X активировал триал Y».
+// Используется чтобы знать какие триалы клиент уже взял, и блокировать повторную активацию.
+model ClientTrialUsage {
+  id             String   @id @default(cuid())
+  clientId       String   @map("client_id")
+  trialId        String   @map("trial_id")
+  activatedAt    DateTime @default(now()) @map("activated_at")
+  // ID secondary-подписки которая была создана этой активацией (для tracking).
+  subscriptionId String?  @map("subscription_id")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  trial  Trial  @relation(fields: [trialId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, trialId]) // один клиент = один раз каждый триал
+  @@index([clientId])
+  @@index([trialId])
+  @@map("client_trial_usages")
 }
 
 // Лог событий подарочной системы (аудит)
+// T-unify (12.05.2026, WolfVPN): SQL-колонка остаётся `secondary_subscription_id` для совместимости миграции,
+// но в коде поле читается как `subscriptionId` (унифицированный нейминг).
 model GiftHistory {
-  id                      String   @id @default(cuid())
-  clientId                String   @map("client_id")
-  secondarySubscriptionId String?  @map("secondary_subscription_id")
-  eventType               String   @map("event_type") // PURCHASED | ACTIVATED_SELF | CODE_CREATED | GIFT_SENT | GIFT_RECEIVED | CODE_CANCELLED | CODE_EXPIRED | DELETED
-  metadata                Json?    @map("metadata")
-  createdAt               DateTime @default(now()) @map("created_at")
+  id             String   @id @default(cuid())
+  clientId       String   @map("client_id")
+  subscriptionId String?  @map("secondary_subscription_id")
+  eventType      String   @map("event_type") // PURCHASED | ACTIVATED_SELF | CODE_CREATED | GIFT_SENT | GIFT_RECEIVED | CODE_CANCELLED | CODE_EXPIRED | DELETED | EDITED_BY_ADMIN
+  metadata       Json?    @map("metadata")
+  createdAt      DateTime @default(now()) @map("created_at")
 
   client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
   @@index([clientId])
-  @@index([secondarySubscriptionId])
+  @@index([subscriptionId])
   @@index([createdAt])
   @@map("gift_history")
 }
 
 // Код подарка подписки: создаётся при нажатии «Подарить», погашается получателем
 model GiftCode {
-  id                      String    @id @default(cuid())
-  code                    String    @unique // 12-символьный код XXXX-XXXX-XXXX
-  creatorId               String    @map("creator_id") // root-клиент, создавший подарок
-  secondarySubscriptionId String    @map("secondary_subscription_id") // FK → SecondarySubscription
-  redeemedById            String?   @map("redeemed_by_id") // root-клиент, активировавший подарок
-  status                  String    @default("ACTIVE") // ACTIVE | REDEEMED | EXPIRED | CANCELLED
-  giftMessage             String?   @map("gift_message") // персональное сообщение (макс 200 символов)
-  expiresAt               DateTime  @map("expires_at")
-  redeemedAt              DateTime? @map("redeemed_at")
-  expiryNotifiedAt        DateTime? @map("expiry_notified_at") // когда отправлено уведомление об истечении
-  createdAt               DateTime  @default(now()) @map("created_at")
+  id               String    @id @default(cuid())
+  code             String    @unique // 12-символьный код XXXX-XXXX-XXXX
+  creatorId        String    @map("creator_id") // клиент, создавший подарок
+  /// T-unify (12.05.2026, WolfVPN): SQL-колонка остаётся secondary_subscription_id, в коде subscriptionId.
+  subscriptionId   String    @map("secondary_subscription_id") // FK → Subscription
+  redeemedById     String?   @map("redeemed_by_id") // клиент, активировавший подарок
+  status           String    @default("ACTIVE") // ACTIVE | REDEEMED | EXPIRED | CANCELLED
+  giftMessage      String?   @map("gift_message") // персональное сообщение (макс 200 символов)
+  expiresAt        DateTime  @map("expires_at")
+  redeemedAt       DateTime? @map("redeemed_at")
+  expiryNotifiedAt DateTime? @map("expiry_notified_at") // когда отправлено уведомление об истечении
+  /// T-unify (12.05.2026, WolfVPN): true → код создан админом (а не клиентом). Используется чтобы
+  /// разрешить «активировать самому» если creatorId совпадает с recipient (админ выдаёт клиенту код).
+  createdByAdmin   Boolean   @default(false) @map("created_by_admin")
+  /// T-promo (13.05.2026, WolfVPN): id админа/менеджера который создал код (если createdByAdmin=true).
+  /// В админ-списке подписок отображается имя этого админа в колонке «Отправитель».
+  createdByAdminId String?   @map("created_by_admin_id")
+  createdAt        DateTime  @default(now()) @map("created_at")
 
-  creator               Client                @relation("GiftCodeCreator", fields: [creatorId], references: [id], onDelete: Cascade)
-  redeemedBy            Client?               @relation("GiftCodeRedeemer", fields: [redeemedById], references: [id], onDelete: SetNull)
-  secondarySubscription SecondarySubscription @relation("GiftCodeSubscription", fields: [secondarySubscriptionId], references: [id], onDelete: Cascade)
+  creator      Client       @relation("GiftCodeCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  redeemedBy   Client?      @relation("GiftCodeRedeemer", fields: [redeemedById], references: [id], onDelete: SetNull)
+  subscription Subscription @relation("GiftCodeSubscription", fields: [subscriptionId], references: [id], onDelete: Cascade)
 
   @@index([code])
   @@index([creatorId])
-  @@index([secondarySubscriptionId])
+  @@index([subscriptionId])
   @@index([status])
   @@map("gift_codes")
 }
@@ -930,11 +1174,6 @@ model TelegramAuthToken {
   token               String   @unique
   confirmedTelegramId String?  @map("confirmed_telegram_id")
   confirmedUsername   String?  @map("confirmed_username")
-  /// Какой клон-бот подтвердил токен (то есть в каком клоне юзер нажал /start auth_TOKEN).
-  /// Записывается на шаге POST /telegram-login-confirm. Затем GET /telegram-login-check
-  /// использует этот botId при создании/поиске Client. Null = legacy-token до миграции
-  /// или ещё не подтверждён.
-  confirmedBotId      String?  @map("confirmed_bot_id")
   expiresAt           DateTime @map("expires_at")
   createdAt           DateTime @default(now()) @map("created_at")
 
@@ -1118,21 +1357,21 @@ model LandingBlock {
 
 // Глобальная тема лендинга — один ряд (singleton, id = "default").
 model LandingTheme {
-  id             String   @id @default("default")
-  primaryColor   String?  @map("primary_color") @db.VarChar(20)
-  accentColor    String?  @map("accent_color") @db.VarChar(20)
-  backgroundColor String? @map("background_color") @db.VarChar(20)
-  textColor      String?  @map("text_color") @db.VarChar(20)
+  id              String   @id @default("default")
+  primaryColor    String?  @map("primary_color") @db.VarChar(20)
+  accentColor     String?  @map("accent_color") @db.VarChar(20)
+  backgroundColor String?  @map("background_color") @db.VarChar(20)
+  textColor       String?  @map("text_color") @db.VarChar(20)
   /// Активный шрифт (имя из fontPresets).
-  fontFamily     String?  @map("font_family") @db.VarChar(80)
+  fontFamily      String?  @map("font_family") @db.VarChar(80)
   /// Доступные шрифты: [{ name, url, previewText }] — Inter, Manrope, Onest, Space Grotesk и т.д.
-  fontPresets    Json     @default("[]") @map("font_presets")
-  borderRadius   String?  @map("border_radius") @db.VarChar(20)
-  containerWidth String?  @map("container_width") @db.VarChar(20)
-  customCss      String?  @map("custom_css") @db.Text
+  fontPresets     Json     @default("[]") @map("font_presets")
+  borderRadius    String?  @map("border_radius") @db.VarChar(20)
+  containerWidth  String?  @map("container_width") @db.VarChar(20)
+  customCss       String?  @map("custom_css") @db.Text
   /// Целиком черновик темы (если есть несохранённые изменения).
-  draft          Json?    @map("draft")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  draft           Json?    @map("draft")
+  updatedAt       DateTime @updatedAt @map("updated_at")
 
   @@map("landing_theme")
 }
@@ -1191,34 +1430,158 @@ model AdminEvent {
 //   - аудита (видишь все попытки атаки на unsigned endpoint'ы).
 // ─────────────────────────────────────────────────────────────────────────────
 model WebhookEvent {
-  id            String    @id @default(cuid())
+  id             String   @id @default(cuid())
   /// platega | yookassa | yoomoney | cryptopay | heleket | lava | overpay
-  provider      String    @db.VarChar(20)
+  provider       String   @db.VarChar(20)
   /// Сырое тело запроса (как пришло — для HMAC verification и replay).
-  rawBody       String    @map("raw_body") @db.Text
+  rawBody        String   @map("raw_body") @db.Text
   /// Все relevant заголовки в JSON ({ "x-signature": "...", "authorization": "..." }).
-  headers       Json
+  headers        Json
   /// IP отправителя (для IP-whitelist аудита).
-  remoteIp      String?   @map("remote_ip") @db.VarChar(64)
+  remoteIp       String?  @map("remote_ip") @db.VarChar(64)
   /// HTTP-статус, который мы вернули.
   responseStatus Int      @map("response_status")
   /// Результат обработки: accepted | rejected_signature | rejected_payload | payment_not_found | payment_already_paid | error
-  outcome       String    @db.VarChar(40)
+  outcome        String   @db.VarChar(40)
   /// Причина отказа / ошибки, если есть.
-  errorMessage  String?   @map("error_message") @db.Text
+  errorMessage   String?  @map("error_message") @db.Text
   /// ID платежа, к которому привязали (если нашли).
-  paymentId     String?   @map("payment_id")
+  paymentId      String?  @map("payment_id")
   /// Длительность обработки в мс (для perf-мониторинга).
-  durationMs    Int?      @map("duration_ms")
+  durationMs     Int?     @map("duration_ms")
   /// Кто нажал «replay»: если null — оригинальный webhook от провайдера.
-  replayedBy    String?   @map("replayed_by") @db.VarChar(120)
+  replayedBy     String?  @map("replayed_by") @db.VarChar(120)
   /// FK на оригинальный webhook (если это replay).
-  replayOfId    String?   @map("replay_of_id")
-  createdAt     DateTime  @default(now()) @map("created_at")
+  replayOfId     String?  @map("replay_of_id")
+  createdAt      DateTime @default(now()) @map("created_at")
 
   @@index([provider, createdAt(sort: Desc)])
   @@index([paymentId])
   @@index([outcome, createdAt(sort: Desc)])
   @@index([createdAt(sort: Desc)])
   @@map("webhook_events")
+}
+
+/// T-autorenew (12.05.2026, WolfVPN): конструктор уведомлений автосписания.
+/// Админ создаёт шаблоны (например «За 15 мин до списания», «Списание не удалось» и т.д.).
+/// Cron в `auto-renew.cron.ts` берёт активные шаблоны нужного triggerType и сравнивает
+/// текущий timeLeft до истечения / время после события с offsetMinutes — если совпадает,
+/// отправляет messageText клиенту с подстановкой переменных:
+///   {tariff_name}, {amount}, {currency}, {days_left}, {hours_left}, {minutes_left},
+///   {expire_date}, {sub_index}, {balance}, {client_name}
+model AutoRenewNotification {
+  id            String   @id @default(cuid())
+  /// Название шаблона для админа (не показывается клиенту).
+  name          String   @db.VarChar(120)
+  /// Тип триггера:
+  ///   UPCOMING  — за N минут/часов/дней ДО истечения подписки (отправляется один раз)
+  ///   SUCCESS   — после успешного списания
+  ///   FAILED    — после неудачного списания (баланс не хватает + YK не сработал)
+  ///   RETRY     — между попытками списания в grace period
+  ///   EXPIRED   — после истечения grace period (автосписание отключено)
+  triggerType   String   @map("trigger_type") @db.VarChar(20)
+  /// Смещение в минутах. Для UPCOMING — положительное (за сколько ДО события).
+  /// Для остальных типов — игнорируется (отправляется при наступлении события).
+  offsetMinutes Int      @default(15) @map("offset_minutes")
+  /// Текст сообщения. Поддерживает HTML telegram (b, i, code) + переменные в фигурных скобках.
+  messageText   String   @map("message_text") @db.Text
+  /// Включён ли шаблон.
+  enabled       Boolean  @default(true)
+  /// Порядок (для отображения в админке).
+  sortOrder     Int      @default(0) @map("sort_order")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@index([triggerType, enabled])
+  @@index([sortOrder])
+  @@map("auto_renew_notifications")
+}
+
+// ——— WDTT (Warp/WireGuard) категории и тарифы ———
+model WdttCategory {
+  id        String   @id @default(cuid())
+  name      String
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tariffs WdttTariff[]
+
+  @@map("wdtt_categories")
+}
+
+model WdttTariff {
+  id                String   @id @default(cuid())
+  categoryId        String   @map("category_id")
+  name              String
+  proxyCount        Int      @map("proxy_count")
+  durationDays      Int      @map("duration_days")
+  trafficLimitBytes BigInt?  @map("traffic_limit_bytes")
+  price             Float    @default(0)
+  currency          String   @default("usd")
+  sortOrder         Int      @default(0) @map("sort_order")
+  enabled           Boolean  @default(true)
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  category      WdttCategory     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  payments      Payment[]        @relation("WdttTariffPayments")
+  slots         WdttSlot[]
+  assignedNodes WdttTariffNode[]
+
+  @@index([categoryId])
+  @@map("wdtt_tariffs")
+}
+
+model WdttTariffNode {
+  id       String @id @default(cuid())
+  tariffId String @map("tariff_id")
+  nodeId   String @map("node_id")
+
+  tariff WdttTariff @relation(fields: [tariffId], references: [id], onDelete: Cascade)
+  node   WdttNode   @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@unique([tariffId, nodeId])
+  @@index([tariffId])
+  @@index([nodeId])
+  @@map("wdtt_tariff_nodes")
+}
+
+model WdttSlot {
+  id                 String    @id @default(cuid())
+  nodeId             String    @map("node_id")
+  clientId           String    @map("client_id")
+  tariffId           String?   @map("tariff_id")
+  paymentId          String?   @map("payment_id")
+
+  // Данные ключа
+  password           String
+  vkHash             String    @map("vk_hash")
+  wdttLink           String    @map("wdtt_link")
+
+  // Статус и сроки
+  expiresAt          DateTime  @map("expires_at")
+  status             String    @default("ACTIVE") // ACTIVE | EXPIRED | REVOKED
+  revokeReason       String?   @map("revoke_reason")
+  revokedAt          DateTime? @map("revoked_at")
+
+  // Лимиты
+  trafficLimitBytes  BigInt?   @map("traffic_limit_bytes")
+  trafficUsedBytes   BigInt    @default(0) @map("traffic_used_bytes")
+
+  // Метаданные
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  node   WdttNode    @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  client Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  tariff WdttTariff? @relation(fields: [tariffId], references: [id], onDelete: SetNull)
+  payment Payment?  @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@index([nodeId])
+  @@index([clientId])
+  @@index([tariffId])
+  @@index([status])
+  @@index([expiresAt])
+  @@map("wdtt_slots")
 }

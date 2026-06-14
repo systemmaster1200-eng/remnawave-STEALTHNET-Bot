@@ -16,6 +16,9 @@ import { ChangePasswordPage } from "@/pages/change-password";
 import { DashboardPage } from "@/pages/dashboard";
 import { ClientsPage } from "@/pages/clients";
 import { TariffsPage } from "@/pages/tariffs";
+import { TrialsPage } from "@/pages/trials"; // T15 (11.05.2026)
+import { WithdrawalsPage } from "@/pages/withdrawals"; // T6 (11.05.2026)
+import { AutoRenewPage } from "@/pages/auto-renew"; // T-autorenew (12.05.2026)
 import { SettingsPage } from "@/pages/settings";
 import { LandingEditorPage } from "@/pages/landing-editor";
 import { LandingPreviewPage } from "@/pages/landing-preview";
@@ -34,6 +37,7 @@ import { AnalyticsPage } from "@/pages/analytics";
 import { MarketingPage } from "@/pages/marketing";
 import { AdminsPage } from "@/pages/admins";
 import { SalesReportPage } from "@/pages/sales-report";
+import { BalanceSalesPage } from "@/pages/balance-sales";
 import { VideoInstructionsPage } from "@/pages/video-instructions";
 import { BackupPage } from "@/pages/backup";
 import { ContestsPage } from "@/pages/contests";
@@ -41,15 +45,17 @@ import { AdminTicketsPage } from "@/pages/admin-tickets";
 import { BroadcastPage } from "@/pages/broadcast";
 import { AutoBroadcastPage } from "@/pages/auto-broadcast";
 import { ReferralNetworkPage } from "@/pages/referral-network";
+import { AdminReferralsPage } from "@/pages/admin-referrals";
 import { GramadsPromoPage } from "@/pages/gramads-promo";
 import { TrafficAbusePage } from "@/pages/traffic-abuse";
 import { ApiKeysPage } from "@/pages/api-keys";
-import { BotsPage } from "@/pages/bots";
+import { AntibotPage } from "@/pages/antibot";
 import { ApiDocsPage } from "@/pages/api-docs";
 import { GeoMapPage } from "@/pages/geo-map";
 import { AdminSecondarySubscriptionsPage } from "@/pages/admin-secondary-subscriptions";
 import { ProxyPage } from "@/pages/proxy";
 import { SingboxPage } from "@/pages/singbox";
+import { WdttPage } from "@/pages/wdtt";
 import LanguagesPage from "@/pages/languages";
 import { TourConstructorPage } from "@/pages/tour-constructor";
 import { MarketplaceLayout } from "@/pages/marketplace/marketplace-layout";
@@ -75,6 +81,7 @@ import { ClientYooMoneyPayPage } from "@/pages/cabinet/client-yoomoney-pay";
 import { ClientExtraOptionsPage } from "@/pages/cabinet/client-extra-options";
 import { ClientProxyPage } from "@/pages/cabinet/client-proxy";
 import { ClientSingboxPage } from "@/pages/cabinet/client-singbox";
+import { ClientWdttPage } from "@/pages/cabinet/client-wdtt";
 import { ClientTicketsPage } from "@/pages/cabinet/client-tickets";
 import { ClientCustomBuildPage } from "@/pages/cabinet/client-custom-build";
 import { ClientGiftsPage } from "@/pages/cabinet/client-gifts";
@@ -222,6 +229,12 @@ function AppRoutes() {
         />
         <Route path="clients" element={<ForceChangePassword><ClientsPage /></ForceChangePassword>} />
         <Route path="tariffs" element={<ForceChangePassword><TariffsPage /></ForceChangePassword>} />
+        {/* T15 (11.05.2026) */}
+        <Route path="trials" element={<ForceChangePassword><TrialsPage /></ForceChangePassword>} />
+        {/* T6 (11.05.2026) */}
+        <Route path="withdrawals" element={<ForceChangePassword><WithdrawalsPage /></ForceChangePassword>} />
+        {/* T-autorenew (12.05.2026) */}
+        <Route path="auto-renew" element={<ForceChangePassword><AutoRenewPage /></ForceChangePassword>} />
         <Route path="settings" element={<ForceChangePassword><SettingsPage /></ForceChangePassword>} />
         <Route path="landing-editor" element={<ForceChangePassword><LandingEditorPage /></ForceChangePassword>} />
         <Route path="landing-preview" element={<ForceChangePassword><LandingPreviewPage /></ForceChangePassword>} />
@@ -239,18 +252,21 @@ function AppRoutes() {
         <Route path="marketing" element={<ForceChangePassword><MarketingPage /></ForceChangePassword>} />
         <Route path="admins" element={<ForceChangePassword><AdminsPage /></ForceChangePassword>} />
         <Route path="sales-report" element={<ForceChangePassword><SalesReportPage /></ForceChangePassword>} />
+        <Route path="balance-sales" element={<ForceChangePassword><BalanceSalesPage /></ForceChangePassword>} />
         <Route path="video-instructions" element={<ForceChangePassword><VideoInstructionsPage /></ForceChangePassword>} />
         <Route path="broadcast" element={<ForceChangePassword><BroadcastPage /></ForceChangePassword>} />
         <Route path="auto-broadcast" element={<ForceChangePassword><AutoBroadcastPage /></ForceChangePassword>} />
         <Route path="proxy" element={<ForceChangePassword><ProxyPage /></ForceChangePassword>} />
         <Route path="singbox" element={<ForceChangePassword><SingboxPage /></ForceChangePassword>} />
+        <Route path="wdtt" element={<ForceChangePassword><WdttPage /></ForceChangePassword>} />
         <Route path="backup" element={<ForceChangePassword><BackupPage /></ForceChangePassword>} />
         <Route path="contests" element={<ForceChangePassword><ContestsPage /></ForceChangePassword>} />
         <Route path="tickets" element={<ForceChangePassword><AdminTicketsPage /></ForceChangePassword>} />
         <Route path="referral-network" element={<ForceChangePassword><ReferralNetworkPage /></ForceChangePassword>} />
+        <Route path="referrals" element={<ForceChangePassword><AdminReferralsPage /></ForceChangePassword>} />
         <Route path="traffic-abuse" element={<ForceChangePassword><TrafficAbusePage /></ForceChangePassword>} />
         <Route path="api-keys" element={<ForceChangePassword><ApiKeysPage /></ForceChangePassword>} />
-        <Route path="bots" element={<ForceChangePassword><BotsPage /></ForceChangePassword>} />
+        <Route path="antibot" element={<ForceChangePassword><AntibotPage /></ForceChangePassword>} />
         <Route path="languages" element={<ForceChangePassword><LanguagesPage /></ForceChangePassword>} />
         <Route path="api-docs" element={<ForceChangePassword><ApiDocsPage /></ForceChangePassword>} />
         <Route path="geo-map" element={<ForceChangePassword><GeoMapPage /></ForceChangePassword>} />
@@ -389,6 +405,14 @@ function AppRoutes() {
           element={
             <RequireClientAuth>
               <ClientSingboxPage />
+            </RequireClientAuth>
+          }
+        />
+        <Route
+          path="wdtt"
+          element={
+            <RequireClientAuth>
+              <ClientWdttPage />
             </RequireClientAuth>
           }
         />

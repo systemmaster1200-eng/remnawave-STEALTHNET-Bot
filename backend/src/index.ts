@@ -13,7 +13,7 @@ import { startContestDailyReminderScheduler, stopContestDailyReminderScheduler }
 import { startAutoRenewScheduler } from "./modules/payment/auto-renew.cron.js";
 import { startAutoBackupScheduler, stopAutoBackupScheduler } from "./modules/backup/auto-backup.scheduler.js";
 import { startGiftExpiryCron } from "./modules/gift/gift-expiry.cron.js";
-import { startAbandonedAccountsCleanup } from "./modules/client/abandoned-accounts.cron.js";
+import { startWdttCron, stopWdttCron } from "./worker/wdtt.cron.js";
 import { startMarketplaceScheduler, stopMarketplaceScheduler } from "./modules/marketplace/marketplace.scheduler.js";
 import { ensureTheme, seedDefaultsToEmptyBlocks } from "./modules/landing/landing.service.js";
 import { migrateLandingToBlocks } from "./scripts/migrate-landing-to-blocks.js";
@@ -47,7 +47,10 @@ async function main() {
   startContestDailyReminderScheduler(env.CONTEST_REMINDER_CRON ?? undefined);
   startAutoRenewScheduler();
   startGiftExpiryCron();
-  startAbandonedAccountsCleanup();
+  startWdttCron();
+  // крон удаления «заброшенных» аккаунтов УДАЛЁН.
+  // Он удалял всех с onboardingCompleted=false старше 30 мин — а теперь этот флаг ставится
+  // TG-юзерам для запуска онбординга (см. /telegram-login-check, /register). Крон бы их стирал.
   await startAutoBackupScheduler();
   startMarketplaceScheduler();
 
@@ -64,17 +67,18 @@ async function main() {
   });
   registerCron({ name: "auto-renew", cron: "*/15 * * * *", description: "Авто-продление подписок с баланса/yookassa" });
   registerCron({ name: "gift-expiry", cron: "*/30 * * * *", description: "Истёкшие gift-коды → освобождаем зарезервированные подписки" });
-  registerCron({ name: "abandoned-accounts", cron: "0 3 * * *", description: "Очистка незавершённых регистраций" });
   registerCron({ name: "auto-backup", cron: "0 4 * * *", description: "Автоматический бэкап БД" });
   registerCron({ name: "marketplace-heartbeat", cron: "*/10 * * * *", description: "Heartbeat в маркетплейс-хаб" });
+  registerCron({ name: "wdtt-expiry", cron: "*/5 * * * *", description: "Истёкшие WDTT слоты" });
 
   const server = app.listen(env.PORT, "0.0.0.0", () => {
-    console.log(`API v4.2.1 listening on port ${env.PORT}`);
+    console.log(`API v5.0.0 listening on port ${env.PORT}`);
   });
 
   const shutdown = async () => {
     stopAutoBroadcastScheduler();
     stopContestDailyReminderScheduler();
+    stopWdttCron();
     stopAutoBackupScheduler();
     stopMarketplaceScheduler();
     server.close();
