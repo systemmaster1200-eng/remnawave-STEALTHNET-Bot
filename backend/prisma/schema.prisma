@@ -107,7 +107,6 @@ model SecondarySubscription {
   owner             Client     @relation("OwnerSecondarySubscriptions", fields: [ownerId], references: [id], onDelete: Cascade)
   giftedToClient    Client?    @relation("ReceivedSecondarySubscriptions", fields: [giftedToClientId], references: [id], onDelete: SetNull)
   tariff            Tariff?    @relation(fields: [tariffId], references: [id], onDelete: SetNull)
-  giftCodes         GiftCode[] @relation("GiftCodeSubscription")
   @@unique([ownerId, subscriptionIndex])
   @@index([ownerId])
   @@index([remnawaveUuid])
@@ -1126,6 +1125,8 @@ model Subscription {
   autoRenewTariff Tariff?    @relation("SubscriptionAutoRenewTariff", fields: [autoRenewTariffId], references: [id], onDelete: SetNull)
   trial           Trial?     @relation(fields: [trialId], references: [id], onDelete: SetNull)
   payments        Payment[]  @relation("PaymentSubscription")
+  giftCodes       GiftCode[] @relation("GiftCodeSubscription")
+  giftHistory     GiftHistory[]
 
   @@unique([ownerId, subscriptionIndex])
   @@index([ownerId])
@@ -1189,17 +1190,18 @@ model ClientTrialUsage {
 // T-unify (12.05.2026, WolfVPN): SQL-колонка остаётся `secondary_subscription_id` для совместимости миграции,
 // но в коде поле читается как `subscriptionId` (унифицированный нейминг).
 model GiftHistory {
-  id             String   @id @default(cuid())
-  clientId       String   @map("client_id")
-  secondarySubscriptionId String?  @map("secondary_subscription_id")
-  eventType      String   @map("event_type")
-  metadata       Json?    @map("metadata")
-  createdAt      DateTime @default(now()) @map("created_at")
+  id             String    @id @default(cuid())
+  clientId       String    @map("client_id")
+  subscriptionId String?   @map("secondary_subscription_id")
+  eventType      String    @map("event_type")
+  metadata       Json?     @map("metadata")
+  createdAt      DateTime  @default(now()) @map("created_at")
 
-  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  client       Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
 
   @@index([clientId])
-  @@index([secondarySubscriptionId])
+  @@index([subscriptionId])
   @@index([createdAt])
   @@map("gift_history")
 }
@@ -1209,7 +1211,7 @@ model GiftCode {
   id               String    @id @default(cuid())
   code             String    @unique // 12-символьный код XXXX-XXXX-XXXX
   creatorId        String    @map("creator_id") // клиент, создавший подарок
-  secondarySubscriptionId   String    @map("secondary_subscription_id") // FK → SecondarySubscription
+  subscriptionId   String    @map("secondary_subscription_id") // FK → Subscription (column kept for DB compat)
   redeemedById     String?   @map("redeemed_by_id") // клиент, активировавший подарок
   status           String    @default("ACTIVE") // ACTIVE | REDEEMED | EXPIRED | CANCELLED
   giftMessage      String?   @map("gift_message") // персональное сообщение (макс 200 символов)
@@ -1222,11 +1224,11 @@ model GiftCode {
 
   creator      Client       @relation("GiftCodeCreator", fields: [creatorId], references: [id], onDelete: Cascade)
   redeemedBy   Client?      @relation("GiftCodeRedeemer", fields: [redeemedById], references: [id], onDelete: SetNull)
-  secondarySubscription SecondarySubscription @relation("GiftCodeSubscription", fields: [secondarySubscriptionId], references: [id], onDelete: Cascade)
+  subscription Subscription @relation("GiftCodeSubscription", fields: [subscriptionId], references: [id], onDelete: Cascade)
 
   @@index([code])
   @@index([creatorId])
-  @@index([secondarySubscriptionId])
+  @@index([subscriptionId])
   @@index([status])
   @@map("gift_codes")
 }

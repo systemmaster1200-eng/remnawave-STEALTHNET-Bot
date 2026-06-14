@@ -32,6 +32,7 @@ import { upsertPrimarySubscription, upsertSubscriptionByRemnaUuid } from "../sub
 import { saveRedirectAndBuildUrl } from "../payment-redirect/payment-redirect.util.js";
 import { createProxySlotsByPaymentId } from "../proxy/proxy-slots-activation.service.js";
 import { createSingboxSlotsByPaymentId } from "../singbox/singbox-slots-activation.service.js";
+import { createWdttSlotsByPaymentId } from "../wdtt/wdtt-slots-activation.service.js";
 import { buildSingboxSlotSubscriptionLink } from "../singbox/singbox-link.js";
 import { applyExtraOptionByPaymentId } from "../extra-options/extra-options.service.js";
 import { getAuthUrl, exchangeCodeForToken, requestPayment, processPayment } from "../yoomoney/yoomoney.service.js";
