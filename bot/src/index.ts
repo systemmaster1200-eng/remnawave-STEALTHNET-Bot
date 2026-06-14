@@ -7606,7 +7606,7 @@ for (const b of botInstances) {
         if (data.ok && data.result?.length) {
           for (const update of data.result) {
             try {
-              await b.handleUpdate(update, console.log);
+              await b.handleUpdate(update);
             } catch (err) {
               console.error(`[Bot] Handle update ${update.update_id} error:`, err);
             }
