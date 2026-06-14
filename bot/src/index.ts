@@ -7589,24 +7589,34 @@ const botInstances: Bot[] = [];
   b.catch((err) => console.error(`[Bot ${token.slice(0, 6)}…] error:`, err));
   botInstances.push(b);
 }
-// start() для long polling не завершается — нельзя await, иначе после старта код не пойдёт дальше.
+// ——— Ручной polling (для совместимости с Telegram API зеркалами) ———
 for (const b of botInstances) {
   const token = b.token;
-  console.log(`[Bot] Starting long polling for ${token.slice(0, 6)}…`);
-  void b.start({
-    onStart: async (info) => {
-      console.log(`[Bot] ✅ Bot @${info.username ?? "?"} started successfully!`);
+  console.log(`[Bot] Starting manual polling for ${token.slice(0, 6)}…`);
+  let offset = 0;
+  const tgUrl = (process.env.TELEGRAM_API_URL || "https://api.telegram.org").replace(/\/$/, "");
+  console.log(`[Bot] Polling URL: ${tgUrl}`);
+
+  (async function poll() {
+    while (true) {
       try {
-        const cfg = await api.getPublicConfig();
-        if (cfg?.translations) setTranslations(cfg.translations);
-        console.log("[Bot] Config and translations loaded");
-      } catch (e) {
-        console.error("[Bot] Failed to load config:", e);
+        const url = `${tgUrl}/bot${token}/getUpdates?timeout=1&offset=${offset}`;
+        const res = await fetch(url);
+        const data = await res.json() as { ok: boolean; result?: Array<{ update_id: number }> };
+        if (data.ok && data.result?.length) {
+          for (const update of data.result) {
+            try {
+              await b.handleUpdate(update, console.log);
+            } catch (err) {
+              console.error(`[Bot] Handle update ${update.update_id} error:`, err);
+            }
+            offset = update.update_id + 1;
+          }
+        }
+      } catch (err) {
+        console.error("[Bot] Poll error:", err);
       }
-    },
-    drop_pending_updates: false,
-    timeout: 5,
-  }).catch((err) => {
-    console.error("[Bot] ❌ start() failed:", err);
-  });
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  })().catch((err) => console.error("[Bot] Poll loop error:", err));
 }
