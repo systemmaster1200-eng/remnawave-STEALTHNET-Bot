@@ -4,12 +4,12 @@
 
 1. [Что такое WDTT](#1-что-такое-wdtt)
 2. [Архитектура](#2-архитектура)
-3. [Требования](#3-требования)
-4. [Развёртывание WDTT-ноды](#4-развёртывание-wdtt-ноды)
-5. [Настройка STEALTHNET API для работы с нодой](#5-настройка-stealthnet-api)
+3. [Быстрый старт (Docker)](#3-быстрый-старт)
+4. [Ручная установка](#4-ручная-установка)
+5. [Настройка STEALTHNET API](#5-настройка-stealthnet-api)
 6. [Создание категорий и тарифов](#6-создание-категорий-и-тарифов)
 7. [Покупка клиентом](#7-покупка-клиентом)
-8. [Мониторинг и администрирование](#8-мониторинг-и-администрирование)
+8. [Мониторинг](#8-мониторинг)
 9. [Устранение проблем](#9-устранение-проблем)
 10. [Безопасность](#10-безопасность)
 
@@ -17,14 +17,15 @@
 
 ## 1. Что такое WDTT
 
-**WDTT** (WireGuard-over-TURN) — VPN-протокол для Android, основанный на WireGuard с обфускацией через TURN-серверы. Основные особенности:
+**WDTT** (WireGuard-over-TURN) — VPN-протокол для Android, основанный на WireGuard с обфускацией через TURN-серверы VK.
 
-- **Обфускация**: трафик маскируется под обычный TURN (STUN/TURN), что затрудняет блокировку DPI
-- **Скорость**: WireGuard на уровне ядра, минимальные задержки
-- **Простота**: клиент подключается по одному `wdtt://` ссылке
-- **Нативная интеграция**: работает через стандартный Android VPN API
+**Источник:** [github.com/amurcanov/proxy-turn-vk-android](https://github.com/amurcanov/proxy-turn-vk-android)
 
-WDTT-ноды работают на базе проекта [proxy-turn-vk-android-main](https://github.com/nicknishevkname/proxy-turn-vk-android-main).
+Особенности:
+- **Обфускация** — трафик маскируется под WebRTC/DTLS
+- **Скорость** — WireGuard на уровне ядра
+- **Простота** — один `wdtt://` ссылка для подключения
+- **Управление** — Telegram-бот + HTTP API
 
 ---
 
@@ -39,14 +40,6 @@ WDTT-ноды работают на базе проекта [proxy-turn-vk-andro
 │                  │     │                       │     │   Порт 56000 (DTLS) │
 │                  │     │   POST /api/health    │     │   Порт 56001 (WG)   │
 └─────────────────┘     └──────────────────────┘     └─────────────────────┘
-                                │                              │
-                                ▼                              ▼
-                         ┌──────────────┐            ┌──────────────────┐
-                         │  PostgreSQL   │            │  WireGuard       │
-                         │  wdtt_nodes   │            │  (DTLS/TUN)      │
-                         │  wdtt_slots   │            │                  │
-                         │  wdtt_tariffs │            └──────────────────┘
-                         └──────────────┘
 ```
 
 **Жизненный цикл слота:**
@@ -55,522 +48,356 @@ WDTT-ноды работают на базе проекта [proxy-turn-vk-andro
 Клиент покупает тариф
         │
         ▼
-STEALTHNET API создаёт платёж
+STEALTHNET API → POST /api/keys → WDTT-нода
         │
         ▼
-POST /api/keys на ноду (с паролем и лимитом трафика)
+Нода создаёт пароль → возвращает wdtt:// ссылку
         │
         ▼
-Нода возвращает: vk_hash + wdtt_link
+Клиент получает ссылку → импортирует в WDTT App
         │
         ▼
-Запись в БД: wdttSlot (password, vkHash, wdttLink, expiresAt)
-        │
-        ▼
-Клиент получает wdtt_link → импортирует в WDTT Android App
-        │
-        ▼
-Через N дней: cron находит истёкшие слоты
-        │
-        ▼
-DELETE /api/keys/:password на ноду → слот помечается EXPIRED
+Через N дней: DELETE /api/keys/:password → слот отозван
 ```
 
 ---
 
-## 3. Требования
+## 3. Быстрый старт
 
-### Для WDTT-ноды
-
-| Компонент | Минимум | Рекомендация |
-|-----------|---------|--------------|
-| ОС | Ubuntu 22.04 / Debian 12 | Ubuntu 24.04 |
-| CPU | 1 vCPU | 2+ vCPU |
-| RAM | 512 MB | 1+ GB |
-| Диск | 5 GB | 10+ GB |
-| Сеть | 100 Мбит/с | 1+ Гбит/с |
-| Docker | 24.0+ | Последняя稳定 |
-| Порты | 56000/udp, 56001/udp, 9000/tcp | Открытые файрволом |
-
-### Для STEALTHNET API
-
-- Уже развёрнутый STEALTHNET (API + БД + фронтенд)
-- Доступ к админ-панели: `https://your-domain.com/admin/wdtt`
-
----
-
-## 4. Развёртывание WDTT-ноды
-
-### Шаг 1: Подготовка сервера
+### Через наш репозиторий
 
 ```bash
-# Подключаемся к серверу
-ssh root@YOUR_SERVER_IP
-
-# Обновляем систему
-apt update && apt upgrade -y
-
-# Устанавливаем Docker (если не установлен)
-curl -fsSL https://get.docker.com | sh
-systemctl enable --now docker
-
-# Устанавливаем Docker Compose (если не установлен)
-apt install -y docker-compose-plugin
-
-# Проверяем
-docker --version
-docker compose version
-```
-
-### Шаг 2: Клонируем проект
-
-```bash
+# 1. Клонируем (или берём из основного репозитория)
 cd /opt
-git clone https://github.com/nicknishevkname/proxy-turn-vk-android-main.git wdtt-node
-cd wdtt-node
-ls -la
+git clone https://github.com/ASTRACAT2022/remnawave-STEALTHNET-Bot.git
+cd remnawave-STEALTHNET-Bot/wdtt-node
+
+# 2. Создаём .env
+cp .env.example .env
+nano .env
 ```
 
-### Шаг 3: Генерируем API-ключ
+### Настройка `.env`
 
 ```bash
-# Генерируем 64-символьный hex-ключ
+# Обязательные:
+MAIN_PASSWORD=ваш_надёжный_пароль
 API_KEY=$(openssl rand -hex 32)
-echo "Ваш API ключ: $API_KEY"
-echo "$API_KEY" > /opt/wdtt-node/.api_key
-chmod 600 /opt/wdtt-node/.api_key
+
+# Опционально:
+PUBLIC_HOST=ваш_ip_или_домен
+ADMIN_ID=ваш_telegram_id
+BOT_TOKEN=ваш_bot_token
 ```
 
-> **Важно**: Сохраните этот ключ — он понадобится для регистрации ноды в админке.
-
-### Шаг 4: Настраиваем Docker Compose
-
-Отредактируйте `docker-compose.yml`:
+### Запуск
 
 ```bash
-nano /opt/wdtt-node/docker-compose.yml
-```
-
-Пример конфигурации:
-
-```yaml
-services:
-  wdtt:
-    image: ghcr.io/nicknishevkname/proxy-turn-vk-android:latest
-    # Или соберите локально:
-    # build: .
-    container_name: wdtt-node
-    restart: unless-stopped
-    ports:
-      # API端口 (для STEALTHNET)
-      - "9000:9000/tcp"
-      # DTLS порт (WireGuard over DTLS)
-      - "56000:56000/udp"
-      # WireGuard порт
-      - "56001:56001/udp"
-    environment:
-      # API ключ для авторизации запросов от STEALTHNET
-      - API_KEY=${API_KEY}
-      # Порты (должны совпадать с портами в ports)
-      - DTLS_PORT=56000
-      - WG_PORT=56001
-      - TUN_PORT=9000
-    volumes:
-      # Данные WireGuard (ключи, конфиги)
-      - ./data:/app/data
-    # Ресурсы (опционально)
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-        reservations:
-          memory: 128M
-```
-
-### Шаг 5: Запускаем ноду
-
-```bash
-cd /opt/wdtt-node
-
-# Устанавливаем переменную окружения
-export API_KEY=$(cat .api_key)
-
-# Запускаем
+# Сборка и запуск
+docker compose build --no-cache
 docker compose up -d
 
-# Проверяем статус
-docker compose ps
-docker compose logs -f --tail=50
+# Проверка
+curl http://localhost:9000/api/health -H "X-API-Key: ВАШ_API_KEY"
 ```
 
-Ожидаемый вывод в логах:
-
-```
-wdtt-node  | Server started on port 56000 (DTLS)
-wdtt-node  | Server started on port 56001 (WireGuard)
-wdtt-node  | API server started on port 9000
-```
-
-### Шаг 6: Проверяем доступность API
+### Или через скрипт
 
 ```bash
-# Проверяем health endpoint
-curl -s http://localhost:9000/api/health \
-  -H "X-API-Key: $(cat .api_key)" | jq .
-
-# Ожидаемый ответ:
-# {
-#   "status": "ok",
-#   "version": "...",
-#   "uptime": ...
-# }
+cd wdtt-node
+chmod +x deploy.sh
+./deploy.sh install
 ```
 
-### Шаг 7: Проверяем извне (из STEALTHNET-сервера)
+---
+
+## 4. Ручная установка
+
+Если не используете Docker:
+
+### Установка WDTT сервера
 
 ```bash
-# На сервере STEALTHNET:
-curl -s http://YOUR_WDTT_SERVER_IP:9000/api/health \
-  -H "X-API-Key: YOUR_API_KEY" | jq .
+# Устанавливаем Go
+wget https://go.dev/dl/go1.23.0.linux-amd64.tar.gz
+tar -C /usr/local -xzf go1.23.0.linux-amd64.tar.gz
+export PATH=$PATH:/usr/local/go/bin
 
-# Если не работает:
-# 1. Проверьте файрвол: ufw status / iptables -L
-# 2. Откройте порты: ufw allow 9000/tcp && ufw allow 56000/udp && ufw allow 56001/udp
-# 3. Проверьте, что Docker слушает на 0.0.0.0, а не 127.0.0.1
+# Клонируем и собираем
+cd /opt
+git clone https://github.com/amurcanov/proxy-turn-vk-android.git wdtt-server
+cd wdtt-server
+go build -o /usr/local/bin/wdtt-server .
+
+# Создаём systemd сервис
+cat > /etc/systemd/system/wdtt.service << 'EOF'
+[Unit]
+Description=WDTT Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wdtt-server \
+    -listen 0.0.0.0:56000 \
+    -wg-port 56001 \
+    -config-dir /etc/wdtt \
+    -password CHANGE_ME
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now wdtt
+```
+
+### Установка API-обёртки
+
+```bash
+# Собираем API-обёртку
+cd /tmp
+cat > api-server.go << 'GOEOF'
+<содержимое wdtt-node/api-server.go>
+GOEOF
+
+go build -o /usr/local/bin/wdtt-api api-server.go
+
+# Создаём systemd сервис
+cat > /etc/systemd/system/wdtt-api.service << 'EOF'
+[Unit]
+Description=WDTT API Wrapper
+After=network.target wdtt.service
+
+[Service]
+Type=simple
+Environment=CONFIG_DIR=/etc/wdtt
+Environment=API_PORT=9000
+Environment=WDTT_PORTS=56000,56001,9000
+Environment=API_KEY=ВАШ_API_KEY
+ExecStart=/usr/local/bin/wdtt-api
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable --now wdtt-api
+```
+
+### Настройка файрвола
+
+```bash
+# UFW
+ufw allow 9000/tcp    # API
+ufw allow 56000/udp   # DTLS
+ufw allow 56001/udp   # WireGuard
+
+# Или iptables
+iptables -A INPUT -p tcp --dport 9000 -j ACCEPT
+iptables -A INPUT -p udp --dport 56000 -j ACCEPT
+iptables -A INPUT -p udp --dport 56001 -j ACCEPT
 ```
 
 ---
 
 ## 5. Настройка STEALTHNET API
 
-### Шаг 1: Регистрация ноды в админке
+### Шаг 1: Регистрация ноды
 
-1. Откройте админ-панель: `https://your-domain.com/admin/wdtt`
-2. Перейдите в раздел **«Ноды»**
-3. Нажмите **«Добавить ноду»**
-4. Заполните форму:
+1. Откройте админку: `https://your-domain.com/admin/wdtt`
+2. Перейдите в **«Ноды»** → **«Добавить ноду»**
+3. Заполните:
 
-| Поле | Значение | Описание |
-|------|----------|----------|
-| **Название** | `Node #1 — Moscow` | Произвольное имя для идентификации |
-| **API URL** | `http://YOUR_WDTT_SERVER_IP:9000` | URL API-сервера ноды |
-| **API Key** | `a1b2c3d4...` | Ключ из шага 3 (64 символа hex) |
-| **DTLS Port** | `56000` | Порт DTLS (по умолчанию) |
-| **WG Port** | `56001` | Порт WireGuard (по умолчанию) |
-| **TUN Port** | `9000` | Порт TUN API (по умолчанию) |
-| **Capacity** | `100` или пусто | Макс. кол-во слотов (пусто = без лимита) |
+| Поле | Значение |
+|------|----------|
+| Название | `Node #1` |
+| API URL | `http://YOUR_WDTT_IP:9000` |
+| API Key | ваш ключ из `.env` |
+| DTLS Port | `56000` |
+| WG Port | `56001` |
+| Capacity | `100` (или пусто) |
 
-5. Нажмите **«Создать»**
+4. Нажмите **«Создать»**
 
 ### Шаг 2: Проверка связи
 
-1. В списке нод найдите добавленную ноду
-2. Нажмите кнопку **«Тест»** (⚡)
-3. Система отправит запрос `GET /api/health` на ноду
-4. Статус должен смениться на **ONLINE** (зелёный индикатор)
+1. Найдите ноду в списке
+2. Нажмите **«Тест»** (⚡)
+3. Статус → **ONLINE** ✅
 
-```
-Статусы ноды:
-  🟢 ONLINE   — нода доступна, принимает ключи
-  🔴 OFFLINE  — нода не отвечает (>5 мин без heartbeat)
-  ⚫ DISABLED — отключена вручную
-```
+### Шаг 3: Публичный хост
 
-### Шаг 3: Настройка публичного хоста (опционально)
-
-Если клиенты будут подключаться напрямую через WireGuard (не через TUN), укажите публичный IP/домен ноды:
+Если клиенты подключаются напрямую:
 
 ```bash
-# В админке: Нода → Редактировать → Public Host
-# Укажите: public.your-domain.com или 203.0.113.50
-```
+# В .env установите:
+PUBLIC_HOST=ваш_ip_или_домен
 
-Это необходимо для генерации корректных `wdtt://` ссылок.
+# Или через API:
+curl -X PATCH http://localhost:9000/api/nodes/NODE_ID \
+  -H "X-API-Key: YOUR_KEY" \
+  -d '{"publicHost": "your-domain.com"}'
+```
 
 ---
 
 ## 6. Создание категорий и тарифов
 
-### Шаг 1: Создание категории
+### Категория
 
-Категория группирует похожие тарифы (например, «WDTT — 30 дней» или «WDTT — 90 дней»).
+1. **WDTT → Тарифы → Создать категорию**
+2. Название: `WDTT — 30 дней`
+3. Порядок: `0`
 
-1. В админке → **WDTT → Тарифы**
-2. Нажмите **«Создать категорию»**
-3. Заполните:
-
-| Поле | Пример |
-|------|--------|
-| **Название** | `WDTT — 30 дней` |
-| **Порядок сортировки** | `0` |
-
-4. Нажмите **«Создать»**
-
-### Шаг 2: Создание тарифа
-
-Тариф определяет цену, длительность и количество ключей.
-
-1. Внутри категории нажмите **«Создать тариф»**
-2. Заполните:
+### Тариф
 
 | Поле | Пример | Описание |
 |------|--------|----------|
-| **Название** | `WDTT 30 дней / 1 устройство` | Отображаемое имя |
-| **Кол-во слотов** | `1` | Сколько wdtt:// ссылок выдаётся за покупку |
-| **Длительность (дней)** | `30` | На сколько дней активен ключ |
-| **Лимит трафика** | `107374182400` (100 ГБ) | `null` = без лимита |
-| **Цена** | `5.00` | Цена в выбранной валюте |
-| **Валюта** | `usd` | `usd` или `rub` |
-| **Порядок сортировки** | `0` | Для порядка отображения |
-| **Включён** | ✅ | Видим ли тариф клиентам |
-
-3. Нажмите **«Создать»**
-
-> **Важно**: Поле «Кол-во слотов» (`proxyCount`) определяет, сколько ключей будет создано при одной покупке. Обычно = 1 (одно устройство). Если нужно 3 устройства — поставьте 3.
-
-### Шаг 3: Привязка нод к тарифу (опционально)
-
-По умолчанию тариф использует **все ONLINE-ноды** (round-robin). Чтобы привязать к конкретным нодам:
-
-1. Отредактируйте тариф
-2. В поле **«Ноды»** выберите нужные ноды
-3. Сохраните
-
-```
-Без привязки:  тариф → все ONLINE ноды (автоматически)
-С привязкой:   тариф → только выбранные ноды
-```
+| Название | `WDTT 30 дней / 1 устройство` | Имя |
+| Слотов | `1` | Ключей за покупку |
+| Дней | `30` | Срок действия |
+| Трафик | `107374182400` (100 ГБ) | `null` = безлимит |
+| Цена | `5.00` | Цена |
+| Валюта | `usd` | usd/rub |
 
 ### Примеры тарифов
 
-| Название | Слотов | Дней | Трафик | Цена | Валюта |
-|----------|--------|------|--------|------|--------|
-| WDTT 30 дней | 1 | 30 | безлимит | 5.00 | usd |
-| WDTT 30 дней / 100 ГБ | 1 | 30 | 107374182400 | 3.00 | usd |
-| WDTT 90 дней | 1 | 90 | безлимит | 12.00 | usd |
-| WDTT 30 дней / 3 устройства | 3 | 30 | безлимит | 12.00 | usd |
+| Название | Слотов | Дней | Трафик | Цена |
+|----------|--------|------|--------|------|
+| WDTT 30 дней | 1 | 30 | безлимит | $5 |
+| WDTT 30 дней / 100 ГБ | 1 | 30 | 100 ГБ | $3 |
+| WDTT 90 дней | 1 | 90 | безлимит | $12 |
+| WDTT 30 дней / 3 устройства | 3 | 30 | безлимит | $12 |
 
 ---
 
 ## 7. Покупка клиентом
 
-### Через Telegram-бот (Mini App)
+### Через Telegram-бот
 
-1. Клиент открывает бота
-2. Нажимает **«⚡ WDTT / Warp»**
-3. Открывается Mini App с тарифами
-4. Выбирает тариф → нажимает **«Оплатить»**
-5. Выбирает способ оплаты:
-   - 💰 **Баланс** — мгновенно, если хватает средств
-   - 💳 **ЮMoney** / **ЮKassa** — банковская карта (RUB)
-   - 🪙 **CryptoPay** — криптовалюта
-   - 🔗 **Heleket** / **Lava** / **Overpay** / **Platega** — другие провайдеры
-6. После оплаты получает `wdtt://` ссылку
-7. Импортирует ссылку в **WDTT Android App**
+1. **⚡ WDTT / Warp** → выбор тарифа → оплата
+2. Получает `wdtt://` ссылку
+3. Импортирует в **WDTT Android App**
 
 ### Через веб-кабинет
 
-1. Клиент заходит на `https://your-domain.com/cabinet/wdtt`
-2. Выбирает вкладку **«Купить»**
-3. Выбирает тариф → оплачивает
-4. Получает `wdtt://` ссылку на вкладке **«Мои доступы»**
+1. `/cabinet/wdtt` → вкладка **«Купить»**
+2. Выбор тарифа → оплата
+3. Ссылка на вкладке **«Мои доступы»**
 
-### Подключение в WDTT Android App
+### Подключение в WDTT App
 
-1. Установите [WDTT](https://play.google.com/store/apps/details?id=app.wdtt) из Google Play
-2. Нажмите **«+»** → **«Импорт из ссылки»**
+1. Установите [WDTT](https://github.com/amurcanov/proxy-turn-vk-android/releases) (APK)
+2. **«+»** → **«Импорт из ссылки»**
 3. Вставьте `wdtt://` ссылку
-4. Нажмите **«Подключить»**
+4. **«Подключить»**
 
 ---
 
-## 8. Мониторинг и администрирование
+## 8. Мониторинг
 
-### Обзор в админке
-
-**Раздел «Ноды»:**
-
-| Столбец | Описание |
-|---------|----------|
-| Название | Имя ноды |
-| Статус | ONLINE / OFFLINE / DISABLED |
-| Последний контакт | Когда нода в последний раз отвечала |
-| Слотов | Сколько активных слотов на этой ноде |
-| Ёмкость | Макс. слотов (null = без лимита) |
-
-**Раздел «Слоты»:**
-
-| Столбец | Описание |
-|---------|----------|
-| Нода | На какой ноде создан ключ |
-| Клиент | Кому выдан |
-| Пароль | Пароль ключа (для ручного удаления на ноде) |
-| VK Hash | Хеш ключа на ноде |
-| WDTT Link | Ссылка для импорта в приложение |
-| Статус | ACTIVE / EXPIRED / REVOKED |
-| Истекает | Дата и время истечения |
-
-### Ручное удаление ключа
-
-Если нужно отозвать ключ вручную:
-
-1. **Через админку**: Слоты → найти слот → **«Отозвать»**
-2. **Через API ноды**:
-   ```bash
-   curl -X DELETE http://NODE_IP:9000/api/keys/PASSWORD \
-     -H "X-API-Key: YOUR_API_KEY"
-   ```
-
-### Автоматический отзыв (Cron)
-
-STEALTHNET API автоматически проверяет истёкшие слоты каждые 5 минут:
-
-```
-[Cron] Проверка истёкших WDTT слотов...
-[Cron] Найдено 3 истёкших слота
-[Cron] Ключ xxx revoked на ноде Node #1
-[Cron] Слот yyy помечен как EXPIRED
-[Cron] Клиент zzz уведомлён
-```
-
-### Статистика
-
-Для просмотра общей статистики:
+### Health check
 
 ```bash
-# На сервере STEALTHNET:
-docker compose exec api npx prisma studio
-# Откроется на http://5555
-# Таблицы: wdtt_nodes, wdtt_slots, wdtt_tariffs, wdtt_categories
+curl http://localhost:9000/api/health -H "X-API-Key: YOUR_KEY"
 ```
+
+### Список ключей
+
+```bash
+curl http://localhost:9000/api/keys -H "X-API-Key: YOUR_KEY" | jq .
+```
+
+### Логи
+
+```bash
+# Docker
+docker compose logs -f --tail=50
+
+# Systemd
+journalctl -u wdtt -f
+journalctl -u wdtt-api -f
+```
+
+### Статус в админке
+
+- **Ноды** → статус (ONLINE/OFFLINE), слоты, ёмкость
+- **Слоты** → пароль, ссылка, статус, клиент
 
 ---
 
 ## 9. Устранение проблем
 
-### Нода показывает OFFLINE
+### Нода OFFLINE
 
-**Причины:**
-1. Нода не запущена
-2. Файрвол блокирует порт 9000
-3. Неверный API URL в админке
-4. Нода слушает на 127.0.0.1 вместо 0.0.0.0
-
-**Решение:**
 ```bash
-# 1. Проверяем статус контейнера
+# Проверяем контейнер
 docker compose ps
-
-# 2. Проверяем логи
 docker compose logs --tail=50
 
-# 3. Проверяем доступность API
-curl -v http://NODE_IP:9000/api/health \
-  -H "X-API-Key: YOUR_KEY"
+# Проверяем API
+curl -v http://NODE_IP:9000/api/health -H "X-API-Key: KEY"
 
-# 4. Проверяем файрвол
-ufw status
-# Если файрвол активен:
+# Файрвол
 ufw allow 9000/tcp
 ufw allow 56000/udp
 ufw allow 56001/udp
-
-# 5. Проверяем, что Docker слушает на 0.0.0.0
-ss -tlnp | grep 9000
-# Должно быть: 0.0.0.0:9000
 ```
 
 ### Ключи не создаются
 
-**Симптом**: клиент оплатил, но слот не появился.
-
-**Причины:**
-1. Нода OFFLINE
-2. Неверный API ключ
-3. Нода перегружена (все слоты заняты)
-
-**Решение:**
 ```bash
-# 1. Проверяем статус ноды в админке → Ноды
-# 2. Тестируем ручное создание ключа:
-curl -X POST http://NODE_IP:9000/api/keys \
-  -H "X-API-Key: YOUR_KEY" \
+# Проверяем API
+curl -X POST http://localhost:9000/api/keys \
+  -H "X-API-Key: KEY" \
   -H "Content-Type: application/json" \
-  -d '{"password": "test_key_123"}'
+  -d '{"password": "test123"}'
 
-# 3. Проверяем логи API:
-docker compose logs api | grep -i wdtt
-
-# 4. Проверяем лимит ноды:
-# Админка → Ноды → Ёмкость (capacity)
+# Проверяем логи
+docker compose logs | grep -i error
 ```
 
-### `wdtt://` ссылка не работает
+### wdtt:// ссылка не работает
 
-**Причины:**
-1. Клиент не установлен WDTT Android App
-2. Ссылка повреждена
-3. Ключ уже отозван
-
-**Решение:**
-```bash
-# 1. Проверяем статус слота:
-# Админка → Слоты → найти слот → статус должен быть ACTIVE
-
-# 2. Проверяем, что ключ существует на ноде:
-curl -s http://NODE_IP:9000/api/keys \
-  -H "X-API-Key: YOUR_KEY" | jq .
-
-# 3. Проверяем ссылку в БД:
-docker compose exec postgres psql -U postgres -d stealthnet \
-  -c "SELECT wdtt_link, status, expires_at FROM wdtt_slots WHERE id='SLOT_ID';"
-```
-
-### Клиент не может подключиться после импорта
-
-**Причины:**
-1. Порт 56000/56001 заблокирован у клиента
-2. Нода перегружена
-3. Неверный publicHost в ноде
-
-**Решение:**
-1. Попросите клиента переключиться на другой порт (DTLS → WG или наоборот)
-2. Проверьте нагрузку на ноду: `docker stats`
-3. Убедитесь, что publicHost установлен корректно
+1. Проверьте статус слота (ACTIVE)
+2. Проверьте, что ключ существует: `GET /api/keys`
+3. Убедитесь, что WDTT App установлен
 
 ---
 
 ## 10. Безопасность
 
-### API-ключ ноды
+### API-ключ
 
-- Храните ключ в安全ных условиях (не в коде, не в Git)
-- Используйте разные ключи для разных нод
-- Регулярно ротируйте ключи
+- Храните в `.env` (не в коде)
+- Регулярно ротируйте
+- Разные ключи для разных нод
 
 ### Файрвол
 
-```
-# Открытые порты (только необходимые):
-9000/tcp   — API (только для STEALTHNET API сервера)
-56000/udp  — DTLS (для клиентов)
-56001/udp  — WireGuard (для клиентов)
+```bash
+# Только необходимые порты
+ufw allow 9000/tcp    # API (только для STEALTHNET)
+ufw allow 56000/udp   # DTLS
+ufw allow 56001/udp   # WireGuard
 ```
 
-Ограничьте доступ к порту 9000:
+Ограничьте доступ к API:
 
 ```bash
-# Разрешить только IP STEALTHNET API:
-ufw allow from STEALTHNET_API_IP to any port 9000 proto tcp
+ufw allow from STEALTHNET_IP to any port 9000 proto tcp
 ```
 
-### Резервное копирование
+### Бэкап
 
 ```bash
-# Бэкап данных ноды:
-tar -czf wdtt-node-backup-$(date +%Y%m%d).tar.gz /opt/wdtt-node/data/
+# Данные ноды
+tar -czf wdtt-backup-$(date +%Y%m%d).tar.gz /etc/wdtt/
 
-# Бэкап БД STEALTHNET (включает wdtt_* таблицы):
+# БД STEALTHNET
 docker compose exec postgres pg_dump -U postgres stealthnet | gzip > backup.sql.gz
 ```
 
@@ -578,20 +405,17 @@ docker compose exec postgres pg_dump -U postgres stealthnet | gzip > backup.sql.
 
 ## FAQ
 
-**Q: Сколько нод нужно для начала?**
-A: 1 нода足以 для тестирования и начала работы. Для продакшена — минимум 2 ноды в разных локациях для отказоустойчивости.
+**Q: Сколько нод нужно?**
+A: 1 для начала. 2+ для отказоустойчивости.
 
-**Q: Можно ли привязать разные тарифы к разным нодам?**
-A: Да. В редактировании тарифа выберите нужные ноды в поле «Ноды».
-
-**Q: Как обновить WDTT-ноду?**
-A: `cd /opt/wdtt-node && docker compose pull && docker compose up -d`
-
-**Q: Какой максимальный размер трафика?**
-A: Задаётся в тарифе (поле «Лимит трафика»). `null` = без лимита. Значение в байтах: 100 ГБ = 107374182400.
+**Q: Как обновить?**
+A: `cd wdtt-node && docker compose pull && docker compose up -d`
 
 **Q: Поддерживается ли iOS?**
-A: На момент написания — только Android. iOS-клиент в разработке.
+A: Да — [anton48/vk-turn-proxy-ios](https://github.com/anton48/vk-turn-proxy-ios)
 
-**Q: Как проверить, что ключ работает?**
-A: Импортируйте `wdtt://` ссылку в WDTT App и подключитесь. Если подключение успешно — ключ работает.
+**Q: Поддерживается ли Windows/Linux?**
+A: Да — [luminescq/PWDTT](https://github.com/luminescq/PWDTT)
+
+**Q: Какой максимальный трафик?**
+A: Задаётся в тарифе. `null` = безлимит. 100 ГБ = 107374182400 байт.

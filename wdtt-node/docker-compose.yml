@@ -1,0 +1,46 @@
+services:
+  wdtt:
+    build: .
+    container_name: wdtt-node
+    restart: unless-stopped
+    ports:
+      # API (для STEALTHNET backend)
+      - "${API_PORT:-9000}:9000/tcp"
+      # DTLS (WireGuard over DTLS) - для клиентов
+      - "${DTLS_PORT:-56000}:56000/udp"
+      # WireGuard - для клиентов
+      - "${WG_PORT:-56001}:56001/udp"
+    environment:
+      # Главный пароль (владелец)
+      - MAIN_PASSWORD=${MAIN_PASSWORD:-changeme}
+      # Telegram бот (опционально)
+      - ADMIN_ID=${ADMIN_ID:-}
+      - BOT_TOKEN=${BOT_TOKEN:-}
+      # Порты
+      - API_PORT=9000
+      - DTLS_PORT=${DTLS_PORT:-56000}
+      - WG_PORT=${WG_PORT:-56001}
+      # Публичный IP/домен сервера (для wdtt:// ссылок)
+      - PUBLIC_HOST=${PUBLIC_HOST:-}
+      # API ключ для авторизации запросов от STEALTHNET
+      - API_KEY=${API_KEY:-}
+    volumes:
+      # Данные сервера (ключи, пароли, конфиги)
+      - wdtt-data:/etc/wdtt
+    # Нужны NET_ADMIN для WireGuard и iptables
+    cap_add:
+      - NET_ADMIN
+    # Доступ к /dev/net/tun для WireGuard
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+volumes:
+  wdtt-data:
