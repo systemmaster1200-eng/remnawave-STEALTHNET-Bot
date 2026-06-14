@@ -116,18 +116,20 @@ async function createBotWithProxy(token: string): Promise<Bot> {
       const lower = url.toLowerCase();
       if (lower.startsWith("http://") || lower.startsWith("https://")) {
         console.log("[Proxy] Telegram Bot API через HTTP прокси");
-        return new Bot(token, {
+        const b = new Bot(token, {
           client: { baseFetchConfig: { dispatcher: new UndiciProxyAgent(url) } as any },
-          ...(tgApiUrl ? { client: { root: tgApiUrl } as any } : {}),
         });
+        if (tgApiUrl) (b.api as any).config.root = tgApiUrl;
+        return b;
       }
       if (lower.startsWith("socks5://") || lower.startsWith("socks4://") || lower.startsWith("socks://")) {
         console.log("[Proxy] Telegram Bot API через SOCKS прокси");
         const agent = new SocksProxyAgent(url);
-        return new Bot(token, {
+        const b = new Bot(token, {
           client: { baseFetchConfig: { agent } as any },
-          ...(tgApiUrl ? { client: { root: tgApiUrl } as any } : {}),
         });
+        if (tgApiUrl) (b.api as any).config.root = tgApiUrl;
+        return b;
       }
       console.warn(`[Proxy] Неизвестный протокол прокси: ${url}, запуск без прокси`);
     }
@@ -135,12 +137,12 @@ async function createBotWithProxy(token: string): Promise<Bot> {
     console.warn("[Bot] Не удалось получить конфиг, запуск без прокси");
   }
 
+  const b = new Bot(token);
   if (tgApiUrl) {
     console.log(`[Bot] Telegram API mirror: ${tgApiUrl}`);
-    return new Bot(token, { client: { root: tgApiUrl } as any });
+    (b.api as any).config.root = tgApiUrl;
   }
-
-  return new Bot(token);
+  return b;
 }
 
 /** Общая логика для основного (единственного) бота. */
