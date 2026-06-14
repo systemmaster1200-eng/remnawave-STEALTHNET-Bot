@@ -7608,9 +7608,16 @@ let offset = 0;
 (async () => {
   for (const b of botInstances) {
     const bToken = b.token;
-    console.log(`[Bot] Initializing bot ${bToken.slice(0, 6)}…`);
-    await b.init();
-    console.log(`[Bot] Bot initialized: @${b.botInfo?.username ?? "?"}`);
+    console.log(`[Bot] Setting botInfo for ${bToken.slice(0, 6)}…`);
+    // Устанавливаем botInfo вручную, т.к. b.init() может зависнуть на зеркале
+    const meRes = await fetch(`${tgUrl}/bot${bToken}/getMe`);
+    const meData = await meRes.json();
+    if (meData.ok) {
+      b.botInfo = meData.result;
+      console.log(`[Bot] Bot initialized: @${b.botInfo?.username ?? "?"}`);
+    } else {
+      console.error("[Bot] Failed to get bot info:", JSON.stringify(meData));
+    }
     console.log(`[Bot] Polling for ${bToken.slice(0, 6)}…`);
     while (true) {
       try {
