@@ -23,7 +23,7 @@ RUN CGO_ENABLED=0 go build -o /api-server -ldflags="-s -w" .
 # Final image
 FROM alpine:3.20
 
-RUN apk add --no-cache bash iptables ip6tables iproute2
+RUN apk add --no-cache bash iptables ip6tables iproute2 procps
 
 # Copy binaries
 COPY --from=builder /wdtt-server /usr/local/bin/wdtt-server
