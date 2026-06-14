@@ -7595,25 +7595,17 @@ for (const b of botInstances) {
   console.log(`[Bot] Starting long polling for ${token.slice(0, 6)}…`);
   void b.start({
     onStart: async (info) => {
-      console.log(`Bot @${info.username ?? "?"} started`);
+      console.log(`[Bot] ✅ Bot @${info.username ?? "?"} started successfully!`);
       try {
         const cfg = await api.getPublicConfig();
         if (cfg?.translations) setTranslations(cfg.translations);
-      } catch {
-        /* ignore */
-      }
-      // ─── T8: установить меню команд в синей панельке Telegram ───
-      // /link и прочие хендлеры остаются работающими, но в меню НЕ выводятся.
-      try {
-        await b.api.setMyCommands([
-          { command: "start", description: "Главное меню" },
-          { command: "subscriptions", description: "Моя подписка / инструкции" },
-          { command: "referral", description: "Реферальная программа" },
-          { command: "support", description: "Поддержка" },
-        ]);
+        console.log("[Bot] Config and translations loaded");
       } catch (e) {
-        console.error(`[Bot @${info.username}] setMyCommands failed:`, e);
+        console.error("[Bot] Failed to load config:", e);
       }
     },
+    drop_pending_updates: true,
+  }).catch((err) => {
+    console.error("[Bot] ❌ start() failed:", err);
   });
 }
