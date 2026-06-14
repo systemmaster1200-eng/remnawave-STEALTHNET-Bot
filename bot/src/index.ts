@@ -107,6 +107,7 @@ async function waitForApi(maxRetries = 10, delayMs = 3000): Promise<Awaited<Retu
 
 async function createBotWithProxy(token: string): Promise<Bot> {
   try {
+    console.log("[Bot] Checking API config for proxy...");
     const cfg = await waitForApi();
     if (cfg?.proxyEnabled && cfg?.proxyTelegram && cfg?.proxyUrl?.trim()) {
       const url = cfg.proxyUrl.trim();
@@ -7561,7 +7562,9 @@ composer.on("message", async (ctx) => {
 });
 
 // Дожидаемся API чтобы перед стартом получить публичный конфиг и translations.
+console.log("[Bot] Connecting to API...");
 await waitForApi();
+console.log("[Bot] API connected. Starting bot...");
 
 const botInstances: Bot[] = [];
 {
@@ -7569,7 +7572,9 @@ const botInstances: Bot[] = [];
   if (!token) {
     throw new Error("BOT_TOKEN не задан в env");
   }
+  console.log("[Bot] Creating bot instance...");
   const b = await createBotWithProxy(token);
+  console.log("[Bot] Bot instance created. Setting up handlers...");
   b.use(composer);
   b.catch((err) => console.error(`[Bot ${token.slice(0, 6)}…] error:`, err));
   botInstances.push(b);
@@ -7577,6 +7582,7 @@ const botInstances: Bot[] = [];
 // start() для long polling не завершается — нельзя await, иначе после старта код не пойдёт дальше.
 for (const b of botInstances) {
   const token = b.token;
+  console.log(`[Bot] Starting long polling for ${token.slice(0, 6)}…`);
   void b.start({
     onStart: async (info) => {
       console.log(`Bot @${info.username ?? "?"} started`);
