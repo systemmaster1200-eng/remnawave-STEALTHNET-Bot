@@ -36,6 +36,7 @@ import { cn } from "@/lib/utils";
 
 const BUTTON_ACTIONS = [
   { value: "", label: "Без кнопки" },
+  { value: "menu:my_subs", label: "📋 Мои подписки" },
   { value: "menu:tariffs", label: "📦 Тарифы" },
   { value: "menu:topup", label: "💳 Пополнить баланс" },
   { value: "menu:profile", label: "👤 Профиль" },
@@ -62,7 +63,20 @@ const TRIGGER_LABELS: Record<AutoBroadcastTriggerType, string> = {
   no_traffic: "Подключён к VPN (напоминание)",
   subscription_expired: "Подписка истекла",
   subscription_ending_soon: "Подписка заканчивается скоро (за N дней)",
+  subscription_ending_minutes: "Подписка заканчивается скоро (за N минут)",
+  // пассивные (не брал триал + не платил).
+  inactive_no_subscription: "Без действий и без подписки",
+  inactive_with_subscription: "Без действий, но с подпиской",
 };
+
+/**
+ * триггеры для которых в форме показывается
+ * чекбокс «event-driven». Если флаг включён — поля «delay_days» и «cron_expression»
+ * скрываются (правило вызывается событием из бота, а не по крону).
+ */
+const TRIGGERS_SUPPORTING_EVENT_MODE: ReadonlySet<AutoBroadcastTriggerType> = new Set([
+  "after_registration",
+]);
 
 const CHANNEL_LABELS: Record<string, string> = {
   telegram: "Telegram",
@@ -89,7 +103,15 @@ export function AutoBroadcastPage() {
     message: "",
     buttonText: "",
     buttonUrl: "",
+    button2Text: "",
+    button2Url: "",
     enabled: true,
+    promoCodeId: null,
+    personalDiscountPercent: null,
+    personalDiscountIsOneTime: true,
+    maxRecipients: null,
+    cronExpression: null,
+    eventDriven: false,
   });
   const [formSaving, setFormSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -163,7 +185,15 @@ export function AutoBroadcastPage() {
       message: "",
       buttonText: "",
       buttonUrl: "",
+      button2Text: "",
+      button2Url: "",
       enabled: true,
+      promoCodeId: null,
+      personalDiscountPercent: null,
+      personalDiscountIsOneTime: true,
+      maxRecipients: null,
+      cronExpression: null,
+      eventDriven: false,
     });
     setButtonAction("");
     setButtonCustomUrl("");
@@ -183,7 +213,15 @@ export function AutoBroadcastPage() {
       message: rule.message,
       buttonText: rule.buttonText ?? "",
       buttonUrl: rule.buttonUrl ?? "",
+      button2Text: rule.button2Text ?? "",
+      button2Url: rule.button2Url ?? "",
       enabled: rule.enabled,
+      promoCodeId: rule.promoCodeId ?? null,
+      personalDiscountPercent: rule.personalDiscountPercent ?? null,
+      personalDiscountIsOneTime: rule.personalDiscountIsOneTime ?? true,
+      maxRecipients: rule.maxRecipients ?? null,
+      cronExpression: rule.cronExpression ?? null,
+      eventDriven: rule.eventDriven ?? false,
     });
     setButtonAction(action);
     setButtonCustomUrl(customUrl);
@@ -205,6 +243,14 @@ export function AutoBroadcastPage() {
       subject: form.subject?.trim() || null,
       buttonText: form.buttonText?.trim() || null,
       buttonUrl: resolvedUrl || null,
+      button2Text: form.button2Text?.trim() || null,
+      button2Url: form.button2Url?.trim() || null,
+      promoCodeId: form.promoCodeId || null,
+      personalDiscountPercent: form.personalDiscountPercent ?? null,
+      personalDiscountIsOneTime: form.personalDiscountIsOneTime ?? true,
+      maxRecipients: form.maxRecipients ?? null,
+      cronExpression: form.cronExpression?.trim() || null,
+      eventDriven: form.eventDriven ?? false,
     };
     if (!payload.name.trim()) {
       setFormError("Укажите название правила");
@@ -409,9 +455,11 @@ export function AutoBroadcastPage() {
                   </div>
                   <p className="text-xs text-muted-foreground mt-1.5">
                     <span className="text-foreground/80">{TRIGGER_LABELS[rule.triggerType]}</span>
-                    {rule.triggerType === "subscription_ending_soon"
-                      ? ` · за ${rule.delayDays} дн. до окончания`
-                      : ` · через ${rule.delayDays} дн.`}{" "}
+                    {rule.eventDriven
+                      ? " · ⚡ event-driven"
+                      : rule.triggerType === "subscription_ending_soon"
+                        ? ` · за ${rule.delayDays} дн. до окончания`
+                        : ` · через ${rule.delayDays} дн.`}{" "}
                     · <span className="text-cyan-500 dark:text-cyan-400">{CHANNEL_LABELS[rule.channel]}</span>
                   </p>
                   <div className="flex items-center gap-3 mt-2 text-[11px] text-muted-foreground">
@@ -508,6 +556,8 @@ export function AutoBroadcastPage() {
                         t === "subscription_ending_soon"
                           ? Math.max(1, Math.min(30, f.delayDays))
                           : f.delayDays,
+                      // T-event-driven: если новый триггер не поддерживает event-mode — сбрасываем флаг.
+                      eventDriven: TRIGGERS_SUPPORTING_EVENT_MODE.has(t) ? f.eventDriven : false,
                     }));
                   }}
                 >
@@ -519,32 +569,67 @@ export function AutoBroadcastPage() {
                 </select>
               </div>
             </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">
-                  {form.triggerType === "subscription_ending_soon"
-                    ? "За сколько дней до окончания (1–30)"
-                    : "Через сколько дней (0–365)"}
-                </Label>
-                <Input
-                  type="number"
-                  min={form.triggerType === "subscription_ending_soon" ? 1 : 0}
-                  max={form.triggerType === "subscription_ending_soon" ? 30 : 365}
-                  value={form.delayDays}
-                  onChange={(e) => {
-                    const v = Number(e.target.value) || 0;
-                    const min = form.triggerType === "subscription_ending_soon" ? 1 : 0;
-                    const max = form.triggerType === "subscription_ending_soon" ? 30 : 365;
-                    setForm((f) => ({ ...f, delayDays: Math.max(min, Math.min(max, v)) }));
-                  }}
-                  className="rounded-xl bg-foreground/[0.03] dark:bg-white/[0.02] border-white/10 focus-visible:ring-primary/50"
-                />
-                {form.triggerType === "subscription_ending_soon" && (
-                  <p className="text-[11px] text-muted-foreground">
-                    Создайте несколько правил (например, за 7, за 3, за 1 день) — рассылка будет с нужным текстом.
-                  </p>
-                )}
+            {/* чекбокс выбора режима — только для
+                триггеров которые поддерживают event-driven (см. TRIGGERS_SUPPORTING_EVENT_MODE).
+                Если включено — правило срабатывает мгновенно из бота (без крона). */}
+            {TRIGGERS_SUPPORTING_EVENT_MODE.has(form.triggerType) && (
+              <div className="rounded-xl border border-white/10 bg-foreground/[0.02] dark:bg-white/[0.02] px-4 py-3">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.eventDriven ?? false}
+                    onChange={(e) => setForm((f) => ({ ...f, eventDriven: e.target.checked }))}
+                    className="mt-0.5 h-4 w-4 rounded border-white/20 bg-foreground/[0.05] dark:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-primary/50 cursor-pointer"
+                  />
+                  <span className="space-y-0.5">
+                    <span className="block text-sm font-medium text-foreground/90">⚡ Event-driven (мгновенно при /start в боте)</span>
+                    <span className="block text-[11px] text-muted-foreground">
+                      Если включено — правило срабатывает <strong>сразу</strong> при регистрации нового клиента
+                      (бот вызывает event-endpoint). Поля «через сколько дней» и «расписание» игнорируются.
+                      Если выключено — обычное крон-правило: «через N дней после регистрации,
+                      если клиент не пробовал триал / не оплачивал / не подключался».
+                    </span>
+                  </span>
+                </label>
               </div>
+            )}
+            <div className="grid gap-4 sm:grid-cols-2">
+              {form.eventDriven ? (
+                /* T-event-driven: если правило event-driven, «delay_days» и «cron» не нужны.
+                   Плашка объясняет админу что правило срабатывает мгновенно. */
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Когда отправляется</Label>
+                  <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.06] px-3 py-2.5 text-sm text-emerald-200">
+                    ⚡ Мгновенно при событии (например, при /start в боте). Поля «через сколько дней» и «расписание» не применяются.
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">
+                    {form.triggerType === "subscription_ending_soon"
+                      ? "За сколько дней до окончания (1–30)"
+                      : "Через сколько дней (0–365)"}
+                  </Label>
+                  <Input
+                    type="number"
+                    min={form.triggerType === "subscription_ending_soon" ? 1 : 0}
+                    max={form.triggerType === "subscription_ending_soon" ? 30 : 365}
+                    value={form.delayDays}
+                    onChange={(e) => {
+                      const v = Number(e.target.value) || 0;
+                      const min = form.triggerType === "subscription_ending_soon" ? 1 : 0;
+                      const max = form.triggerType === "subscription_ending_soon" ? 30 : 365;
+                      setForm((f) => ({ ...f, delayDays: Math.max(min, Math.min(max, v)) }));
+                    }}
+                    className="rounded-xl bg-foreground/[0.03] dark:bg-white/[0.02] border-white/10 focus-visible:ring-primary/50"
+                  />
+                  {form.triggerType === "subscription_ending_soon" && (
+                    <p className="text-[11px] text-muted-foreground">
+                      Создайте несколько правил (например, за 7, за 3, за 1 день) — рассылка будет с нужным текстом.
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="space-y-1.5">
                 <Label className="text-xs text-muted-foreground">Канал</Label>
                 <select
@@ -631,6 +716,132 @@ export function AutoBroadcastPage() {
                 <p className="text-[11px] text-muted-foreground">
                   Выберите действие — под сообщением появится inline-кнопка, открывающая выбранный раздел бота.
                 </p>
+
+                {/* вторая кнопка */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-white/5">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Кнопка #2 — текст</Label>
+                    <Input
+                      value={form.button2Text ?? ""}
+                      onChange={(e) => setForm((f) => ({ ...f, button2Text: e.target.value }))}
+                      placeholder="🏠 Главное меню"
+                      maxLength={64}
+                      className="h-10 rounded-xl bg-background/60 border-white/10"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Кнопка #2 — действие / URL</Label>
+                    <Input
+                      value={form.button2Url ?? ""}
+                      onChange={(e) => setForm((f) => ({ ...f, button2Url: e.target.value }))}
+                      placeholder="menu:main или https://..."
+                      maxLength={500}
+                      className="h-10 rounded-xl bg-background/60 border-white/10"
+                    />
+                  </div>
+                </div>
+
+                {/* T-promo: индивидуальная скидка / промокод / лимит получателей */}
+                <div className="space-y-3 pt-3 border-t border-white/5">
+                  <h4 className="text-xs uppercase tracking-wider text-muted-foreground">🎟 Промо / скидка</h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-muted-foreground">ID промокода (если шлёшь код)</Label>
+                      <Input
+                        value={form.promoCodeId ?? ""}
+                        onChange={(e) => setForm((f) => ({ ...f, promoCodeId: e.target.value.trim() || null }))}
+                        placeholder="cuid из /admin/promo-codes"
+                        className="h-10 rounded-xl bg-background/60 border-white/10 font-mono text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-muted-foreground">Индивидуальная скидка %</Label>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={form.personalDiscountPercent ?? ""}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setForm((f) => ({ ...f, personalDiscountPercent: v ? parseFloat(v) : null }));
+                        }}
+                        placeholder="например 20"
+                        className="h-10 rounded-xl bg-background/60 border-white/10"
+                      />
+                    </div>
+                  </div>
+                  {/* чекбокс одноразовости скидки. */}
+                  <label className="flex items-start gap-2.5 cursor-pointer rounded-xl p-3 -mx-1 hover:bg-white/[0.03] transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={form.personalDiscountIsOneTime ?? true}
+                      onChange={(e) => setForm((f) => ({ ...f, personalDiscountIsOneTime: e.target.checked }))}
+                      className="mt-0.5 h-4 w-4 rounded border-white/20 bg-background/60 accent-primary"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium">🎁 Скидка одноразовая</div>
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        Сгорает после первой продуктовой покупки клиента. Если выключено — действует
+                        бессрочно (пока админ не уберёт вручную в карточке клиента).
+                      </div>
+                    </div>
+                  </label>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Лимит получателей (стоп если достигли)</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={form.maxRecipients ?? ""}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setForm((f) => ({ ...f, maxRecipients: v ? parseInt(v, 10) : null }));
+                      }}
+                      placeholder="нет лимита"
+                      className="h-10 rounded-xl bg-background/60 border-white/10"
+                    />
+                  </div>
+
+                  {/* индивидуальное расписание правила.
+                      для event-driven правил блок скрыт —
+                      они вызываются по событию из бота, а не по крону. */}
+                  {!form.eventDriven && (
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-muted-foreground">
+                        ⏱ Расписание (cron) <span className="text-[10px] opacity-60">— пусто = дефолт по типу триггера</span>
+                      </Label>
+                      <Input
+                        value={form.cronExpression ?? ""}
+                        onChange={(e) => setForm((f) => ({ ...f, cronExpression: e.target.value || null }))}
+                        placeholder={
+                          form.triggerType === "subscription_ending_minutes" ? "* * * * *  (каждую минуту)" :
+                          form.triggerType === "subscription_expired" ? "0 * * * *  (каждый час)" :
+                          "0 9 * * *  (раз в день в 9:00)"
+                        }
+                        className="h-10 rounded-xl bg-background/60 border-white/10 font-mono text-sm"
+                      />
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        <button type="button" onClick={() => setForm((f) => ({ ...f, cronExpression: "* * * * *" }))} className="px-2 py-1 rounded-md bg-foreground/[0.04] dark:bg-white/[0.04] hover:bg-foreground/[0.08] dark:hover:bg-white/[0.08] border border-white/10 text-[10px] transition">⚡ Каждую минуту</button>
+                        <button type="button" onClick={() => setForm((f) => ({ ...f, cronExpression: "*/5 * * * *" }))} className="px-2 py-1 rounded-md bg-foreground/[0.04] dark:bg-white/[0.04] hover:bg-foreground/[0.08] dark:hover:bg-white/[0.08] border border-white/10 text-[10px] transition">⏱ Каждые 5 мин</button>
+                        <button type="button" onClick={() => setForm((f) => ({ ...f, cronExpression: "0 * * * *" }))} className="px-2 py-1 rounded-md bg-foreground/[0.04] dark:bg-white/[0.04] hover:bg-foreground/[0.08] dark:hover:bg-white/[0.08] border border-white/10 text-[10px] transition">🕐 Каждый час</button>
+                        <button type="button" onClick={() => setForm((f) => ({ ...f, cronExpression: "0 9 * * *" }))} className="px-2 py-1 rounded-md bg-foreground/[0.04] dark:bg-white/[0.04] hover:bg-foreground/[0.08] dark:hover:bg-white/[0.08] border border-white/10 text-[10px] transition">☀️ Раз в день 9:00</button>
+                        <button type="button" onClick={() => setForm((f) => ({ ...f, cronExpression: null }))} className="px-2 py-1 rounded-md bg-foreground/[0.04] dark:bg-white/[0.04] hover:bg-foreground/[0.08] dark:hover:bg-white/[0.08] border border-white/10 text-[10px] transition">↩️ Сбросить</button>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        Формат: <code className="text-foreground/70">minute hour day month weekday</code>.
+                        Для <code>subscription_ending_minutes</code> рекомендуется <code className="text-foreground/70">* * * * *</code> (узкое окно ±1 мин).
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="rounded-xl bg-foreground/[0.03] dark:bg-white/[0.02] border border-white/5 px-3 py-2.5 space-y-1">
+                    <p className="text-[11px] font-bold text-foreground/80">Плейсхолдеры в тексте/URL кнопки:</p>
+                    <p className="text-[11px] text-muted-foreground"><code className="text-foreground/70">{`{{TARIFF}}`}</code> — название тарифа клиента</p>
+                    <p className="text-[11px] text-muted-foreground"><code className="text-foreground/70">{`{{SUBSCRIPTION_ID}}`}</code> — id подписки (для кнопки «Продлить»)</p>
+                    <p className="text-[11px] text-muted-foreground"><code className="text-foreground/70">{`{{PROMOCODE}}`}</code> — код привязанного PromoCode</p>
+                    <p className="text-[11px] text-muted-foreground"><code className="text-foreground/70">{`{{DISCOUNT}}`}</code> — процент скидки</p>
+                    <p className="text-[11px] text-muted-foreground mt-1">Для прямого продления подписки используй URL: <code className="text-foreground/70">{`https://t.me/<bot>?start=renew_{{SUBSCRIPTION_ID}}`}</code></p>
+                  </div>
+                </div>
               </div>
             )}
             <div className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-foreground/[0.03] dark:bg-white/[0.02] px-4 py-3">

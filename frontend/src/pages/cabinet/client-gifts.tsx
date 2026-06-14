@@ -95,7 +95,7 @@ export function ClientGiftsPage() {
 
   // Data states
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
-  const [codes, setCodes] = useState<Array<{ id: string; code: string; status: string; expiresAt: string; createdAt: string; redeemedAt: string | null; giftMessage: string | null; secondarySubscriptionId: string }>>([]);
+  const [codes, setCodes] = useState<Array<{ id: string; code: string; status: string; expiresAt: string; createdAt: string; redeemedAt: string | null; giftMessage: string | null; subscriptionId: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
@@ -118,9 +118,11 @@ export function ClientGiftsPage() {
   // Interaction states
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  // уведомление об успехе (паритет с ботом).
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
   // History states
-  const [historyItems, setHistoryItems] = useState<Array<{ id: string; eventType: string; metadata: unknown; createdAt: string; secondarySubscriptionId: string | null }>>([]);
+  const [historyItems, setHistoryItems] = useState<Array<{ id: string; eventType: string; metadata: unknown; createdAt: string; subscriptionId: string | null }>>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyPage, setHistoryPage] = useState(1);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -130,8 +132,11 @@ export function ClientGiftsPage() {
     if (!token) return;
     try {
       setError(null);
+      // используем `giftListSubscriptions` (без /all)
+      // — он отдаёт ТОЛЬКО подписки купленные для подарка (purchasedAsGift=true).
+      // Подписки которые юзер купил себе сюда не попадают (они в `/cabinet/dashboard`).
       const [subsRes, codesRes] = await Promise.all([
-        api.giftListAllSubscriptions(token),
+        api.giftListSubscriptions(token),
         api.giftListCodes(token),
       ]);
       setSubscriptions(subsRes.subscriptions || []);
@@ -287,7 +292,7 @@ export function ClientGiftsPage() {
     setActionLoading(`url-${subscriptionId}`);
     try {
       const activeCode = codes.find(
-        (c) => c.secondarySubscriptionId === subscriptionId && c.status === "ACTIVE"
+        (c) => c.subscriptionId === subscriptionId && c.status === "ACTIVE"
       );
       if (!activeCode) {
         if (subscription.giftStatus === "GIFTED") {
@@ -312,10 +317,14 @@ export function ClientGiftsPage() {
   const handleActivateForSelf = async (subscriptionId: string) => {
     if (!token) return;
     setActionLoading(`activate-${subscriptionId}`);
+    setActionSuccess(null);
     try {
       await api.giftActivateForSelf(token, subscriptionId);
       await fetchData();
       fetchHistory(1);
+      refreshProfile().catch(() => {});
+      // Текст идентичен боту (gift:take_self) — подписка переехала в «Мои подписки».
+      setActionSuccess("Подписка перенесена в «Мои подписки»! Подключите её на главной странице кабинета.");
     } catch (err) {
       alert(err instanceof Error ? err.message : "Ошибка активации");
     } finally {
@@ -346,6 +355,16 @@ export function ClientGiftsPage() {
 
   return (
     <div className="space-y-8 w-full min-w-0 pb-12">
+      {/* уведомление об успешном переносе подписки себе */}
+      {actionSuccess && (
+        <div className="rounded-2xl bg-green-500/10 border border-green-500/30 px-4 py-3.5 flex items-start gap-3 shadow-sm">
+          <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0 mt-0.5" />
+          <p className="text-sm font-medium text-green-700 dark:text-green-400 leading-relaxed flex-1">{actionSuccess}</p>
+          <button onClick={() => setActionSuccess(null)} className="text-green-600/60 hover:text-green-600 transition-colors shrink-0">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
       {/* SECTION 1: HERO */}
       <motion.section
         initial={{ opacity: 0, y: 12 }}
@@ -633,7 +652,7 @@ export function ClientGiftsPage() {
                 const isGifted = sub.giftStatus === "GIFTED";
                 const isActivatedSelf = sub.giftStatus === "ACTIVATED_SELF";
                 const isReserved = sub.giftStatus === "GIFT_RESERVED";
-                const activeCode = codes.find(c => c.secondarySubscriptionId === sub.id && c.status === "ACTIVE");
+                const activeCode = codes.find(c => c.subscriptionId === sub.id && c.status === "ACTIVE");
                 const isFinalized = isGifted || isActivatedSelf;
 
                 return (
@@ -793,7 +812,7 @@ export function ClientGiftsPage() {
               </div>
               <DialogTitle className="text-xl font-bold">Купить подписку в подарок</DialogTitle>
               <DialogDescription className="text-center">
-                Выберите тариф для дополнительной подписки. Она будет оплачена с вашего баланса.
+                Выберите тариф для новой подписки. Она будет оплачена с вашего баланса.
               </DialogDescription>
             </DialogHeader>
 
