@@ -99,19 +99,14 @@ func saveDB() {
 	os.WriteFile(dbFile, data, 0600)
 }
 
-// Restart the WDTT server process by sending SIGTERM to the parent start.sh
-// which will restart it via the restart loop
+// Restart the WDTT server process so it picks up new passwords from passwords.json
 func restartWdttServer() {
-	log.Println("[API] Restarting WDTT server...")
-
-	// Find and kill wdtt-server process
+	log.Println("[API] Restarting WDTT server to pick up new password...")
 	cmd := exec.Command("pkill", "-SIGTERM", "wdtt-server")
-	cmd.Run()
-
-	// Wait a moment for the process to die
-	time.Sleep(2 * time.Second)
-
-	log.Println("[API] WDTT server restarted")
+	if err := cmd.Run(); err != nil {
+		log.Printf("[API] pkill error (may be ok): %v", err)
+	}
+	// The watchdog in start.sh will restart it
 }
 
 func getPublicIP() string {
