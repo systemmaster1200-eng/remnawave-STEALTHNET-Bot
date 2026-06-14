@@ -29,20 +29,6 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-# Function to start WDTT server
-start_wdtt() {
-    echo "[boot] Starting WDTT server..."
-    wdtt-server \
-        -listen "0.0.0.0:$DTLS_PORT" \
-        -wg-port "$WG_PORT" \
-        -config-dir "$CONFIG_DIR" \
-        -password "$MAIN_PASSWORD" \
-        ${ADMIN_ID:+-admin "$ADMIN_ID"} \
-        ${BOT_TOKEN:+-bot-token "$BOT_TOKEN"} &
-    WDTT_PID=$!
-    echo "[boot] WDTT server PID=$WDTT_PID"
-}
-
 # Start API wrapper in background
 echo "[boot] Starting API wrapper..."
 export CONFIG_DIR="$CONFIG_DIR"
@@ -55,20 +41,16 @@ export VK_HASH="$VK_HASH"
 api-server &
 API_PID=$!
 
-# Start WDTT server
-start_wdtt
+# Start WDTT server (no watchdog — Docker restarts the container if it crashes)
+echo "[boot] Starting WDTT server..."
+wdtt-server \
+    -listen "0.0.0.0:$DTLS_PORT" \
+    -wg-port "$WG_PORT" \
+    -config-dir "$CONFIG_DIR" \
+    -password "$MAIN_PASSWORD" \
+    ${ADMIN_ID:+-admin "$ADMIN_ID"} \
+    ${BOT_TOKEN:+-bot-token "$BOT_TOKEN"} &
+WDTT_PID=$!
 
 echo "[boot] All services started (WDTT=$WDTT_PID, API=$API_PID)"
-
-# Watchdog: restart WDTT server if it dies
-while true; do
-    wait $WDTT_PID 2>/dev/null
-    echo "[boot] WDTT server stopped, restarting in 1s..."
-    sleep 1
-    start_wdtt
-done &
-WATCHDOG_PID=$!
-
-# Wait for API wrapper
-wait $API_PID 2>/dev/null
-cleanup
+wait $WDTT_PID $API_PID 2>/dev/null
