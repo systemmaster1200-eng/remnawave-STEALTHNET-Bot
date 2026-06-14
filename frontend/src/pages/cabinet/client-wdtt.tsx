@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { motion } from "framer-motion";
-import { Wifi, Loader2, Copy, Check, ExternalLink, Calendar, Shield } from "lucide-react";
+import { Wifi, Loader2, Copy, Calendar, Shield } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
 import { api, type WdttClientSlotItem } from "@/lib/api";
 import { Card } from "@/components/ui/card";

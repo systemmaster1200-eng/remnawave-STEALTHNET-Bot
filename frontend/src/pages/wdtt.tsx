@@ -5,13 +5,11 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
-import { Globe, Plus, Copy, Check, Loader2, Server, Pencil, Trash2, Layers, Ban, KeyRound, Link, Wifi } from "lucide-react";
+import { Plus, Loader2, Server, Pencil, Trash2, Layers, Ban, KeyRound, Link, Wifi, Copy } from "lucide-react";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,

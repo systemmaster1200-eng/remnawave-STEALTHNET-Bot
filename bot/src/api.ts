@@ -427,13 +427,6 @@ export async function getSingboxSlots(token: string): Promise<{
   return fetchJson("/api/client/singbox-slots", { token });
 }
 
-/** Активные WDTT слоты клиента */
-export async function getWdttSlots(token: string): Promise<{
-  items: { id: string; wdttLink: string; expiresAt: string; status: string; nodeName: string; publicHost: string | null; trafficUsedBytes: string; trafficLimitBytes: string | null }[];
-}> {
-  return fetchJson("/api/client/wdtt/slots", { token });
-}
-
 /** Публичный список тарифов по категориям (emoji из админки по коду ordinary/premium) */
 export async function getPublicTariffs(): Promise<{
   items: {

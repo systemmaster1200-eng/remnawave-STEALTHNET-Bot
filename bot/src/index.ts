@@ -1,5 +1,5 @@
 /**
- * STEALTHNET 4.2.1 — Telegram-бот
+ * STEALTHNET 4.2.0 — Telegram-бот
  * Полный функционал кабинета: главная, тарифы, профиль, пополнение, триал, реферальная ссылка, VPN.
  * Цветные кнопки: style primary / success / danger (Telegram Bot API).
  */
@@ -13,7 +13,12 @@ import * as api from "./api.js";
 import {
   mainMenu,
   backToMenu,
+  backToSubLabel,
+  backToSubsListLabel,
+  backButton,
   supportSubMenu,
+  helpMainMenu,
+  documentsSubMenu,
   topUpPresets,
   tariffPayButtons,
   tariffsOfCategoryButtons,
@@ -44,10 +49,27 @@ import {
   giftCodesListButtons,
   giftTariffButtons,
   giftPaymentButtons,
+  mySubsListButtons,
+  subDetailButtons,
+  tariffActionChoiceButtons,
   type InlineMarkup,
   type InnerEmojiIds,
 } from "./keyboard.js";
 import { t as _t, formatDays as _formatDays, setTranslations } from "./i18n.js";
+// 54-ФЗ-чек ЮКассы: prompt «нужен ли чек», ввод email, etc.
+import {
+  storePendingReceipt,
+  peekPendingReceipt,
+  takePendingReceipt,
+  setPendingEmailInput,
+  takePendingEmailInput,
+  hasPendingEmailInput,
+  receiptPromptText,
+  receiptPromptKeyboard,
+  EMAIL_PROMPT_TEXT,
+  RECEIPT_OK_LINE,
+  isValidEmail,
+} from "./yk-receipt.js";
 
 function formatRuDays(n: number): string {
   return _formatDays(n, "ru");
@@ -62,10 +84,6 @@ function setUserLang(userId: number, lang: string) {
 function getUserLang(userId: number): string {
   return userLangCache.get(userId) ?? "ru";
 }
-
-const TELEGRAM_API_MIRROR = "https://astracattg.netlify.app";
-const mirrorBuildUrl = (_root: string, token: string, method: string) =>
-  `${TELEGRAM_API_MIRROR}/bot${token}/${method}`;
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -96,20 +114,14 @@ async function createBotWithProxy(token: string): Promise<Bot> {
       if (lower.startsWith("http://") || lower.startsWith("https://")) {
         console.log("[Proxy] Telegram Bot API через HTTP прокси");
         return new Bot(token, {
-          client: {
-            buildUrl: mirrorBuildUrl,
-            baseFetchConfig: { dispatcher: new UndiciProxyAgent(url) } as any,
-          },
+          client: { baseFetchConfig: { dispatcher: new UndiciProxyAgent(url) } as any },
         });
       }
       if (lower.startsWith("socks5://") || lower.startsWith("socks4://") || lower.startsWith("socks://")) {
-        console.log("[Proxy] Telegram Bot API через SOCKС прокси");
+        console.log("[Proxy] Telegram Bot API через SOCKS прокси");
         const agent = new SocksProxyAgent(url);
         return new Bot(token, {
-          client: {
-            buildUrl: mirrorBuildUrl,
-            baseFetchConfig: { agent } as any,
-          },
+          client: { baseFetchConfig: { agent } as any },
         });
       }
       console.warn(`[Proxy] Неизвестный протокол прокси: ${url}, запуск без прокси`);
@@ -117,51 +129,11 @@ async function createBotWithProxy(token: string): Promise<Bot> {
   } catch {
     console.warn("[Bot] Не удалось получить конфиг, запуск без прокси");
   }
-  return new Bot(token, {
-    client: { buildUrl: mirrorBuildUrl },
-  });
+  return new Bot(token);
 }
 
-/** Общая логика для всех токенов (основной + клоны из БД). */
+/** Общая логика для основного (единственного) бота. */
 const composer = new Composer<Context>();
-
-/**
- * Уникальные токены для long polling в этом процессе.
- * По умолчанию: BOT_TOKEN + все активные из БД (один контейнер = все клоны).
- * Если BOT_POLL_ALL_CLONES=false — только BOT_TOKEN (нужно для второго контейнера bot-clone,
- * иначе оба процесса опросили бы одни и те же токены).
- */
-async function resolveActiveBotTokens(bootstrapToken: string): Promise<string[]> {
-  const t0 = bootstrapToken.trim();
-  if (!t0) return [];
-  const pollAll = process.env.BOT_POLL_ALL_CLONES !== "false";
-  if (!pollAll) return [t0];
-
-  const out = new Set<string>();
-  out.add(t0);
-  const delayMs = 2000;
-  const maxAttempts = 5;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const { items } = await api.fetchInternalBotsList(bootstrapToken);
-      for (const row of items) {
-        const t = row.token?.trim();
-        if (t) out.add(t);
-      }
-      if (attempt > 1) console.log(`[Bot] /api/internal/bots: успех с попытки ${attempt}`);
-      break;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (attempt < maxAttempts) {
-        console.warn(`[Bot] /api/internal/bots попытка ${attempt}/${maxAttempts} не удалась (${msg}), пауза ${delayMs / 1000}с…`);
-        await new Promise((r) => setTimeout(r, delayMs));
-      } else {
-        console.warn("[Bot] Не удалось получить /api/internal/bots — только BOT_TOKEN:", msg);
-      }
-    }
-  }
-  return [...out];
-}
 
 // ——— Принудительная подписка на канал ———
 
@@ -301,6 +273,8 @@ type TariffItem = {
   deviceDiscountTiers?: DeviceDiscountTier[];
   price: number;
   currency: string;
+  // T11+T12 (11.05.2026) — rich-text список локаций тарифа.
+  locations?: string | null;
   priceOptions?: TariffPriceOption[];
 };
 
@@ -376,6 +350,50 @@ function bestPricePerDayOptionId(options: TariffPriceOption[]): string | null {
 }
 
 /** Кэш списка priceOptions тарифа для пользователя — для разрешения индекса из callback_data. */
+// «addsub» mode — userId → tariffId, выставляется когда пользователь
+// в category-aware диалоге выбрал «Купить как доп. подписку» (callback `pay_tariff:<id>:add`).
+// Читается в pay_<provider>: handlers — если совпадает tariffId, передаём asAdditional=true
+// в create<Provider>Payment, и на webhook'е activateTariffByPaymentId создаст secondary
+// subscription через createAdditionalSubscription. Для balance — переключается на
+// buyGiftSubscription напрямую (без webhook). Чистится при успешной оплате и при
+// возврате в menu:main / menu:tariffs.
+const addsubPending = new Map<number, string>();
+
+/**
+ * продление существующей secondary.
+ * userId → { tariffId, secondaryId }. Ставится при клике на «💰 Продлить» в детали
+ * secondary-подписки (через callback `pay_tariff:<tariffId>:extsec:<secondaryId>`).
+ * Consume'ся в payment-методах — добавляется в metadata создаваемого payment.
+ * При успешной оплате backend увидит `extendsSecondarySubId` и продлит ИМЕННО эту
+ * secondary вместо создания новой.
+ */
+const extendingSecondaryPending = new Map<number, { tariffId: string; secondaryId: string }>();
+
+/**
+ * отложенное удаление доп. устройств.
+ * Юзер нажал «🗑 Убрать устройства, продлить за X ₽» → запоминаем; реальный
+ * removeExtraDevices вызываем ТОЛЬКО при подтверждении способа оплаты в handler'е.
+ * Иначе: если юзер передумал и нажал Назад — устройства бы удалились НАПРАСНО.
+ * userId → subscriptionId на которой ждёт drop.
+ */
+const pendingDropExtras = new Map<number, string>();
+
+/**
+ * целевая подписка для покупаемой extra-option.
+ * userId → "primary" (= client.remnawaveUuid) или secondaryId.
+ * Ставится в шаге выбора подписки перед оплатой опции; consume'ся в pay_option_*
+ * (передаётся в backend через body.targetSubscriptionId).
+ */
+const extraOptionTargetSub = new Map<number, string>();
+/**
+ * T7c.3 fix (11.05.2026): pending выбранная опция (kind+productId) до выбора подписки.
+ * Раньше пробрасывали через callback_data → callback `extra_opt_setsub:<sub>:<kind>:<productId>`
+ * вырастал до >64 байт (Telegram режет → productId терял хвост → бэкенд не находил опцию,
+ * показывал «Опция не найдена»). Теперь kind+productId хранится тут, callback короткий.
+ * Ставится в `extra_opt_pick:`, consume'ся в `extra_opt_setsub:` (форвард на pay_option:).
+ */
+const extraOptionPending = new Map<number, { kind: "traffic" | "devices" | "servers"; productId: string }>();
+
 const tariffOptionsCache = new Map<number, { tariffId: string; options: TariffPriceOption[] }>();
 /** Выбранная опция цены тарифа + кол-во ДОП. устройств (extras), которые клиент докупил. */
 const selectedTariffOption = new Map<number, { tariffId: string; option: TariffPriceOption; extraDevices: number }>();
@@ -426,6 +444,13 @@ type DiscountInfo = { code: string; discountPercent?: number | null; discountFix
 const activeDiscountCode = new Map<number, DiscountInfo>();
 // Ожидание ввода подарочного кода
 const awaitingGiftCode = new Set<number>();
+// conversation state для заявки на вывод USDT TRC20.
+// awaitingWithdrawAmount = ждём от юзера сумму (>= 3000).
+// awaitingWithdrawWallet = ждём кошелёк TRC20, хранит уже введённую сумму.
+const awaitingWithdrawAmount = new Set<number>();
+const awaitingWithdrawWallet = new Map<number, number>();
+// ожидание ввода кастомной суммы пополнения.
+const awaitingCustomTopup = new Set<number>();
 
 // Админ: ожидание ввода поиска; последний поиск по userId для пагинации
 const awaitingAdminSearch = new Set<number>();
@@ -440,7 +465,18 @@ const lastBroadcastMessage = new Map<number, string | BroadcastPayload>();
 const lastSquadsForAdd = new Map<number, { clientId: string; items: { uuid: string; name: string }[] }>();
 const lastSquadsForRemove = new Map<number, { clientId: string; items: { uuid: string; name: string }[] }>();
 // Устройства (HWID): список для экрана «Удалить устройство» (индекс в callback)
-const lastDevicesList = new Map<number, { devices: { hwid: string; platform?: string; deviceModel?: string }[] }>();
+// храним subscriptionType + subscriptionId — нужны при удалении,
+// чтобы backend знал из какой подписки удалять (раньше удалял только root → secondary error).
+const lastDevicesList = new Map<number, { devices: { hwid: string; platform?: string; deviceModel?: string; subscriptionType?: "root" | "secondary"; subscriptionId?: string }[] }>();
+
+// Poco/Redmi и пр. шлют битые (непарные)
+// UTF-8 суррогаты в platform/deviceModel → Telegram отвергает "inline keyboard button
+// text must be encoded in UTF-8" и экран «Устройства» падает на editMessageText.
+// Buffer.from(utf8) заменяет непарные суррогаты на U+FFFD (валидный UTF-8) + срезаем
+// управляющие символы. Если после чистки пусто — вызывающий код даёт fallback на hwid.
+function sanitizeLabel(s: string): string {
+  return Array.from(Buffer.from(String(s ?? ""), "utf8").toString("utf8")).filter((c) => c >= " ").join("");
+}
 
 /**
  * Если включён `botAutoDeleteUnknownMessages`, пробуем удалить сообщение пользователя.
@@ -492,10 +528,26 @@ function progressBar(pct: number, barLen: number): string {
   return "█".repeat(filled) + "░".repeat(barLen - filled);
 }
 
+// подсказка под ссылкой подписки.
+// Редактируется в админке (Тексты бота → bot_instruction_fallback_text). Этот дефолт
+// используется если настройка пустая. Хелпер ниже подставляет текст из конфига или дефолт.
+const DEFAULT_INSTRUCTION_FALLBACK =
+  "💡 Если инструкции не открываются: скопируйте ссылку подписки и вставьте её в приложение Happ вручную или обратитесь в поддержку.";
+function instructionFallbackText(cfg: { botInstructionFallbackText?: string | null } | null | undefined): string {
+  return (cfg?.botInstructionFallbackText ?? "").trim() || DEFAULT_INSTRUCTION_FALLBACK;
+}
+
 const DEFAULT_MENU_TEXTS: Record<string, string> = {
+  // маркетинговый welcome — весь текст в одной мульти-строке.
+  // Остальные строки (welcomeTitlePrefix, balance/tariff/status/expire/...) скрыты по
+  // умолчанию через DEFAULT_MENU_LINE_VISIBILITY — админ-конфиг может их вернуть точечно.
   welcomeTitlePrefix: "🛡 ",
-  welcomeGreeting: "👋 Добро пожаловать в ",
-  balancePrefix: "💰 Баланс: ",
+  welcomeGreeting: [
+    "🌐 Большой выбор локаций",
+    "🎥 YouTube на высокой скорости без рекламы",
+    "👥 Выгодная реферальная программа",
+  ].join("\n"),
+  balancePrefix: "💰 Ваш Баланс: ",
   tariffPrefix: "💎 Ваш тариф : ",
   subscriptionPrefix: "{{CHART}} Статус подписки — ",
   statusInactive: "{{STATUS_INACTIVE}} Истекла",
@@ -510,6 +562,24 @@ const DEFAULT_MENU_TEXTS: Record<string, string> = {
   trafficPrefix: "📈 Трафик — ",
   linkLabel: "🔗 Ссылка подключения:",
   chooseAction: "Выберите действие:",
+};
+
+// дефолтная видимость строк welcome-меню.
+// Маркетинговый шаблон в welcomeGreeting уже содержит все нужные инструкции,
+// поэтому дублирующие info-строки (баланс/тариф/статус/дни/устройства/трафик/ссылка/CTA)
+// скрыты по умолчанию. Админ может включить их обратно через
+// SystemSetting → Bot → menuLineVisibility[key] = true.
+const DEFAULT_MENU_LINE_VISIBILITY: Record<string, boolean> = {
+  welcomeTitlePrefix: false,
+  balancePrefix: false,
+  tariffPrefix: false,
+  subscriptionPrefix: false,
+  expirePrefix: false,
+  daysLeftPrefix: false,
+  devicesLabel: false,
+  trafficPrefix: false,
+  linkLabel: false,
+  chooseAction: false,
 };
 
 const DEFAULT_TARIFFS_TEXT = "Тарифы\n\n{{CATEGORY}}\n{{TARIFFS}}\n\nВыберите тариф для оплаты:";
@@ -547,6 +617,16 @@ const RESET_MODE_LABELS: Record<string, string> = {
   monthly_rolling: "скользящий месяц",
 };
 
+/**
+ * единая точка маппинга currency-кода в символ.
+ * Используется в formatTariffLine и в proxy/singbox fallback-строках, чтобы в боте
+ * везде показывалось «₽» вместо «rub» / «RUB» / «руб». Mirrors keyboard.ts:currencySymbol.
+ */
+function currencySymbol(currency: string): string {
+  const c = (currency || "").toUpperCase();
+  return c === "RUB" ? "₽" : c === "USD" ? "$" : c === "UAH" ? "₴" : c === "EUR" ? "€" : c;
+}
+
 function formatTariffLine(tariff: TariffItem, fields: Required<BotTariffLineFields>): string {
   const parts: string[] = [];
   const opts = sortedPriceOptions(tariff.priceOptions);
@@ -561,10 +641,10 @@ function formatTariffLine(tariff: TariffItem, fields: Required<BotTariffLineFiel
   }
   if (fields.price) {
     const prefix = multi ? "от " : "";
-    const pricePart = fields.currency ? `${prefix}${minPrice} ${tariff.currency}` : `${prefix}${minPrice}`;
+    const pricePart = fields.currency ? `${prefix}${minPrice} ${currencySymbol(tariff.currency)}` : `${prefix}${minPrice}`;
     parts.push(pricePart);
   } else if (fields.currency) {
-    parts.push(`${tariff.currency}`);
+    parts.push(`${currencySymbol(tariff.currency)}`);
   }
   if (fields.trafficLimit) {
     const limit = tariff.trafficLimitBytes;
@@ -583,9 +663,13 @@ function formatTariffLine(tariff: TariffItem, fields: Required<BotTariffLineFiel
 }
 
 function renderTariffsText(template: string, category: string, tariffLines: string): string {
-  return template
+  const rendered = template
     .split("{{CATEGORY}}").join(category)
     .split("{{TARIFFS}}").join(tariffLines);
+  // автозамена математического знака бесконечности (U+221E)
+  // на полноценный emoji «♾️» (U+267E + VS16). Иначе в Telegram «∞» отображается
+  // тонким моноширинным символом — клиенты ожидают яркий emoji-бесконечность.
+  return rendered.replace(/∞/g, "♾️");
 }
 
 function renderPaymentText(
@@ -630,7 +714,9 @@ function t(texts: Record<string, string> | null | undefined, key: string): strin
 type CustomEmojiEntity =
   | { type: "custom_emoji"; offset: number; length: number; custom_emoji_id: string }
   | { type: "strikethrough"; offset: number; length: number }
-  | { type: "bold"; offset: number; length: number };
+  | { type: "bold"; offset: number; length: number }
+  // моноширинный текст — копируется по тапу в Telegram.
+  | { type: "code"; offset: number; length: number };
 
 /** Длина первого символа в UTF-16 (для entity) */
 function firstCharLengthUtf16(s: string): number {
@@ -663,7 +749,6 @@ const DEFAULT_MENU_EMOJI_KEY_BY_ID: Record<string, string> = {
   cabinet: "SERVERS",
   support: "NOTE",
   tickets: "NOTE",
-  own_bot: "NOTE",
   promocode: "STAR",
   extra_options: "PACKAGE",
 };
@@ -683,6 +768,12 @@ function titleWithEmoji(
   rest: string,
   botEmojis?: Record<string, { unicode?: string; tgEmojiId?: string }> | null
 ): { text: string; entities: CustomEmojiEntity[] } {
+  // если body уже начинается с эмодзи (хардкод в коде
+  // или юзер в шаблоне написал эмодзи) — не добавляем дополнительный префикс,
+  // иначе получаются дубли вида «👥 👥 Реферальная программа».
+  if (/^\p{Extended_Pictographic}/u.test(rest.trimStart())) {
+    return { text: rest, entities: [] };
+  }
   const entry = botEmojis?.[emojiKey];
   const unicode = entry?.unicode?.trim() || DEFAULT_EMOJI_UNICODE[emojiKey] || "•";
   const space = rest.startsWith("\n") ? "" : " ";
@@ -693,6 +784,82 @@ function titleWithEmoji(
     if (len > 0) entities.push({ type: "custom_emoji", offset: 0, length: len, custom_emoji_id: entry.tgEmojiId });
   }
   return { text, entities };
+}
+
+/**
+ * расширенный парсер текста меню — поддерживает И custom-emoji
+ * placeholder'ы `{{KEY}}` (как applyCustomEmojiPlaceholders), И markdown-жирный
+ * `**слово**`. Используется в pushLine/pushRaw (buildMainMenuText), чтобы админ
+ * мог пометить «» жирным через шаблон welcomeGreeting.
+ *
+ * Single-pass char-iterator (не regex), поэтому offset'ы entity всегда корректны.
+ * Внутри `**...**` рекурсивно прогоняется через ту же функцию — поддерживает
+ * вложенные placeholder'ы внутри жирного.
+ */
+function applyMarkdownAndEmoji(
+  rawText: string,
+  botEmojis?: Record<string, { unicode?: string; tgEmojiId?: string }> | null
+): { text: string; entities: CustomEmojiEntity[] } {
+  if (!rawText) return { text: "", entities: [] };
+  const entities: CustomEmojiEntity[] = [];
+  let out = "";
+  let i = 0;
+  const n = rawText.length;
+  while (i < n) {
+    // {{KEY}} — emoji placeholder
+    if (rawText[i] === "{" && rawText[i + 1] === "{") {
+      const end = rawText.indexOf("}}", i + 2);
+      if (end > i + 2) {
+        const key = rawText.slice(i + 2, end);
+        if (/^[A-Z0-9_]+$/.test(key)) {
+          const entry = botEmojis?.[key];
+          const fallbackUnicode = DEFAULT_EMOJI_UNICODE[key];
+          const unicode = entry?.unicode?.trim() || (entry?.tgEmojiId ? DEFAULT_CUSTOM_EMOJI_CHAR : "") || fallbackUnicode || "";
+          if (unicode) {
+            const off = out.length;
+            out += unicode;
+            if (entry?.tgEmojiId) {
+              entities.push({ type: "custom_emoji", offset: off, length: unicode.length, custom_emoji_id: entry.tgEmojiId });
+            }
+            i = end + 2;
+            continue;
+          }
+        }
+      }
+    }
+    // **text** — bold markdown
+    if (rawText[i] === "*" && rawText[i + 1] === "*") {
+      const end = rawText.indexOf("**", i + 2);
+      if (end > i + 2) {
+        const inner = rawText.slice(i + 2, end);
+        const innerProcessed = applyMarkdownAndEmoji(inner, botEmojis);
+        const off = out.length;
+        for (const e of innerProcessed.entities) {
+          entities.push({ ...e, offset: off + e.offset });
+        }
+        entities.push({ type: "bold", offset: off, length: innerProcessed.text.length });
+        out += innerProcessed.text;
+        i = end + 2;
+        continue;
+      }
+    }
+    // `code` — моноширинный текст. В Telegram такой
+    // текст копируется по одному тапу («tap to copy»). Используется для Telegram ID в «Помощи».
+    if (rawText[i] === "`") {
+      const end = rawText.indexOf("`", i + 1);
+      if (end > i + 1) {
+        const inner = rawText.slice(i + 1, end);
+        const off = out.length;
+        entities.push({ type: "code", offset: off, length: inner.length });
+        out += inner;
+        i = end + 1;
+        continue;
+      }
+    }
+    out += rawText[i];
+    i++;
+  }
+  return { text: out, entities };
 }
 
 function applyCustomEmojiPlaceholders(
@@ -753,10 +920,136 @@ function titleWithOptionalEmoji(
   botEmojis?: Record<string, { unicode?: string; tgEmojiId?: string }> | null
 ): { text: string; entities: CustomEmojiEntity[] } {
   if (!emojiKey) return applyCustomEmojiPlaceholders(rest, botEmojis);
+  // если body уже начинается с эмодзи (юзер сам прописал
+  // эмодзи в начале шаблона/заголовка) — не добавляем дополнительный префикс,
+  // иначе получаются дубли вида «🛒🛒 Выберите тип подписки».
+  if (/^\p{Extended_Pictographic}/u.test(rest.trimStart())) {
+    return applyCustomEmojiPlaceholders(rest, botEmojis);
+  }
   return titleWithEmojiAndCustomEmojis(emojiKey, rest, botEmojis);
 }
 
 /** Полный текст главного меню + entities для премиум-эмодзи в тексте (владелец бота должен иметь Telegram Premium). */
+/**
+ * парсит сырой Remnawave user из item.subscription и возвращает
+ * готовые поля для форматирования (статус-эмодзи, тип-эмодзи, дни, дата, трафик).
+ * Используется и в welcome-блоке (formatSubLine), и в «Мои подписки» handler'е.
+ */
+function parseSubInfo(item: {
+  type: "root" | "secondary";
+  subscriptionIndex: number | null;
+  subscription: unknown;
+  /** для определения ♾️ префикса у безлимитного Unblock (legacy fallback). */
+  tariffDisplayName?: string | null;
+  /** эмодзи-префикс из админки (Tariff.menuEmoji) — приоритетнее name-matching. */
+  tariffMenuEmoji?: string | null;
+}): {
+  idx: number;
+  typeEmoji: string;
+  /** «🟢»/«🟡»/«🔴» — для текста (welcome). */
+  statusEmojiBig: string;
+  /** «✅»/«🟡»/«❌» — для кнопок (более компактный/контрастный). */
+  statusEmojiSmall: string;
+  /** Например «205 дн.». «—» если нет данных. */
+  daysStr: string;
+  /** «DD.MM.YYYY». «—» если нет данных. */
+  dateStr: string;
+  /** « | X/Y ГБ» или пусто (если без лимита). */
+  trafficSuffix: string;
+  /** true если подписка EXPIRED/DISABLED или expireAt в прошлом. */
+  isExpired: boolean;
+} {
+  const subData = item.subscription as Record<string, unknown> | null;
+  const inner = subData ? ((subData.response ?? subData.data ?? subData) as Record<string, unknown>) : null;
+  const status = (inner?.status ?? inner?.userStatus ?? "ACTIVE") as string;
+  const statusEmojiBig =
+    status === "ACTIVE" ? "🟢" :
+    status === "EXPIRED" ? "🔴" :
+    status === "LIMITED" ? "🟡" :
+    status === "DISABLED" ? "🔴" : "🟡";
+  const statusEmojiSmall =
+    status === "ACTIVE" ? "✅" :
+    status === "EXPIRED" ? "❌" :
+    status === "LIMITED" ? "🟡" :
+    status === "DISABLED" ? "❌" : "🟡";
+  // эмодзи зависит от ТАРИФА, не от типа подписки (root/secondary).
+  // Приоритет:
+  //   1. tariffMenuEmoji — настраиваемое поле Tariff.menuEmoji из админки (если задано)
+  //   2. legacy name-matching: «Безлимит/∞» → ♾️🔒, «Unblock/Анблок» → 🔒, «Стандарт» → 🌐
+  //   3. fallback по типу подписки: root → 🌐, secondary → 🔒
+  let typeEmoji: string;
+  const adminEmoji = item.tariffMenuEmoji?.trim();
+  if (adminEmoji) {
+    typeEmoji = adminEmoji;
+  } else {
+    const tariffNameRaw = item.tariffDisplayName ?? "";
+    const tariffNameLower = tariffNameRaw.toLowerCase();
+    const isUnlimited = tariffNameRaw.includes("∞") || tariffNameLower.includes("безлимит");
+    const isUnblock = tariffNameLower.includes("unblock") || tariffNameLower.includes("анблок");
+    const isStandard = tariffNameLower.includes("стандарт");
+    if (isUnlimited) {
+      typeEmoji = "♾️🔒";
+    } else if (isUnblock) {
+      typeEmoji = "🔒";
+    } else if (isStandard) {
+      typeEmoji = "🌐";
+    } else {
+      typeEmoji = item.type === "root" ? "🌐" : "🔒";
+    }
+  }
+  const idx = item.subscriptionIndex ?? 0;
+
+  let daysStr = "—";
+  let dateStr = "—";
+  let expiredByDate = false;
+  const expireAtRaw = inner?.expireAt ?? inner?.expire_at;
+  if (typeof expireAtRaw === "string" || typeof expireAtRaw === "number") {
+    const expireAt = typeof expireAtRaw === "number" ? new Date(expireAtRaw * 1000) : new Date(expireAtRaw);
+    if (!isNaN(expireAt.getTime())) {
+      const diffMs = expireAt.getTime() - Date.now();
+      const days = Math.max(0, Math.ceil(diffMs / 86_400_000));
+      daysStr = `${days} дн.`;
+      dateStr = expireAt.toLocaleDateString("ru-RU");
+      if (diffMs <= 0) expiredByDate = true;
+    }
+  }
+  // подписка считается истёкшей если EXPIRED/DISABLED по
+  // Remna-статусу ИЛИ если expireAt прошёл (даже если статус ещё ACTIVE — может быть
+  // задержка перевода в EXPIRED на стороне Remna).
+  const isExpired = status === "EXPIRED" || status === "DISABLED" || expiredByDate;
+
+  let trafficSuffix = "";
+  const tlimit = inner?.trafficLimitBytes ?? inner?.traffic_limit_bytes;
+  const tused = (inner?.userTraffic as { usedTrafficBytes?: number } | undefined)?.usedTrafficBytes
+    ?? inner?.trafficUsedBytes ?? inner?.usedTrafficBytes ?? inner?.traffic_used_bytes;
+  const limitNum = typeof tlimit === "string" ? parseFloat(tlimit) : Number(tlimit);
+  const usedNum = typeof tused === "string" ? parseFloat(tused) : Number(tused);
+  if (Number.isFinite(limitNum) && limitNum > 0) {
+    const u = bytesToGb(Number.isFinite(usedNum) ? usedNum : 0);
+    const l = bytesToGb(limitNum);
+    trafficSuffix = ` | ${u}/${l} ГБ`;
+  }
+
+  return { idx, typeEmoji, statusEmojiBig, statusEmojiSmall, daysStr, dateStr, trafficSuffix, isExpired };
+}
+
+/**
+ * форматирует строку для welcome-блока «Мои подписки» под главным меню.
+ * Шаблон: «🟢 🌐 Подписка #N — N дн. до DD.MM.YYYY [| used/limit ГБ]».
+ * **daysStr** обёрнуты в bold-markdown для applyMarkdownAndEmoji в pushRaw.
+ */
+function formatSubLine(item: {
+  type: "root" | "secondary";
+  subscriptionIndex: number | null;
+  subscription: unknown;
+  /** T16 (12.05.2026) — название тарифа и кастомный эмодзи для главного меню. */
+  tariffDisplayName?: string | null;
+  tariffMenuEmoji?: string | null;
+}): string {
+  const { idx, typeEmoji, statusEmojiBig, daysStr, dateStr, trafficSuffix } = parseSubInfo(item);
+  return `${statusEmojiBig} ${typeEmoji} Подписка #${idx} — **${daysStr}** до ${dateStr}${trafficSuffix}`;
+}
+
 function buildMainMenuText(opts: {
   serviceName: string;
   balance: number;
@@ -770,25 +1063,75 @@ function buildMainMenuText(opts: {
   botEmojis?: Record<string, { unicode?: string; tgEmojiId?: string }> | null;
   /** Кастомный инфо-блок (тех. работы, акции, контакты). Скрывается если пусто. */
   infoBlock?: string | null;
+  /**
+   * список ВСЕХ подписок клиента (root + secondary), для блок подписок
+   * под welcomeGreeting (фейковая нагрузка + список). Если undefined — блок не
+   * рендерится (для других callers, без блока подписок).
+   */
+  allSubs?: {
+    items: Array<{
+      type: "root" | "secondary";
+      id: string;
+      subscriptionIndex: number | null;
+      subscription: unknown;
+      tariffDisplayName: string;
+      /** T16 (12.05.2026) — эмодзи-префикс тарифа для главного меню бота. */
+      tariffMenuEmoji?: string | null;
+    }>;
+  } | null;
 }): { text: string; entities: CustomEmojiEntity[] } {
-  const { serviceName, balance, currency, subscription, tariffDisplayName, menuTexts, menuLineVisibility, menuTextCustomEmojiIds, botEmojis, infoBlock } = opts;
+  const { serviceName, balance, currency, subscription, tariffDisplayName, menuTexts, menuLineVisibility, menuTextCustomEmojiIds, botEmojis, infoBlock, allSubs } = opts;
   const name = serviceName.trim() || "Кабинет";
   const balanceStr = formatMoney(balance, currency);
   const lines: string[] = [];
   const lineStartKeys: (string | null)[] = [];
   const lineEntitiesByIndex: CustomEmojiEntity[][] = [];
-  const shouldShow = (key: string) => menuLineVisibility?.[key] !== false;
+  // Учитываем DEFAULT_MENU_LINE_VISIBILITY (см. константу выше).
+  // Приоритет: admin override (menuLineVisibility[key]) → default → visible.
+  const shouldShow = (key: string) => {
+    if (menuLineVisibility && key in menuLineVisibility) return menuLineVisibility[key] !== false;
+    if (key in DEFAULT_MENU_LINE_VISIBILITY) return DEFAULT_MENU_LINE_VISIBILITY[key]!;
+    return true;
+  };
   const pushLine = (key: string, text: string) => {
     if (!shouldShow(key)) return;
-    const { text: processed, entities } = applyCustomEmojiPlaceholders(text, botEmojis);
+    // applyMarkdownAndEmoji вместо applyCustomEmojiPlaceholders —
+    // дополнительно парсит **bold** markdown в шаблонах (для жирного «»).
+    const { text: processed, entities } = applyMarkdownAndEmoji(text, botEmojis);
     lines.push(processed);
     lineStartKeys.push(key);
     lineEntitiesByIndex.push(entities);
   };
 
-  pushLine("welcomeGreeting", t(menuTexts, "welcomeGreeting"));
-  pushLine("welcomeTitlePrefix", t(menuTexts, "welcomeTitlePrefix") + name);
-  pushLine("balancePrefix", t(menuTexts, "balancePrefix") + balanceStr);
+  // Приветствие + имя сервиса в ОДНУ строку, жирным:
+  // «👋 Добро пожаловать в 🛡 STEALTHNET».
+  pushLine("welcomeGreeting", `**${t(menuTexts, "welcomeGreeting")} в ${t(menuTexts, "welcomeTitlePrefix")}${name}**`);
+  // Баланс — сразу под шапкой (выше списка подписок), жирным.
+  pushLine("balancePrefix", `**${t(menuTexts, "balancePrefix")}${balanceStr}**`);
+
+  // Блок «список подписок» — все root + secondary активные/полученные в подарок
+  // (как в «Мои подписки»), сразу после шапки.
+  if (allSubs !== undefined) {
+    // pushRaw тоже идёт через applyMarkdownAndEmoji — поддерживает **bold**
+    // (количество подписок, дни) и {{KEY}} placeholders.
+    const pushRaw = (text: string) => {
+      const { text: processed, entities } = applyMarkdownAndEmoji(text, botEmojis);
+      lines.push(processed);
+      lineStartKeys.push(null);
+      lineEntitiesByIndex.push(entities);
+    };
+    if (allSubs && allSubs.items.length > 0) {
+      pushRaw("");
+      pushRaw(`🔢 Подписок: **${allSubs.items.length}**`);
+      const sorted = [...allSubs.items].sort((a, b) => {
+        if (a.type !== b.type) return a.type === "root" ? -1 : 1;
+        return (a.subscriptionIndex ?? 0) - (b.subscriptionIndex ?? 0);
+      });
+      for (const item of sorted) {
+        pushRaw(formatSubLine(item));
+      }
+    }
+  }
 
   const user = getSubUser(subscription);
   const url = getSubscriptionUrl(subscription);
@@ -953,6 +1296,42 @@ async function editMessageContent(ctx: {
   return ctx.editMessageText(text, { entities: entities?.length ? entities : undefined, reply_markup });
 }
 
+/**
+ * единый билд экрана «Помощь».
+ * Возвращает текст (ID в `backtick` → копируется по тапу), entities и клавиатуру.
+ * Используется И командой `/support`, И callback `menu:support` — чтобы не было
+ * рассинхрона «через раз копируется ID» (раньше /support слал plain text без entities).
+ */
+function buildHelpScreen(opts: {
+  helpIntroText?: string | null;
+  supportLink?: string | null;
+  botBackLabel?: string | null;
+  botEmojis?: Record<string, { unicode?: string; tgEmojiId?: string }> | null;
+  tgId: string;
+  tgUsername: string;
+  subsCount: number;
+  backStyle?: string;
+  emojiIds?: InnerEmojiIds;
+  lang?: string;
+}): { text: string; entities: CustomEmojiEntity[]; markup: InlineMarkup } {
+  const introRaw = (opts.helpIntroText ?? "").trim();
+  const lines: string[] = [];
+  if (introRaw) lines.push(introRaw, "");
+  // Часы работы НЕ хардкодим — они задаются в helpIntroText (см. админку), иначе дублировались бы.
+  lines.push(`🆔 Telegram ID: \`${opts.tgId}\``);
+  if (opts.tgUsername) lines.push(`👤 Username: @${opts.tgUsername}`);
+  lines.push(`🗒 Активных подписок: ${opts.subsCount}`);
+  const { text, entities } = applyMarkdownAndEmoji(lines.join("\n"), opts.botEmojis ?? null);
+  const markup = helpMainMenu(
+    { support: opts.supportLink },
+    opts.botBackLabel ?? null,
+    opts.backStyle,
+    opts.emojiIds,
+    opts.lang ?? "ru",
+  );
+  return { text, entities, markup };
+}
+
 function formatMoney(amount: number, currency: string): string {
   const c = currency.toUpperCase();
   const sym = c === "RUB" ? "₽" : c === "USD" ? "$" : "₴";
@@ -965,6 +1344,45 @@ function getDiscountedPrice(price: number, discount: DiscountInfo): number {
   if (discount.discountPercent && discount.discountPercent > 0) final -= final * discount.discountPercent / 100;
   if (discount.discountFixed && discount.discountFixed > 0) final -= discount.discountFixed;
   return Math.max(0, Math.round(final * 100) / 100);
+}
+
+/**
+ * унифицированный расчёт «зачёркивания»
+ * для тарифа с учётом обоих типов скидок — персональной (clients.personal_discount_percent)
+ * и промокода (activeDiscountCode). Стэкаются в порядке «сначала персональная, затем
+ * промокод» (так же делает бэк в payment endpoints).
+ *
+ * Возвращает:
+ *   - `finalPrice` — целое в рублях (Math.floor, без копеек — как считает бэк)
+ *   - `discountArg` — для `buildPaymentMessage`, рисующий `~~basePrice~~ → finalPrice (−N%)`.
+ *     `undefined` если ни одной скидки не применилось.
+ *
+ * Важно: на бэк всё равно отправляем `basePrice` (бэк сам пересчитает с pd + promo —
+ * не доверяем боту); этот helper только для UI.
+ */
+function buildTariffDiscountArg(
+  basePrice: number,
+  personalDiscountPercent: number,
+  promo: DiscountInfo | undefined,
+  currency: string,
+): { discountArg: { originalPrice: string; discountedPrice: string } | undefined; finalPrice: number } {
+  let withPd = basePrice;
+  if (personalDiscountPercent > 0) {
+    withPd = Math.max(0, Math.floor(basePrice * (1 - personalDiscountPercent / 100)));
+  }
+  const withPromo = promo ? getDiscountedPrice(withPd, promo) : withPd;
+  const finalPrice = Math.max(0, Math.floor(withPromo));
+  if (finalPrice >= Math.floor(basePrice)) {
+    return { discountArg: undefined, finalPrice };
+  }
+  const pct = Math.round((1 - finalPrice / basePrice) * 100);
+  return {
+    discountArg: {
+      originalPrice: formatMoney(Math.floor(basePrice), currency),
+      discountedPrice: formatMoney(finalPrice, currency) + " (-" + pct + "%)",
+    },
+    finalPrice,
+  };
 }
 
 /**
@@ -1014,9 +1432,23 @@ function parseStartPayload(payload: string): {
 }
 
 // ——— /start с реферальным кодом (например /start ref_ABC123) или промо (/start promo_XXXX) или кампания (/start c_facebook_summer)
+// per-user throttle для /start. При массовой рассылке (30k+
+// мигрированных юзеров) или если юзер нервно жмёт «Старт» несколько раз — каждый
+// повтор от одного и того же tgid в течение 2 сек тихо игнорируется. Защищает
+// DB/Remna от лишних запросов и Telegram-API от спама ответов.
+const startThrottle = new Map<number, number>();
+setInterval(() => {
+  const cutoff = Date.now() - 60 * 1000;
+  for (const [k, v] of startThrottle) if (v < cutoff) startThrottle.delete(k);
+}, 60 * 1000).unref?.();
+
 composer.command("start", async (ctx) => {
   const from = ctx.from;
   if (!from) return;
+  const now = Date.now();
+  const last = startThrottle.get(from.id) ?? 0;
+  if (now - last < 2000) return; // повтор < 2 сек — тихо дропаем
+  startThrottle.set(from.id, now);
   const telegramId = String(from.id);
   const telegramUsername = from.username ?? undefined;
   const payload = ctx.match?.trim() || "";
@@ -1024,6 +1456,129 @@ composer.command("start", async (ctx) => {
   // Сбрасываем состояние рассылки, чтобы баннер/фото не «залипало»
   lastBroadcastMessage.delete(from.id);
   awaitingBroadcastMessage.delete(from.id);
+
+  // Deep-link активации подарка: /start gift_<code>
+  // Юзер получил ссылку `t.me/<bot>?start=gift_<code>` от того кто подарил.
+  // Активируем подарок мгновенно — без диалога подтверждения.
+  if (/^gift_/i.test(payload)) {
+    const lang = getUserLang(from.id);
+    const code = payload.replace(/^gift_/i, "").trim();
+    if (!code) {
+      await ctx.reply("❌ Неверная ссылка подарка.");
+      return;
+    }
+    try {
+      // Сначала убедимся что юзер зарегистрирован — если нет, регнём по telegramId.
+      let token = getToken(from.id);
+      if (!token) {
+        const reg = await api.registerByTelegram({
+          telegramId,
+          telegramUsername,
+          preferredLang: from.language_code ?? "ru",
+        });
+        token = reg.token;
+        if (token) tokenStore.set(from.id, token);
+      }
+      if (!token) {
+        await ctx.reply("❌ Не удалось получить доступ. Попробуйте позже.");
+        return;
+      }
+      // Активируем подарочный код.
+      const result = await api.redeemGiftCode(token, code);
+      // config тут не в scope — грузим отдельно.
+      const giftCfg = await api.getPublicConfig().catch(() => null);
+      // новые тексты получателю по ТЗ клиента.
+      // Стандартная (без трафика) — короткий красивый текст.
+      // Unblock (с трафиком) — полное описание Unblock с лимитом.
+      const hasTrafficLimit = result.trafficLimitBytes != null && result.trafficLimitBytes > 0;
+      const days = result.durationDays ?? 0;
+      const tariffName = result.tariffName ?? "Подписка";
+      const supportLink = giftCfg?.supportLink || "";
+      // подсказка «если инструкция не открылась» (подарочная подписка).
+      const urlBlock = result.subscriptionUrl
+        ? `Ссылка подписки:\n${result.subscriptionUrl}\n\n💡 Подписка обновляется автоматически\n1️⃣ подписка - до 4️⃣ устройств одновременно\n\n${instructionFallbackText(giftCfg)}`
+        : "";
+      let receiverText: string;
+      if (hasTrafficLimit) {
+        const trafficGb = Math.round((result.trafficLimitBytes ?? 0) / 1024 ** 3);
+        // добавляем «💰 Стоимость: X ₽» для Unblock по ТЗ клиента.
+        const priceBlock = result.tariffPrice != null && result.tariffPrice > 0
+          ? `💰 Стоимость: ${Math.round(result.tariffPrice)} ${(result.tariffCurrency ?? "RUB").toUpperCase() === "RUB" ? "₽" : (result.tariffCurrency ?? "")}\n\n`
+          : "";
+        receiverText =
+          `💝 Вам подарили ${tariffName} на ${days} дней!\n\n` +
+          `💡 Это Unblock подписка\nОна позволяет оставаться на связи даже при ограничениях интернета в регионе.\n\n` +
+          `📅 Срок действия: ${days} дней\n📊 Лимит трафика: ${trafficGb} GB\n${priceBlock}` +
+          `Unblock Internet🔓 — позволяет оставаться на связи в любых ситуациях.\n\n` +
+          `⚡️ Unblock поможет, если:\n      🛜 у вас в регионе периодически действуют ограничения мобильного интернета (отключают интернет)\n      🤜 локации из обычной подписки уже не спасают\n      ⛔️ ключи из обычной подписки сами перестают работать через несколько минут после включения\n\n` +
+          `💡 Во всех остальных случаях вам поможет стандартная подписка: Главное меню → 💳 Купить доступ\n\n` +
+          `🎥 Нет рекламы на YouTube.\n\n` +
+          `❗️Если у вас НЕ работают даже сайты из Белого списка (Яндекс, VK, Госуслуги и т.д.) – данная подписка не поможет.\n\n` +
+          `💡 Чтобы скопировать подписку, нажмите на неё один раз\n\n` +
+          `${urlBlock}\n\n` +
+          `💬 По любым вопросам вам поможет наша поддержка - ${supportLink}`;
+      } else {
+        receiverText =
+          `💝 Вам подарили подписку на ${days} день!\n\n` +
+          `💡 Чтобы скопировать подписку, нажмите на неё один раз\n\n` +
+          `${urlBlock}\n\n` +
+          `💬 По любым вопросам вам поможет наша поддержка - ${supportLink}`;
+      }
+      // Кнопки как при покупке/триале.
+      type Row = ({ text: string; callback_data: string } | { text: string; url: string })[];
+      const giftRows: Row[] = [];
+      if (result.subscriptionUrl) giftRows.push([{ text: "📲 Инструкции по установке", url: result.subscriptionUrl }]);
+      giftRows.push([{ text: "📋 Мои подписки", callback_data: "menu:my_subs" }]);
+      giftRows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
+      await ctx.reply(receiverText, { reply_markup: { inline_keyboard: giftRows } });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Ошибка активации подарка";
+      await ctx.reply(`❌ ${msg}`);
+    }
+    return;
+  }
+
+  // deep-link «продлить конкретную подписку».
+  // Используется из авторассылки `subscription_expired` — кнопка «🔄 Продлить» в сообщении
+  // содержит url `https://t.me/<bot>?start=renew_<subscriptionId>`. По нажатию открываем
+  // оплату того же тарифа подписки (как кнопка «💰 Продлить» в детали).
+  if (/^renew_/i.test(payload)) {
+    const subId = payload.replace(/^renew_/i, "").trim();
+    if (!subId) {
+      await ctx.reply("❌ Неверная ссылка продления.");
+      return;
+    }
+    const token = await getOrRestoreToken(from.id, from.username);
+    if (!token) {
+      await ctx.reply("🔐 Сначала запустите бота через /start");
+      return;
+    }
+    try {
+      const all = await api.getAllSubscriptions(token);
+      const item = (all.items ?? []).find((it) => it.id === subId);
+      if (!item) {
+        await ctx.reply("❌ Подписка не найдена или истекла. Зайдите в «📋 Мои подписки».", {
+          reply_markup: { inline_keyboard: [[{ text: "📋 Мои подписки", callback_data: "menu:my_subs" }]] },
+        });
+        return;
+      }
+      if (!item.tariffId) {
+        await ctx.reply("⚠️ К подписке не привязан тариф. Выберите вручную из меню тарифов.", {
+          reply_markup: { inline_keyboard: [[{ text: "💳 Купить доступ", callback_data: "menu:tariffs" }]] },
+        });
+        return;
+      }
+      // Открываем оплату того же тарифа (использует продление через pay_tariff_ext).
+      await ctx.reply(
+        `🔄 Продление подписки #${item.subscriptionIndex ?? 0} — ${item.tariffDisplayName ?? "Тариф"}\n\nВыберите способ оплаты:`,
+        { reply_markup: { inline_keyboard: [[{ text: "💰 Продлить эту подписку", callback_data: `pay_tariff_ext:${item.id}` }], [{ text: "🏠 Главное меню", callback_data: "menu:main" }]] } },
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Ошибка";
+      await ctx.reply(`❌ ${msg}`);
+    }
+    return;
+  }
 
   // Deep-link авторизация на сайте: /start auth_TOKEN
   if (/^auth_/i.test(payload)) {
@@ -1078,6 +1633,16 @@ composer.command("start", async (ctx) => {
     const client = auth.client;
     if (client?.preferredLang) setUserLang(from.id, client.preferredLang);
 
+    // event-driven welcome (after_registration)
+    // запускаем сразу после регистрации НОВОГО клиента — не ждём крон. Бэкенд сам
+    // дедупит по (rule_id, client_id), так что повторный вызов безопасен.
+    // Удалил учётку → новый client_id → дедуп пройдёт → юзер опять получит приветствие.
+    if (auth.isNewClient) {
+      api.fireOnRegistration(auth.token).catch((e) => {
+        console.error("[fireOnRegistration] failed:", e);
+      });
+    }
+
     // Если это промо-ссылка — активируем промокод
     if (promoCode) {
       try {
@@ -1129,13 +1694,20 @@ composer.command("start", async (ctx) => {
       }
     }
 
-    const [subRes, proxyRes, singboxRes] = await Promise.all([
+    const [subRes, proxyRes, singboxRes, allSubsRes] = await Promise.all([
       api.getSubscription(auth.token).catch(() => ({ subscription: null })),
       api.getPublicProxyTariffs().catch(() => ({ items: [] })),
       api.getPublicSingboxTariffs().catch(() => ({ items: [] })),
+      // тянем все подписки клиента для блок подписок в welcome (нагрузка + список).
+      api.getAllSubscriptions(auth.token).catch(() => ({ items: [] })),
     ]);
     const vpnUrl = getSubscriptionUrl(subRes.subscription);
-    const showTrial = Boolean(config?.trialEnabled && !client?.trialUsed);
+    // если в админке настроены trials → используем их (скрываем
+    // кнопку когда юзер всё взял); иначе fallback на legacy single-trial.
+    const trialAvail = await api.getAvailableTrials(auth.token).catch(() => ({ items: [], hasAnyEnabled: false }));
+    const showTrial = trialAvail.hasAnyEnabled
+      ? trialAvail.items.length > 0
+      : Boolean(config?.trialEnabled && !client?.trialUsed);
     const showProxy = proxyRes.items?.some((c: { tariffs: unknown[] }) => c.tariffs?.length > 0) ?? false;
     const showSingbox = singboxRes.items?.some((c: { tariffs: unknown[] }) => c.tariffs?.length > 0) ?? false;
     const appUrl = config?.publicAppUrl?.replace(/\/$/, "") ?? null;
@@ -1151,6 +1723,7 @@ composer.command("start", async (ctx) => {
       menuTextCustomEmojiIds: config?.menuTextCustomEmojiIds ?? null,
       botEmojis: config?.botEmojis ?? null,
       infoBlock: config?.botInfoBlock ?? null,
+      allSubs: allSubsRes,
     });
     const caption = text.length > TELEGRAM_CAPTION_MAX ? text.slice(0, TELEGRAM_CAPTION_MAX - 3) + "..." : text;
     const captionEntities = text.length > TELEGRAM_CAPTION_MAX && entities.length ? entities.filter((e) => e.offset + e.length <= TELEGRAM_CAPTION_MAX - 3) : entities;
@@ -1158,7 +1731,10 @@ composer.command("start", async (ctx) => {
     const hasSupportLinks = !!(config?.supportLink || config?.agreementLink || config?.offerLink || config?.instructionsLink || hasVideoInstructions);
     const markup = mainMenu({
       showTrial,
-      showVpn: Boolean(vpnUrl),
+      // кнопка «🔌 Подключиться автоматически» показывается
+      // если есть ХОТЯ БЫ ОДНА подписка (root ИЛИ secondary, включая триал). Раньше зависела
+      // только от vpnUrl (root), и юзеры с одним триалом не видели кнопку.
+      showVpn: Boolean(vpnUrl) || (allSubsRes.items?.length ?? 0) > 0,
       showProxy,
       showSingbox,
       showGift: config?.giftSubscriptionsEnabled === true,
@@ -1212,28 +1788,207 @@ composer.command("link", async (ctx) => {
   }
 });
 
+// ─── T8: bot menu commands ────────────────────────────────────────
+// Команды бота, попадающие в синюю панельку (через setMyCommands в onStart):
+//   /start          — Главное меню          (уже есть выше)
+//   /subscriptions  — Моя подписка / инструкции
+//   /referral       — Реферальная программа
+//   /support        — Поддержка
+// Каждая команда отправляет inline-кнопку, которая дёргает существующий
+// callback_query handler — это zero-risk вариант (не трогаем основную логику).
+//   /link  — оставлен как back-compat хендлер, но НЕ показывается в меню.
+
+// убраны промежуточные сообщения с inline-кнопкой
+// «Открыть [меню]» — команды сразу рендерят финальный контент (список / экран).
+// Логика дублирует соответствующие callback handler'ы (menu:my_subs / menu:referral /
+// menu:support), но вместо editMessageContent отправляет новое сообщение через ctx.reply.
+
+composer.command("subscriptions", async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const token = await getOrRestoreToken(userId, ctx.from?.username);
+  if (!token) {
+    await ctx.reply("🔐 Сначала запустите бота через /start");
+    return;
+  }
+  try {
+    const result = await api.getAllSubscriptions(token);
+    if (!result.items?.length) {
+      await ctx.reply("📋 Мои подписки\n\nУ вас пока нет активных подписок.", {
+        reply_markup: { inline_keyboard: [[{ text: "🏠 Главное меню", callback_data: "menu:main" }]] },
+      });
+      return;
+    }
+    const sorted = [...result.items].sort((a, b) => {
+      if (a.type !== b.type) return a.type === "root" ? -1 : 1;
+      return (a.subscriptionIndex ?? 0) - (b.subscriptionIndex ?? 0);
+    });
+    const cfg = await api.getPublicConfig().catch(() => null);
+    const bodyLines = [`📋 Мои подписки (**${sorted.length}**)`, ""];
+    const buttonItems = sorted.map((it) => {
+      const info = parseSubInfo(it);
+      const trialBodyMark = it.trialId ? " 🎁" : "";
+      // без названия тарифа в текстовой строке —
+      // для истёкших «❌ истекла», для активных «N дн. до DD.MM.YYYY [+трафик]».
+      if (info.isExpired) {
+        bodyLines.push(`${info.typeEmoji} #${info.idx}${trialBodyMark} — ❌ истекла`);
+      } else {
+        bodyLines.push(`${info.typeEmoji} #${info.idx}${trialBodyMark} — **${info.daysStr}** до ${info.dateStr}${info.trafficSuffix}`);
+      }
+      // В кнопке: «✅/❌ #N <tariff> (N дн./истекла)». tariffDisplayName уже с эмодзи.
+      const tariff = (it.tariffDisplayName || "—").slice(0, 38);
+      const trialBtnMark = it.trialId ? " 🎁" : "";
+      const lifetimeStr = info.isExpired ? "истекла" : info.daysStr;
+      const label = `${info.statusEmojiSmall} #${info.idx} ${tariff} (${lifetimeStr})${trialBtnMark}`;
+      return { type: it.type, id: it.id, label };
+    });
+    const { text, entities } = applyMarkdownAndEmoji(bodyLines.join("\n"), cfg?.botEmojis ?? null);
+    await ctx.reply(text, {
+      entities: entities?.length ? entities : undefined,
+      reply_markup: mySubsListButtons(buttonItems, cfg?.botBackLabel ?? null, undefined, undefined),
+    });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : "Ошибка";
+    await ctx.reply(`❌ ${msg}`);
+  }
+});
+
+composer.command("referral", async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const token = await getOrRestoreToken(userId, ctx.from?.username);
+  if (!token) {
+    await ctx.reply("🔐 Сначала запустите бота через /start");
+    return;
+  }
+  try {
+    const client = await api.getMe(token);
+    if (!client.referralCode) {
+      await ctx.reply("Реферальная ссылка пока недоступна. Попробуйте позже.");
+      return;
+    }
+    const cfg = await api.getPublicConfig().catch(() => null);
+    const stats = await api.getReferralStats(token).catch(() => null);
+    const baseUrl = cfg?.publicAppUrl?.replace(/\/$/, "") ?? "";
+    const linkSite = baseUrl ? `${baseUrl}/cabinet/register?ref=${encodeURIComponent(client.referralCode)}` : null;
+    const linkBot = `https://t.me/${ctx.me?.username ?? "bot"}?start=ref_${client.referralCode}`;
+    const p1 = stats?.referralPercent ?? client.referralPercent ?? (cfg?.defaultReferralPercent ?? 0);
+    const p2 = stats?.referralPercentLevel2 ?? (cfg?.referralPercentLevel2 ?? 0);
+    const fmt = (n: number) => `${Math.round(n)}₽`;
+    const lines: string[] = [
+      "👥 Реферальная программа",
+      "",
+      "Поделитесь ссылкой с друзьями и получайте процент со всех их пополнений! 🤝",
+      "",
+      `👥 Рефералы 1 уровня: ${p1}%`,
+      `Вы получаете ${p1}% от пополнений тех, кто перешёл по вашей ссылке.`,
+      `• Переходов по вашей ссылке: ${stats?.l1Clicks ?? 0}`,
+      `• Приобрели подписку: ${stats?.l1Purchased ?? 0}`,
+      `• Доход с рефералов 1 уровня: ${fmt(stats?.l1Earned ?? 0)}`,
+      "",
+      `🤝 Рефералы 2 уровня: ${p2}%`,
+      `Вы получаете ${p2}% от пополнений рефералов ваших рефералов.`,
+      `• Приглашено вашими рефералами: ${stats?.l2InvitesCount ?? 0}`,
+      `• Доход с рефералов 2 уровня: ${fmt(stats?.l2Earned ?? 0)}`,
+      "",
+      `💰 Ваш заработок (всего): ${fmt(stats?.totalEarned ?? 0)}`,
+      `💸 Выведено: ${fmt(stats?.totalWithdrawn ?? 0)}`,
+      `🛒 Потрачено: ${fmt(stats?.totalSpent ?? 0)}`,
+      `💵 Доступно: ${fmt(stats?.availableBalance ?? client.balance ?? 0)}`,
+      "",
+      "🔗 Ваша реферальная ссылка:",
+      "",
+      "Telegram Бот:",
+      linkBot,
+    ];
+    if (linkSite) {
+      lines.push("", "Сайт:", linkSite);
+    }
+    lines.push("", "💡 С реферального баланса можно оплатить подписку или вывести эти средства на свой кошелёк.");
+    // формат как в gift — `url=` + `text=`.
+    // Ссылку В САМ ТЕКСТ НЕ кладём — она уже идёт через параметр `url=` и
+    // выводится TG-клиентом ПЕРВОЙ строкой автоматически. Если продублировать
+    // в shareText — получим две одинаковых ссылки подряд (баг юзера 14.05).
+    const shareText = `\n🛡 Надёжный VPN, который реально работает!\n\nРаботает там, где другие не справляются.\n\n💡 Нажми на ссылку выше, чтобы подключиться.`;
+    const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(linkBot)}&text=${encodeURIComponent(shareText)}`;
+    const rows: ({ text: string; url: string } | { text: string; callback_data: string })[][] = [];
+    rows.push([{ text: "📢 Поделиться ссылкой", url: shareUrl }]);
+    rows.push([{ text: "💳 Оплатить/продлить доступ", callback_data: "menu:tariffs" }]);
+    rows.push([{ text: "💰 Заявка на вывод (от 3000₽)", callback_data: "withdraw:start" }]);
+    rows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await ctx.reply(lines.join("\n"), { reply_markup: { inline_keyboard: rows as any } });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : "Ошибка";
+    await ctx.reply(`❌ ${msg}`);
+  }
+});
+
+composer.command("support", async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const token = await getOrRestoreToken(userId, ctx.from?.username);
+  if (!token) {
+    await ctx.reply("🔐 Сначала запустите бота через /start");
+    return;
+  }
+  try {
+    const cfg = await api.getPublicConfig().catch(() => null);
+    const tgId = String(userId);
+    const tgUsername = ctx.from?.username ?? "";
+    let subsCount = 0;
+    try {
+      const subs = await api.getAllSubscriptions(token);
+      subsCount = subs.items?.length ?? 0;
+    } catch { /* ignore */ }
+    // тот же билд, что и callback menu:support → ID копируется.
+    const { text, entities, markup } = buildHelpScreen({
+      helpIntroText: cfg?.helpIntroText,
+      supportLink: cfg?.supportLink,
+      botBackLabel: cfg?.botBackLabel,
+      botEmojis: cfg?.botEmojis,
+      tgId,
+      tgUsername,
+      subsCount,
+      lang: getUserLang(userId),
+    });
+    await ctx.reply(text, {
+      entities: entities.length ? entities : undefined,
+      reply_markup: markup,
+    });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : "Ошибка";
+    await ctx.reply(`❌ ${msg}`);
+  }
+});
+
 /**
  * Показать экран «способы оплаты» для тарифа с уже выбранными опцией и числом ДОП. устройств.
  * effectivePrice = priceOption.price + (extras × pricePerExtraDevice × (100 − discount) / 100).
  */
 type ConfigSnapshot = Awaited<ReturnType<typeof api.getPublicConfig>>;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function showPaymentMethodsForTariff(ctx: any, userId: number, tariff: TariffItem, option: TariffPriceOption | null, extraDevices: number, config: ConfigSnapshot | null, innerStyles: InnerButtonStyles | undefined, innerEmojiIds: InnerEmojiIds | undefined, token: string): Promise<void> {
+async function showPaymentMethodsForTariff(ctx: any, userId: number, tariff: TariffItem, option: TariffPriceOption | null, extraDevices: number, config: ConfigSnapshot | null, innerStyles: InnerButtonStyles | undefined, innerEmojiIds: InnerEmojiIds | undefined, token: string, subExtrasMonthlyPrice: number = 0): Promise<void> {
   const opts = sortedPriceOptions(tariff.priceOptions);
   const eff = option ?? opts[0] ?? null;
   const unitPrice = eff?.price ?? tariff.price;
   const effectiveDays = eff?.durationDays ?? tariff.durationDays;
   const includedDevices = tariff.includedDevices ?? 1;
   const { extrasTotal } = applyExtraDevicesPriceBot(tariff.pricePerExtraDevice ?? 0, extraDevices, tariff.deviceDiscountTiers, effectiveDays);
-  const effectivePrice = unitPrice + extrasTotal;
+  // добавляем стоимость доп. устройств подписки
+  // (накопленных через sell-options), масштабированную на выбранную длительность.
+  const subExtrasForPeriod = subExtrasMonthlyPrice > 0 && effectiveDays > 0
+    ? Math.round(subExtrasMonthlyPrice * (effectiveDays / 30) * 100) / 100
+    : 0;
+  const effectivePrice = unitPrice + extrasTotal + subExtrasForPeriod;
   const methods = config?.plategaMethods ?? [];
   const client = await api.getMe(token);
-  const balanceLabel = client && client.balance >= effectivePrice ? `💰 Оплатить балансом (${formatMoney(client.balance, client.preferredCurrency ?? "RUB")})` : null;
+  // помощник стэкает персональную скидку клиента
+  // и активный промокод. Возвращает finalPrice + discountArg для зачёркивания базовой цены.
+  const personalDiscount = client?.personalDiscountPercent ?? 0;
   const discountInfo = activeDiscountCode.get(userId);
-  const discountArg = discountInfo ? {
-    originalPrice: formatMoney(effectivePrice, tariff.currency),
-    discountedPrice: formatMoney(getDiscountedPrice(effectivePrice, discountInfo), tariff.currency),
-  } : undefined;
+  const { discountArg, finalPrice: priceForDisplay } = buildTariffDiscountArg(effectivePrice, personalDiscount, discountInfo, tariff.currency);
+  const balanceLabel = client && client.balance >= priceForDisplay ? `💰 Оплатить балансом (${formatMoney(client.balance, client.preferredCurrency ?? "RUB")})` : null;
   const totalDevices = includedDevices + extraDevices;
   const devicesSuffix = extraDevices > 0 ? ` · ${totalDevices} устр (+${extraDevices} доп.)` : "";
   const nameWithDays = opts.length > 1 || option
@@ -1241,12 +1996,18 @@ async function showPaymentMethodsForTariff(ctx: any, userId: number, tariff: Tar
     : `${tariff.name}${devicesSuffix}`;
   const pay = buildPaymentMessage(config, {
     name: nameWithDays,
-    price: formatMoney(effectivePrice, tariff.currency),
-    amount: String(effectivePrice),
+    price: formatMoney(priceForDisplay, tariff.currency),
+    amount: String(priceForDisplay),
     currency: tariff.currency,
     action: "Выберите способ оплаты:",
   }, discountArg);
-  await editMessageContent(ctx, pay.text, tariffPaymentMethodButtons(tariff.id, methods, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds, balanceLabel, !!config?.yoomoneyEnabled, !!config?.yookassaEnabled, !!config?.cryptopayEnabled, tariff.currency, !!config?.heleketEnabled, !!config?.lavaEnabled, !!config?.lavatopEnabled), pay.entities);
+  // T11+T12 (11.05.2026): для тарифов с одним priceOption (Unblock и т.п.) этот экран —
+  // первый видимый юзеру шаг покупки. Подставляем `tariff.description` чтобы клиент
+  // увидел rich-text (как на эталонных скринах 4 / Unblock и Безлимитная Unblock).
+  // Для тарифов с несколькими opts (Стандартная) описание уже показано в picker'е длительности.
+  const desc = ((tariff as TariffItem & { description?: string | null }).description ?? "").trim();
+  const finalText = desc && opts.length === 1 ? `${desc}\n\n${pay.text}` : pay.text;
+  await editMessageContent(ctx, finalText, tariffPaymentMethodButtons(tariff.id, methods, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds, balanceLabel, !!config?.yoomoneyEnabled, !!config?.yookassaEnabled, !!config?.cryptopayEnabled, tariff.currency, !!config?.heleketEnabled, !!config?.lavaEnabled, !!config?.lavatopEnabled, config?.botEmojis ?? null), pay.entities);
 }
 
 /** Picker доп. устройств для подарочной подписки. */
@@ -1284,7 +2045,7 @@ async function showGiftDevicePicker(ctx: any, userId: number, tariff: TariffItem
     if (row.length >= 2) { rows.push(row); row = []; }
   }
   if (row.length > 0) rows.push(row);
-  rows.push([{ text: config?.botBackLabel ?? "◀️ В меню", callback_data: "menu:gift" }]);
+  rows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
 
   const text = `🎁 ${tariff.name} · ${days} ${formatRuDays(days)}\n\n📱 В тариф включено: ${includedDevices} устр.\nДобавьте дополнительные:`;
   // Mark unused params to satisfy linter
@@ -1308,7 +2069,22 @@ async function showGiftPaymentConfirm(ctx: any, userId: number, tariff: TariffIt
   const devicesSuffix = extras > 0 ? ` · ${totalDevices} устр (+${extras} доп.)` : "";
   const text = `🛒 ${tariff.name} · ${days} ${formatRuDays(days)}${devicesSuffix}\n\nСтоимость: ${formatMoney(total, tariff.currency)}\n\nПодтвердите оплату:`;
   void userId;
-  await editMessageContent(ctx, text, giftPaymentButtons(tariff.id, balanceLabel, config?.botBackLabel ?? null, innerStyles, innerEmojiIds));
+  // теперь подарочную можно оплатить любым включённым провайдером.
+  // Баланс показываем только если на нём достаточно денег.
+  const hasBalance = (client?.balance ?? 0) >= total;
+  await editMessageContent(ctx, text, giftPaymentButtons(
+    tariff.id,
+    hasBalance ? balanceLabel : null,
+    config?.botBackLabel ?? null,
+    innerStyles,
+    innerEmojiIds,
+    !!config?.yookassaEnabled,
+    !!config?.yoomoneyEnabled,
+    !!config?.cryptopayEnabled,
+    !!config?.heleketEnabled,
+    !!config?.lavaEnabled,
+    tariff.currency,
+  ));
 }
 
 // ——— Callback: меню и действия
@@ -1317,6 +2093,42 @@ composer.on("callback_query:data", async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId) return;
   await ctx.answerCallbackQuery().catch(() => {});
+
+  // ─── 54-ФЗ-чек: prompt «нужен ли чек» перед ЮКасса-платежом ───
+  // Каждый pay_*_yookassa-handler сохраняет builder+finalize в yk-receipt store и показывает
+  // этот prompt. Тут мы реагируем на 3 варианта ответа: «без чека», «на сохранённый email»,
+  // «ввести другой email» (последний — ставит pending text input, ниже обработается).
+  if (data.startsWith("yk_recpt:")) {
+    const parts = data.split(":");
+    const action = parts[1]; // no | saved | ask
+    const tok = parts.slice(2).join(":");
+    if (action === "ask") {
+      const p = peekPendingReceipt(tok);
+      if (!p || p.userId !== userId) {
+        await ctx.reply("⏰ Сессия истекла. Откройте «Оплатить» ещё раз.");
+        return;
+      }
+      setPendingEmailInput(userId, tok);
+      await ctx.reply(EMAIL_PROMPT_TEXT);
+      return;
+    }
+    const p = takePendingReceipt(tok);
+    if (!p || p.userId !== userId) {
+      await ctx.reply("⏰ Сессия истекла. Откройте «Оплатить» ещё раз.");
+      return;
+    }
+    // для "no" передаём пустую строку (явный отказ),
+    // не undefined: иначе backend сделает fallback на client.email и пришлёт чек.
+    const receiptEmail: string = action === "saved" ? (p.savedEmail ?? "") : "";
+    try {
+      const payment = await p.builder(receiptEmail);
+      await p.finalize(payment, { receiptSentTo: receiptEmail || null });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Ошибка создания платежа ЮKassa";
+      await ctx.reply(`❌ ${msg}`);
+    }
+    return;
+  }
 
   // ─── Приветствие → «Войти в кабинет» — открывает главное меню ───
   if (data === "welcome:continue") {
@@ -1331,13 +2143,19 @@ composer.on("callback_query:data", async (ctx) => {
       const config = await api.getPublicConfig();
       if (config?.translations) setTranslations(config.translations);
       const me = await api.getMe(token);
-      const [subRes, proxyRes, singboxRes] = await Promise.all([
+      const [subRes, proxyRes, singboxRes, allSubsRes] = await Promise.all([
         api.getSubscription(token).catch(() => ({ subscription: null })),
         api.getPublicProxyTariffs().catch(() => ({ items: [] })),
         api.getPublicSingboxTariffs().catch(() => ({ items: [] })),
+        // для блок подписок в welcome.
+        api.getAllSubscriptions(token).catch(() => ({ items: [] })),
       ]);
       const vpnUrl = getSubscriptionUrl(subRes.subscription);
-      const showTrial = Boolean(config?.trialEnabled && !me.trialUsed);
+      // T15: новый/legacy flow.
+      const trialAvail = await api.getAvailableTrials(token).catch(() => ({ items: [], hasAnyEnabled: false }));
+      const showTrial = trialAvail.hasAnyEnabled
+        ? trialAvail.items.length > 0
+        : Boolean(config?.trialEnabled && !me.trialUsed);
       const showProxy = proxyRes.items?.some((c: { tariffs: unknown[] }) => c.tariffs?.length > 0) ?? false;
       const showSingbox = singboxRes.items?.some((c: { tariffs: unknown[] }) => c.tariffs?.length > 0) ?? false;
       const appUrl = config?.publicAppUrl?.replace(/\/$/, "") ?? null;
@@ -1352,12 +2170,14 @@ composer.on("callback_query:data", async (ctx) => {
         menuTextCustomEmojiIds: config?.menuTextCustomEmojiIds ?? null,
         botEmojis: config?.botEmojis ?? null,
         infoBlock: config?.botInfoBlock ?? null,
+        allSubs: allSubsRes,
       });
       const hasVideoInstructions = config?.videoInstructionsEnabled && (config?.videoInstructions?.length ?? 0) > 0;
       const hasSupportLinks = !!(config?.supportLink || config?.agreementLink || config?.offerLink || config?.instructionsLink || hasVideoInstructions);
       const markup = mainMenu({
         showTrial,
-        showVpn: Boolean(vpnUrl),
+        // T-fix (11.05.2026): кнопка vpn доступна если есть ЛЮБАЯ подписка (включая secondary/триал).
+        showVpn: Boolean(vpnUrl) || (allSubsRes.items?.length ?? 0) > 0,
         showProxy,
         showSingbox,
         showGift: config?.giftSubscriptionsEnabled === true,
@@ -1420,7 +2240,7 @@ composer.on("callback_query:data", async (ctx) => {
             { text: "💰 Последние платежи", callback_data: "admin:payments:paid:1" },
           ],
           [{ text: "📢 Рассылка", callback_data: "admin:broadcast" }],
-          [{ text: "◀️ В меню", callback_data: "menu:main" }],
+          [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
         ],
       };
       await editMessageContent(ctx, "⚙️ Панель админа\n\nВыберите раздел:", markup);
@@ -1959,15 +2779,24 @@ composer.on("callback_query:data", async (ctx) => {
       : undefined;
 
     if (data === "menu:main") {
-      const [client, subRes, proxyRes, singboxRes] = await Promise.all([
+      // defensive cleanup — выходя в главное меню сбрасываем addsub-флаг.
+      addsubPending.delete(userId);
+      const [client, subRes, proxyRes, singboxRes, allSubsRes] = await Promise.all([
         api.getMe(token),
         api.getSubscription(token).catch(() => ({ subscription: null })),
         api.getPublicProxyTariffs().catch(() => ({ items: [] })),
         api.getPublicSingboxTariffs().catch(() => ({ items: [] })),
+        // для блок подписок в welcome (нагрузка + список подписок).
+        api.getAllSubscriptions(token).catch(() => ({ items: [] })),
       ]);
       if (client?.preferredLang) setUserLang(userId, client.preferredLang);
       const vpnUrl = getSubscriptionUrl(subRes.subscription);
-      const showTrial = Boolean(config?.trialEnabled && !client?.trialUsed);
+      // если в админке настроены trials → используем их (скрываем
+      // кнопку когда юзер всё взял); иначе fallback на legacy single-trial.
+      const trialAvail = await api.getAvailableTrials(token).catch(() => ({ items: [], hasAnyEnabled: false }));
+      const showTrial = trialAvail.hasAnyEnabled
+        ? trialAvail.items.length > 0
+        : Boolean(config?.trialEnabled && !client?.trialUsed);
       const showProxy = proxyRes.items?.some((c: { tariffs: unknown[] }) => c.tariffs?.length > 0) ?? false;
       const showSingbox = singboxRes.items?.some((c: { tariffs: unknown[] }) => c.tariffs?.length > 0) ?? false;
       const name = config?.serviceName?.trim() || "Кабинет";
@@ -1982,12 +2811,14 @@ composer.on("callback_query:data", async (ctx) => {
         menuTextCustomEmojiIds: config?.menuTextCustomEmojiIds ?? null,
         botEmojis: config?.botEmojis ?? null,
         infoBlock: config?.botInfoBlock ?? null,
+        allSubs: allSubsRes,
       });
       const hasVideoInstructionsCb = config?.videoInstructionsEnabled && (config?.videoInstructions?.length ?? 0) > 0;
       const hasSupportLinks = !!(config?.supportLink || config?.agreementLink || config?.offerLink || config?.instructionsLink || hasVideoInstructionsCb);
       const backMarkup = mainMenu({
         showTrial,
-        showVpn: Boolean(vpnUrl),
+        // T-fix (11.05.2026): кнопка vpn доступна если есть ЛЮБАЯ подписка (включая secondary/триал).
+        showVpn: Boolean(vpnUrl) || (allSubsRes.items?.length ?? 0) > 0,
         showProxy,
         showSingbox,
         showGift: config?.giftSubscriptionsEnabled === true,
@@ -2027,48 +2858,124 @@ composer.on("callback_query:data", async (ctx) => {
       return;
     }
 
+    // T11 (11.05.2026) — экран «⭕ Помощь» по эталону скрина 15.
+    // Содержит: helpIntroText (большой блок «цели/приоритеты»),
+    //           часы поддержки (support_hours_from/to),
+    //           блок с контактами клиента (Telegram ID, Username, Активных подписок).
+    // Кнопки: «🧑‍💼 Написать в поддержку», «📄 Документы», «🏠 Главное меню».
+    // ❌ Решение по UX (11.05.2026) — НЕ показываем «Активных ключей» и «Пароль для сайта».
     if (data === "menu:support") {
       const lang = getUserLang(userId);
-      const hasVideoInstr = config?.videoInstructionsEnabled && (config?.videoInstructions?.length ?? 0) > 0;
-      const hasAny = config?.supportLink || config?.agreementLink || config?.offerLink || config?.instructionsLink || hasVideoInstr;
-      if (!hasAny) {
-        await editMessageContent(ctx, _t("support.not_configured", lang), backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
-        return;
+      const tgId = String(userId);
+      const tgUsername = ctx.from?.username ?? "";
+      // Подсчёт подписок клиента: всё что есть в getAllSubscriptions
+      let subsCount = 0;
+      try {
+        const subs = await api.getAllSubscriptions(token);
+        subsCount = subs.items?.length ?? 0;
+      } catch {
+        /* ignore */
       }
+      // единый билд экрана Помощи (см. buildHelpScreen).
+      const { text, entities, markup } = buildHelpScreen({
+        helpIntroText: config?.helpIntroText,
+        supportLink: config?.supportLink,
+        botBackLabel: config?.botBackLabel,
+        botEmojis: config?.botEmojis,
+        tgId,
+        tgUsername,
+        subsCount,
+        backStyle: innerStyles?.back,
+        emojiIds: innerEmojiIds,
+        lang,
+      });
+      await editMessageContent(ctx, text, markup, entities);
+      return;
+    }
+
+    // T11 (11.05.2026) — подменю «📄 Документы» по эталону скрина 16.
+    if (data === "menu:docs") {
+      const lang = getUserLang(userId);
       await editMessageContent(
         ctx,
-        _t("support.title", lang),
-        supportSubMenu(
+        "📄 Документы",
+        documentsSubMenu(
           {
-            support: config?.supportLink,
             agreement: config?.agreementLink,
             offer: config?.offerLink,
-            instructions: config?.instructionsLink,
-            hasVideoInstructions: hasVideoInstr,
+            refund: config?.refundLink,
           },
           config?.botBackLabel ?? null,
           innerStyles?.back,
           innerEmojiIds,
-          lang
-        )
+          lang,
+        ),
       );
       return;
     }
 
-    if (data === "menu:own_bot") {
-      const lang = getUserLang(userId);
-      if (!config?.ticketsEnabled || !appUrl) {
-        await editMessageContent(ctx, _t("own_bot.tickets_disabled", lang), backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds, lang));
-        return;
+    // T11+T12 (11.05.2026) — экран «🌐 Локации» для конкретного тарифа.
+    // два формата callback'а:
+    //   1) `loc:<tariffId>:<r|s>:<subId>` — новый сжатый (subDetailButtons), даёт кнопку «Назад»
+    //   2) `menu:locations:<tariffId>` — legacy, без кнопки «Назад» (только «В меню»)
+    if (data.startsWith("loc:") || data.startsWith("menu:locations:")) {
+      const isCompact = data.startsWith("loc:");
+      const tail = data.slice(isCompact ? "loc:".length : "menu:locations:".length);
+      const parts = tail.split(":");
+      const tariffId = parts[0] ?? "";
+      const compactT = isCompact ? parts[1] : null;
+      const backSubType: "root" | "secondary" | null =
+        compactT === "r" ? "root" : compactT === "s" ? "secondary" : null;
+      const backSubId = isCompact ? (parts[2] ?? null) : null;
+      try {
+        const { items } = await api.getPublicTariffs();
+        const tariff = items?.flatMap((c: TariffCategory) => c.tariffs).find((t: TariffItem) => t.id === tariffId);
+        const text = ((tariff as TariffItem & { locations?: string | null } | undefined)?.locations ?? "").trim()
+          || "🌐 Локации\n\nДля этого тарифа локации пока не настроены. Обратитесь в поддержку.";
+        // Текст «Назад» из настроек админки (config.botBackLabel) — пользователь видит
+        // тот же смайлик что и везде в боте. Fallback на «⬅️ Назад».
+        const backText = (config?.botBackLabel && config.botBackLabel.trim()) || "⬅️ Назад";
+        const homeText = "🏠 Главное меню";
+        const inline_keyboard: { text: string; callback_data: string }[][] = [];
+        if (backSubType && backSubId) {
+          inline_keyboard.push([{ text: backText, callback_data: `sub:detail:${backSubType}:${backSubId}` }]);
+        }
+        inline_keyboard.push([{ text: homeText, callback_data: "menu:main" }]);
+        await editMessageContent(ctx, text, { inline_keyboard });
+      } catch {
+        await editMessageContent(ctx, "🌐 Локации\n\n❌ Ошибка загрузки.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
       }
-      const backLabel = (config?.botBackLabel && config.botBackLabel.trim()) || _t("back_to_menu", lang);
-      const ticketsMarkup: InlineMarkup = {
-        inline_keyboard: [
-          [{ text: _t("own_bot.btn_tickets", lang), web_app: { url: `${appUrl}/cabinet/tickets` } }],
-          [{ text: backLabel, callback_data: "menu:main" }],
-        ],
-      };
-      await editMessageContent(ctx, _t("own_bot.text", lang), ticketsMarkup);
+      return;
+    }
+
+    // T14 (11.05.2026) — экран «🛡 Бесплатный Прокси для Telegram».
+    // динамический список прокси-серверов (tgProxyServers).
+    // Каждый элемент = {flag, name, url}. Рендерим по кнопке на каждый.
+    // Backward compat: если массив пуст — используем старые primary/backup
+    // с дефолтными лейблами по странам (NL / DE).
+    if (data === "menu:tg_proxy") {
+      const text = (config?.tgProxyText ?? "").trim() || "🛡 Бесплатный прокси для Telegram\n\nНастройки прокси пока не заданы. Обратитесь в поддержку.";
+      const servers = (config?.tgProxyServers ?? []) as { flag?: string; name?: string; url?: string }[];
+      const rows: { text: string; url?: string; callback_data?: string }[][] = [];
+      if (servers.length > 0) {
+        for (const s of servers) {
+          const url = (s.url ?? "").trim();
+          if (!url) continue;
+          const label = `${(s.flag ?? "").trim()} ${(s.name ?? "").trim()}`.trim() || "Прокси";
+          rows.push([{ text: label, url }]);
+        }
+      } else {
+        // Fallback на legacy-поля primary/backup.
+        const primaryUrl = (config?.tgProxyUrlPrimary ?? "").trim();
+        const backupUrl = (config?.tgProxyUrlBackup ?? "").trim();
+        if (primaryUrl) rows.push([{ text: "🇳🇱 Нидерланды", url: primaryUrl }]);
+        if (backupUrl) rows.push([{ text: "🇩🇪 Германия", url: backupUrl }]);
+      }
+      // «menu:back» не зарегистрирован → кнопка ломалась.
+      // Используем «menu:main» и переименуем в «🏠 Главное меню».
+      rows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await editMessageContent(ctx, text, { inline_keyboard: rows as any });
       return;
     }
 
@@ -2147,6 +3054,8 @@ composer.on("callback_query:data", async (ctx) => {
     }
 
     if (data === "menu:tariffs") {
+      // defensive cleanup — возврат в список тарифов сбрасывает addsub-флаг.
+      addsubPending.delete(userId);
       const { items } = await api.getPublicTariffs();
       if (!items?.length) {
         await editMessageContent(ctx, _t("tariffs.not_configured", getUserLang(userId)), backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
@@ -2160,10 +3069,13 @@ composer.on("callback_query:data", async (ctx) => {
       const tariffsEmojiIds = innerEmojiIds && tariffsEmojiEntry?.tgEmojiId
         ? { ...innerEmojiIds, tariff: tariffsEmojiEntry.tgEmojiId }
         : innerEmojiIds;
+      // T10 (11.05.2026): убран выбор категории — сразу плоский список тарифов.
+      // Если у админа создано несколько категорий — все тарифы сливаем в одну виртуальную.
       if (items.length > 1) {
-        const { text, entities } = titleWithOptionalEmoji(tariffsEmojiKey, "Тарифы\n\nВыберите категорию:", config?.botEmojis);
-        await editMessageContent(ctx, text, tariffPayButtons(markHasOptions(items), config?.botBackLabel ?? null, innerStyles, tariffsEmojiIds, tariffsEmojiUnicode), entities);
-        return;
+        const merged = items.flatMap((c: TariffCategory) => c.tariffs ?? []);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const virtual: any = { id: "_all_", name: "Тарифы", emoji: "", emojiKey: null, tariffs: merged };
+        items.splice(0, items.length, virtual);
       }
       const cat = items[0]!;
       const nameOnly = (cat.name || "").replace(/^\p{Extended_Pictographic}\uFE0F?\s*/u, "").trim() || cat.name || "";
@@ -2213,7 +3125,7 @@ composer.on("callback_query:data", async (ctx) => {
       const cats = items.filter((c: { tariffs: unknown[] }) => c.tariffs?.length > 0);
       if (cats.length === 1 && cats[0]!.tariffs.length <= 5) {
         const head = cats[0]!.name;
-        const lines = cats[0]!.tariffs.map((t: { name: string; price: number; currency: string }) => `• ${t.name} — ${t.price} ${t.currency}`).join("\n");
+        const lines = cats[0]!.tariffs.map((t: { name: string; price: number; currency: string }) => `• ${t.name} — ${t.price} ${currencySymbol(t.currency)}`).join("\n");
         await editMessageContent(ctx, `🌐 Прокси\n\n${head}\n${lines}\n\nВыберите тариф:`, proxyTariffPayButtons(cats, config?.botBackLabel ?? null, innerStyles, innerEmojiIds));
       } else {
         await editMessageContent(ctx, "🌐 Прокси\n\nВыберите категорию:", proxyTariffPayButtons(cats, config?.botBackLabel ?? null, innerStyles, innerEmojiIds));
@@ -2230,7 +3142,7 @@ composer.on("callback_query:data", async (ctx) => {
         return;
       }
       const head = category.name;
-      const lines = category.tariffs.map((t: { name: string; price: number; currency: string }) => `• ${t.name} — ${t.price} ${t.currency}`).join("\n");
+      const lines = category.tariffs.map((t: { name: string; price: number; currency: string }) => `• ${t.name} — ${t.price} ${currencySymbol(t.currency)}`).join("\n");
       await editMessageContent(ctx, `🌐 ${head}\n\n${lines}\n\nВыберите тариф:`, proxyTariffsOfCategoryButtons(category, config?.botBackLabel ?? null, innerStyles, "menu:proxy", innerEmojiIds));
       return;
     }
@@ -2244,7 +3156,7 @@ composer.on("callback_query:data", async (ctx) => {
       const cats = items.filter((c: { tariffs: unknown[] }) => c.tariffs?.length > 0);
       if (cats.length === 1 && cats[0]!.tariffs.length <= 5) {
         const head = cats[0]!.name;
-        const lines = cats[0]!.tariffs.map((t: { name: string; price: number; currency: string }) => `• ${t.name} — ${t.price} ${t.currency}`).join("\n");
+        const lines = cats[0]!.tariffs.map((t: { name: string; price: number; currency: string }) => `• ${t.name} — ${t.price} ${currencySymbol(t.currency)}`).join("\n");
         await editMessageContent(ctx, `🔑 Доступы\n\n${head}\n${lines}\n\nВыберите тариф:`, singboxTariffPayButtons(cats, config?.botBackLabel ?? null, innerStyles, innerEmojiIds));
       } else {
         await editMessageContent(ctx, "🔑 Доступы\n\nВыберите категорию:", singboxTariffPayButtons(cats, config?.botBackLabel ?? null, innerStyles, innerEmojiIds));
@@ -2261,7 +3173,7 @@ composer.on("callback_query:data", async (ctx) => {
         return;
       }
       const head = category.name;
-      const lines = category.tariffs.map((t: { name: string; price: number; currency: string }) => `• ${t.name} — ${t.price} ${t.currency}`).join("\n");
+      const lines = category.tariffs.map((t: { name: string; price: number; currency: string }) => `• ${t.name} — ${t.price} ${currencySymbol(t.currency)}`).join("\n");
       await editMessageContent(ctx, `🔑 ${head}\n\n${lines}\n\nВыберите тариф:`, singboxTariffsOfCategoryButtons(category, config?.botBackLabel ?? null, innerStyles, "menu:singbox", innerEmojiIds));
       return;
     }
@@ -2326,7 +3238,7 @@ composer.on("callback_query:data", async (ctx) => {
           price: formatMoney(tariff.price, tariff.currency),
           amount: String(tariff.price),
           currency: tariff.currency,
-          action: "Нажмите для оплаты через ЮMoney:",
+          action: "Нажмите для оплаты:",
         });
         await editMessageContent(ctx, msg.text, payUrlMarkup(payment.paymentUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
       } catch (e: unknown) {
@@ -2349,15 +3261,30 @@ composer.on("callback_query:data", async (ctx) => {
         return;
       }
       try {
-        const payment = await api.createYookassaPayment(token, { amount: tariff.price, currency: "RUB", proxyTariffId });
-        const msg = buildPaymentMessage(config, {
-          name: tariff.name,
-          price: formatMoney(tariff.price, tariff.currency),
-          amount: String(tariff.price),
-          currency: tariff.currency,
-          action: "Нажмите для оплаты через ЮKassa:",
+        // 54-ФЗ-чек prompt перед созданием платежа.
+        const mePx = await api.getMe(token);
+        const savedEmailPx = mePx?.email ?? null;
+        const tokRcptP = storePendingReceipt({
+          userId,
+          savedEmail: savedEmailPx,
+          builder: (receiptEmail) => api.createYookassaPayment(token, { amount: tariff.price, currency: "RUB", proxyTariffId, receiptEmail }),
+          finalize: async (payment, { receiptSentTo }) => {
+            const msg = buildPaymentMessage(config, {
+              name: tariff.name,
+              price: formatMoney(tariff.price, tariff.currency),
+              amount: String(tariff.price),
+              currency: tariff.currency,
+              action: "Нажмите для оплаты:",
+            });
+            const markup = payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds);
+            if (receiptSentTo) {
+              await ctx.reply(`${msg.text}\n\n${RECEIPT_OK_LINE(receiptSentTo)}`, { parse_mode: "HTML", reply_markup: markup });
+            } else {
+              await ctx.reply(msg.text, { entities: msg.entities, reply_markup: markup });
+            }
+          },
         });
-        await editMessageContent(ctx, msg.text, payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
+        await editMessageContent(ctx, receiptPromptText(savedEmailPx), receiptPromptKeyboard(tokRcptP, savedEmailPx));
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа";
         await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
@@ -2375,7 +3302,7 @@ composer.on("callback_query:data", async (ctx) => {
       }
       try {
         const payment = await api.createCryptopayPayment(token, { amount: tariff.price, currency: tariff.currency, proxyTariffId });
-        const msg = buildPaymentMessage(config, { name: tariff.name, price: formatMoney(tariff.price, tariff.currency), amount: String(tariff.price), currency: tariff.currency, action: "Нажмите для оплаты через Crypto Bot:" });
+        const msg = buildPaymentMessage(config, { name: tariff.name, price: formatMoney(tariff.price, tariff.currency), amount: String(tariff.price), currency: tariff.currency, action: "Нажмите для оплаты:" });
         await editMessageContent(ctx, msg.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа";
@@ -2479,7 +3406,7 @@ composer.on("callback_query:data", async (ctx) => {
           price: formatMoney(tariff.price, tariff.currency),
           amount: String(tariff.price),
           currency: tariff.currency,
-          action: "Нажмите для оплаты через ЮMoney:",
+          action: "Нажмите для оплаты:",
         });
         await editMessageContent(ctx, msg.text, payUrlMarkup(payment.paymentUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
       } catch (e: unknown) {
@@ -2502,15 +3429,30 @@ composer.on("callback_query:data", async (ctx) => {
         return;
       }
       try {
-        const payment = await api.createYookassaPayment(token, { amount: tariff.price, currency: "RUB", singboxTariffId });
-        const msg = buildPaymentMessage(config, {
-          name: tariff.name,
-          price: formatMoney(tariff.price, tariff.currency),
-          amount: String(tariff.price),
-          currency: tariff.currency,
-          action: "Нажмите для оплаты через ЮKassa:",
+        // 54-ФЗ-чек prompt.
+        const meSb = await api.getMe(token);
+        const savedEmailSb = meSb?.email ?? null;
+        const tokRcptSb = storePendingReceipt({
+          userId,
+          savedEmail: savedEmailSb,
+          builder: (receiptEmail) => api.createYookassaPayment(token, { amount: tariff.price, currency: "RUB", singboxTariffId, receiptEmail }),
+          finalize: async (payment, { receiptSentTo }) => {
+            const msg = buildPaymentMessage(config, {
+              name: tariff.name,
+              price: formatMoney(tariff.price, tariff.currency),
+              amount: String(tariff.price),
+              currency: tariff.currency,
+              action: "Нажмите для оплаты:",
+            });
+            const markup = payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds);
+            if (receiptSentTo) {
+              await ctx.reply(`${msg.text}\n\n${RECEIPT_OK_LINE(receiptSentTo)}`, { parse_mode: "HTML", reply_markup: markup });
+            } else {
+              await ctx.reply(msg.text, { entities: msg.entities, reply_markup: markup });
+            }
+          },
         });
-        await editMessageContent(ctx, msg.text, payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
+        await editMessageContent(ctx, receiptPromptText(savedEmailSb), receiptPromptKeyboard(tokRcptSb, savedEmailSb));
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа";
         await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
@@ -2528,7 +3470,7 @@ composer.on("callback_query:data", async (ctx) => {
       }
       try {
         const payment = await api.createCryptopayPayment(token, { amount: tariff.price, currency: tariff.currency, singboxTariffId });
-        const msg = buildPaymentMessage(config, { name: tariff.name, price: formatMoney(tariff.price, tariff.currency), amount: String(tariff.price), currency: tariff.currency, action: "Нажмите для оплаты через Crypto Bot:" });
+        const msg = buildPaymentMessage(config, { name: tariff.name, price: formatMoney(tariff.price, tariff.currency), amount: String(tariff.price), currency: tariff.currency, action: "Нажмите для оплаты:" });
         await editMessageContent(ctx, msg.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа";
@@ -2607,16 +3549,73 @@ composer.on("callback_query:data", async (ctx) => {
 
     if (data.startsWith("pay_tariff_balance:")) {
       const tariffId = data.slice("pay_tariff_balance:".length);
+      // если в addsub-режиме — переключаемся на gift/buy (создаёт
+      // secondary subscription напрямую с балансом, без webhook'а — отдельный path
+      // от обычной activateTariffForClient). Промокод не применяется к доп. подпискам.
+      const asAdditional = addsubPending.get(userId) === tariffId;
+      const extPairTid = extendingSecondaryPending.get(userId);
+      const extendsSecondarySubId = extPairTid && extPairTid.tariffId === tariffId ? extPairTid.secondaryId : undefined;
       try {
-        const discountInfoBal = activeDiscountCode.get(userId);
-        const promoCode = discountInfoBal?.code;
+        const { items } = await api.getPublicTariffs();
+        const tariff = items?.flatMap((c: TariffCategory) => c.tariffs).find((t: TariffItem) => t.id === tariffId);
+        if (!tariff) {
+          await editMessageContent(ctx, "Тариф не найден.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+          return;
+        }
         const sel = selectedTariffOption.get(userId);
+        const opts = sortedPriceOptions(tariff.priceOptions);
+        const eff = sel?.tariffId === tariff.id ? sel.option : (opts.length === 1 ? opts[0]! : null);
+        const unitPrice = eff?.price ?? tariff.price;
+        const effectiveDays = eff?.durationDays ?? tariff.durationDays;
         const tariffPriceOptionId = sel?.tariffId === tariffId ? sel.option.id : undefined;
         const extraDevices = sel?.tariffId === tariffId ? sel.extraDevices : 0;
-        const result = await api.payByBalance(token, { tariffId, tariffPriceOptionId, deviceCount: extraDevices, promoCode });
-        if (promoCode) activeDiscountCode.delete(userId);
+        const { extrasTotal } = applyExtraDevicesPriceBot(tariff.pricePerExtraDevice ?? 0, extraDevices, tariff.deviceDiscountTiers, effectiveDays);
+        const effectivePrice = unitPrice + extrasTotal;
+        // юзер выбрал «продлить без устройств».
+        // Флаг прокидываем в backend — там после успешной активации helper удалит устройства.
+        // НЕ удаляем здесь — юзер может закрыть экран оплаты и устройства останутся при нём.
+        const removeExtrasOnActivate = !!(extendsSecondarySubId && pendingDropExtras.get(userId) === extendsSecondarySubId);
+        let subExtrasForPeriod = 0;
+        if (extendsSecondarySubId && !removeExtrasOnActivate) {
+          try {
+            const allSubs = await api.getAllSubscriptions(token);
+            const target = allSubs.items?.find((it) => it.id === extendsSecondarySubId);
+            const monthly = target?.extraDevicesMonthlyPrice ?? 0;
+            if (monthly > 0 && effectiveDays > 0) {
+              subExtrasForPeriod = Math.round(monthly * (effectiveDays / 30) * 100) / 100;
+            }
+          } catch { /* ignore */ }
+        }
+        const totalPrice = effectivePrice + subExtrasForPeriod;
+        let resultMessage: string;
+        // T7b: продление существующей secondary имеет приоритет над addsub.
+        if (extendsSecondarySubId) {
+          const discountInfoBal = activeDiscountCode.get(userId);
+          const promoCode = discountInfoBal?.code;
+          const result = await api.payByBalance(token, { tariffId, tariffPriceOptionId, deviceCount: extraDevices, promoCode, extendsSecondarySubId, removeExtrasOnActivate });
+          if (promoCode) activeDiscountCode.delete(userId);
+          extendingSecondaryPending.delete(userId);
+          if (removeExtrasOnActivate) pendingDropExtras.delete(userId);
+          resultMessage = result.message;
+        } else if (asAdditional) {
+          // покупка доп. подписки балансом теперь идёт через
+          // /payments/balance с asAdditional=true (НЕ через gift/buy — иначе подписки
+          // ошибочно попадали в «🎁 Мои подарки» вместо «📋 Мои подписки»).
+          const discountInfoBal = activeDiscountCode.get(userId);
+          const promoCode = discountInfoBal?.code;
+          const result = await api.payByBalance(token, { tariffId, tariffPriceOptionId, deviceCount: extraDevices, promoCode, asAdditional: true });
+          if (promoCode) activeDiscountCode.delete(userId);
+          addsubPending.delete(userId);
+          resultMessage = result.message;
+        } else {
+          const discountInfoBal = activeDiscountCode.get(userId);
+          const promoCode = discountInfoBal?.code;
+          const result = await api.payByBalance(token, { tariffId, tariffPriceOptionId, deviceCount: extraDevices, promoCode });
+          if (promoCode) activeDiscountCode.delete(userId);
+          resultMessage = result.message;
+        }
         selectedTariffOption.delete(userId);
-        await editMessageContent(ctx, `✅ ${result.message}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+        await editMessageContent(ctx, `✅ ${resultMessage}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка оплаты";
         await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
@@ -2643,29 +3642,57 @@ composer.on("callback_query:data", async (ctx) => {
         const extraDevices = sel?.tariffId === tariff.id ? sel.extraDevices : 0;
         const { extrasTotal } = applyExtraDevicesPriceBot(tariff.pricePerExtraDevice ?? 0, extraDevices, tariff.deviceDiscountTiers, effectiveDays);
         const effectivePrice = unitPrice + extrasTotal;
+        // addsub mode → backend mark metadata.isAdditionalSubscription
+        // → activateTariffByPaymentId создаст secondary вместо основной подписки.
+        const asAdditional = addsubPending.get(userId) === tariff.id;
+        const extPairT = extendingSecondaryPending.get(userId);
+        const extendsSecondarySubId = extPairT && extPairT.tariffId === tariff.id ? extPairT.secondaryId : undefined;
+        // юзер выбрал «продлить без устройств».
+        // Флаг прокидываем в backend — там после успешной активации helper удалит устройства.
+        // НЕ удаляем здесь — юзер может закрыть экран оплаты и устройства останутся при нём.
+        const removeExtrasOnActivate = !!(extendsSecondarySubId && pendingDropExtras.get(userId) === extendsSecondarySubId);
+        let subExtrasForPeriod = 0;
+        if (extendsSecondarySubId && !removeExtrasOnActivate) {
+          try {
+            const allSubs = await api.getAllSubscriptions(token);
+            const target = allSubs.items?.find((it) => it.id === extendsSecondarySubId);
+            const monthly = target?.extraDevicesMonthlyPrice ?? 0;
+            if (monthly > 0 && effectiveDays > 0) {
+              subExtrasForPeriod = Math.round(monthly * (effectiveDays / 30) * 100) / 100;
+            }
+          } catch { /* ignore */ }
+        }
+        const totalPrice = effectivePrice + subExtrasForPeriod;
+        // унифицированный расчёт personal+promo,
+        // отображаем зачёркнутую базовую цену и финальную с %.
+        const me = await api.getMe(token);
+        const pd = me?.personalDiscountPercent ?? 0;
+        const { discountArg: discountArgYm, finalPrice: priceWithDiscount } = buildTariffDiscountArg(totalPrice, pd, discountInfoYm, tariff.currency);
         const payment = await api.createYoomoneyPayment(token, {
-          amount: effectivePrice,
+          amount: totalPrice,
           paymentType: "AC",
           tariffId: tariff.id,
           tariffPriceOptionId: eff?.id,
           deviceCount: extraDevices,
           promoCode,
+          asAdditional: asAdditional || undefined,
+          extendsSecondarySubId,
+          removeExtrasOnActivate,
         });
         if (promoCode) activeDiscountCode.delete(userId);
         selectedTariffOption.delete(userId);
-        const discountArgYm = discountInfoYm ? {
-          originalPrice: formatMoney(effectivePrice, tariff.currency),
-          discountedPrice: formatMoney(getDiscountedPrice(effectivePrice, discountInfoYm), tariff.currency),
-        } : undefined;
+        if (extendsSecondarySubId && removeExtrasOnActivate) extendingSecondaryPending.delete(userId);
+        if (asAdditional) addsubPending.delete(userId);
+        if (removeExtrasOnActivate) pendingDropExtras.delete(userId);
         const nameWithDays = (opts.length > 1 || (sel?.tariffId === tariff.id))
           ? `${tariff.name} · ${formatRuDays(effectiveDays)}`
           : tariff.name;
         const msg = buildPaymentMessage(config, {
           name: nameWithDays,
-          price: formatMoney(effectivePrice, tariff.currency),
-          amount: String(effectivePrice),
+          price: formatMoney(priceWithDiscount, tariff.currency),
+          amount: String(priceWithDiscount),
           currency: tariff.currency,
-          action: "Нажмите кнопку ниже для оплаты через ЮMoney:",
+          action: "Нажмите кнопку ниже для оплаты:",
         }, discountArgYm);
         await editMessageContent(ctx, msg.text, payUrlMarkup(payment.paymentUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
       } catch (e: unknown) {
@@ -2698,31 +3725,73 @@ composer.on("callback_query:data", async (ctx) => {
         const extraDevices = sel?.tariffId === tariff.id ? sel.extraDevices : 0;
         const { extrasTotal } = applyExtraDevicesPriceBot(tariff.pricePerExtraDevice ?? 0, extraDevices, tariff.deviceDiscountTiers, effectiveDays);
         const effectivePrice = unitPrice + extrasTotal;
-        const payment = await api.createYookassaPayment(token, {
-          amount: effectivePrice,
-          currency: "RUB",
-          tariffId: tariff.id,
-          tariffPriceOptionId: eff?.id,
-          deviceCount: extraDevices,
-          promoCode,
+        // см. yoomoney handler выше.
+        const asAdditional = addsubPending.get(userId) === tariff.id;
+        const extPairT = extendingSecondaryPending.get(userId);
+        const extendsSecondarySubId = extPairT && extPairT.tariffId === tariff.id ? extPairT.secondaryId : undefined;
+        // юзер выбрал «продлить без устройств».
+        // Флаг прокидываем в backend — там после успешной активации helper удалит устройства.
+        // НЕ удаляем здесь — юзер может закрыть экран оплаты и устройства останутся при нём.
+        const removeExtrasOnActivate = !!(extendsSecondarySubId && pendingDropExtras.get(userId) === extendsSecondarySubId);
+        let subExtrasForPeriod = 0;
+        if (extendsSecondarySubId && !removeExtrasOnActivate) {
+          try {
+            const allSubs = await api.getAllSubscriptions(token);
+            const target = allSubs.items?.find((it) => it.id === extendsSecondarySubId);
+            const monthly = target?.extraDevicesMonthlyPrice ?? 0;
+            if (monthly > 0 && effectiveDays > 0) {
+              subExtrasForPeriod = Math.round(monthly * (effectiveDays / 30) * 100) / 100;
+            }
+          } catch { /* ignore */ }
+        }
+        const totalPrice = effectivePrice + subExtrasForPeriod;
+        // см. yoomoney handler.
+        const meYk = await api.getMe(token);
+        const pdYk = meYk?.personalDiscountPercent ?? 0;
+        const { discountArg: discountArgYk, finalPrice: priceWithDiscountYk } = buildTariffDiscountArg(totalPrice, pdYk, discountInfoYk, tariff.currency);
+        // 54-ФЗ: перед созданием платежа спрашиваем, нужен ли чек.
+        const savedEmailYk = (meYk?.email ?? null);
+        const tokRcptT = storePendingReceipt({
+          userId,
+          savedEmail: savedEmailYk,
+          builder: (receiptEmail) => api.createYookassaPayment(token, {
+            amount: totalPrice,
+            currency: "RUB",
+            tariffId: tariff.id,
+            tariffPriceOptionId: eff?.id,
+            deviceCount: extraDevices,
+            promoCode,
+            asAdditional: asAdditional || undefined,
+            extendsSecondarySubId,
+            removeExtrasOnActivate,
+            receiptEmail,
+          }),
+          finalize: async (payment, { receiptSentTo }) => {
+            if (promoCode) activeDiscountCode.delete(userId);
+            selectedTariffOption.delete(userId);
+            if (extendsSecondarySubId && removeExtrasOnActivate) extendingSecondaryPending.delete(userId);
+            if (asAdditional) addsubPending.delete(userId);
+            if (removeExtrasOnActivate) pendingDropExtras.delete(userId);
+            const nameWithDays = (opts.length > 1 || (sel?.tariffId === tariff.id))
+              ? `${tariff.name} · ${formatRuDays(effectiveDays)}`
+              : tariff.name;
+            const msg = buildPaymentMessage(config, {
+              name: nameWithDays,
+              price: formatMoney(priceWithDiscountYk, tariff.currency),
+              amount: String(priceWithDiscountYk),
+              currency: tariff.currency,
+              action: "Нажмите кнопку ниже для оплаты:",
+            }, discountArgYk);
+            const baseText = msg.text;
+            const markup = payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds);
+            if (receiptSentTo) {
+              await ctx.reply(`${baseText}\n\n${RECEIPT_OK_LINE(receiptSentTo)}`, { parse_mode: "HTML", reply_markup: markup });
+            } else {
+              await ctx.reply(baseText, { entities: msg.entities, reply_markup: markup });
+            }
+          },
         });
-        if (promoCode) activeDiscountCode.delete(userId);
-        selectedTariffOption.delete(userId);
-        const discountArgYk = discountInfoYk ? {
-          originalPrice: formatMoney(effectivePrice, tariff.currency),
-          discountedPrice: formatMoney(getDiscountedPrice(effectivePrice, discountInfoYk), tariff.currency),
-        } : undefined;
-        const nameWithDays = (opts.length > 1 || (sel?.tariffId === tariff.id))
-          ? `${tariff.name} · ${formatRuDays(effectiveDays)}`
-          : tariff.name;
-        const msg = buildPaymentMessage(config, {
-          name: nameWithDays,
-          price: formatMoney(effectivePrice, tariff.currency),
-          amount: String(effectivePrice),
-          currency: tariff.currency,
-          action: "Нажмите кнопку ниже для оплаты через ЮKassa:",
-        }, discountArgYk);
-        await editMessageContent(ctx, msg.text, payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
+        await editMessageContent(ctx, receiptPromptText(savedEmailYk), receiptPromptKeyboard(tokRcptT, savedEmailYk));
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа ЮKassa";
         await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
@@ -2749,17 +3818,50 @@ composer.on("callback_query:data", async (ctx) => {
         const extraDevices = sel?.tariffId === tariff.id ? sel.extraDevices : 0;
         const { extrasTotal } = applyExtraDevicesPriceBot(tariff.pricePerExtraDevice ?? 0, extraDevices, tariff.deviceDiscountTiers, effectiveDays);
         const effectivePrice = unitPrice + extrasTotal;
-        const payment = await api.createCryptopayPayment(token, { amount: effectivePrice, currency: tariff.currency, tariffId: tariff.id, tariffPriceOptionId: eff?.id, deviceCount: extraDevices, promoCode });
+        // см. yoomoney handler.
+        const asAdditional = addsubPending.get(userId) === tariff.id;
+        const extPairT = extendingSecondaryPending.get(userId);
+        const extendsSecondarySubId = extPairT && extPairT.tariffId === tariff.id ? extPairT.secondaryId : undefined;
+        // юзер выбрал «продлить без устройств».
+        // Флаг прокидываем в backend — там после успешной активации helper удалит устройства.
+        // НЕ удаляем здесь — юзер может закрыть экран оплаты и устройства останутся при нём.
+        const removeExtrasOnActivate = !!(extendsSecondarySubId && pendingDropExtras.get(userId) === extendsSecondarySubId);
+        let subExtrasForPeriod = 0;
+        if (extendsSecondarySubId && !removeExtrasOnActivate) {
+          try {
+            const allSubs = await api.getAllSubscriptions(token);
+            const target = allSubs.items?.find((it) => it.id === extendsSecondarySubId);
+            const monthly = target?.extraDevicesMonthlyPrice ?? 0;
+            if (monthly > 0 && effectiveDays > 0) {
+              subExtrasForPeriod = Math.round(monthly * (effectiveDays / 30) * 100) / 100;
+            }
+          } catch { /* ignore */ }
+        }
+        const totalPrice = effectivePrice + subExtrasForPeriod;
+        // см. yoomoney handler.
+        const meCp = await api.getMe(token);
+        const pdCp = meCp?.personalDiscountPercent ?? 0;
+        const { discountArg: discountArgCp, finalPrice: priceWithDiscountCp } = buildTariffDiscountArg(totalPrice, pdCp, discountInfoCp, tariff.currency);
+        const payment = await api.createCryptopayPayment(token, {
+          amount: totalPrice,
+          currency: tariff.currency,
+          tariffId: tariff.id,
+          tariffPriceOptionId: eff?.id,
+          deviceCount: extraDevices,
+          promoCode,
+          asAdditional: asAdditional || undefined,
+          extendsSecondarySubId,
+          removeExtrasOnActivate,
+        });
         if (promoCode) activeDiscountCode.delete(userId);
         selectedTariffOption.delete(userId);
-        const discountArgCp = discountInfoCp ? {
-          originalPrice: formatMoney(effectivePrice, tariff.currency),
-          discountedPrice: formatMoney(getDiscountedPrice(effectivePrice, discountInfoCp), tariff.currency),
-        } : undefined;
+        if (extendsSecondarySubId && removeExtrasOnActivate) extendingSecondaryPending.delete(userId);
+        if (asAdditional) addsubPending.delete(userId);
+        if (removeExtrasOnActivate) pendingDropExtras.delete(userId);
         const nameWithDays = (opts.length > 1 || (sel?.tariffId === tariff.id))
           ? `${tariff.name} · ${formatRuDays(effectiveDays)}`
           : tariff.name;
-        const msg = buildPaymentMessage(config, { name: nameWithDays, price: formatMoney(effectivePrice, tariff.currency), amount: String(effectivePrice), currency: tariff.currency, action: "Нажмите кнопку ниже для оплаты через Crypto Bot:" }, discountArgCp);
+        const msg = buildPaymentMessage(config, { name: nameWithDays, price: formatMoney(priceWithDiscountCp, tariff.currency), amount: String(priceWithDiscountCp), currency: tariff.currency, action: "Нажмите кнопку ниже для оплаты:" }, discountArgCp);
         await editMessageContent(ctx, msg.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа";
@@ -2788,17 +3890,50 @@ composer.on("callback_query:data", async (ctx) => {
         const extraDevices = sel?.tariffId === tariff.id ? sel.extraDevices : 0;
         const { extrasTotal } = applyExtraDevicesPriceBot(tariff.pricePerExtraDevice ?? 0, extraDevices, tariff.deviceDiscountTiers, effectiveDays);
         const effectivePrice = unitPrice + extrasTotal;
-        const payment = await api.createLavaPayment(token, { amount: effectivePrice, currency: tariff.currency, tariffId: tariff.id, tariffPriceOptionId: eff?.id, deviceCount: extraDevices, promoCode });
+        // см. yoomoney handler.
+        const asAdditional = addsubPending.get(userId) === tariff.id;
+        const extPairT = extendingSecondaryPending.get(userId);
+        const extendsSecondarySubId = extPairT && extPairT.tariffId === tariff.id ? extPairT.secondaryId : undefined;
+        // юзер выбрал «продлить без устройств».
+        // Флаг прокидываем в backend — там после успешной активации helper удалит устройства.
+        // НЕ удаляем здесь — юзер может закрыть экран оплаты и устройства останутся при нём.
+        const removeExtrasOnActivate = !!(extendsSecondarySubId && pendingDropExtras.get(userId) === extendsSecondarySubId);
+        let subExtrasForPeriod = 0;
+        if (extendsSecondarySubId && !removeExtrasOnActivate) {
+          try {
+            const allSubs = await api.getAllSubscriptions(token);
+            const target = allSubs.items?.find((it) => it.id === extendsSecondarySubId);
+            const monthly = target?.extraDevicesMonthlyPrice ?? 0;
+            if (monthly > 0 && effectiveDays > 0) {
+              subExtrasForPeriod = Math.round(monthly * (effectiveDays / 30) * 100) / 100;
+            }
+          } catch { /* ignore */ }
+        }
+        const totalPrice = effectivePrice + subExtrasForPeriod;
+        // см. yoomoney handler.
+        const meLava = await api.getMe(token);
+        const pdLava = meLava?.personalDiscountPercent ?? 0;
+        const { discountArg, finalPrice: priceWithDiscountLava } = buildTariffDiscountArg(totalPrice, pdLava, discountInfo, tariff.currency);
+        const payment = await api.createLavaPayment(token, {
+          amount: totalPrice,
+          currency: tariff.currency,
+          tariffId: tariff.id,
+          tariffPriceOptionId: eff?.id,
+          deviceCount: extraDevices,
+          promoCode,
+          asAdditional: asAdditional || undefined,
+          extendsSecondarySubId,
+          removeExtrasOnActivate,
+        });
         if (promoCode) activeDiscountCode.delete(userId);
         selectedTariffOption.delete(userId);
-        const discountArg = discountInfo ? {
-          originalPrice: formatMoney(effectivePrice, tariff.currency),
-          discountedPrice: formatMoney(getDiscountedPrice(effectivePrice, discountInfo), tariff.currency),
-        } : undefined;
+        if (extendsSecondarySubId && removeExtrasOnActivate) extendingSecondaryPending.delete(userId);
+        if (asAdditional) addsubPending.delete(userId);
+        if (removeExtrasOnActivate) pendingDropExtras.delete(userId);
         const nameWithDays = (opts.length > 1 || (sel?.tariffId === tariff.id))
           ? `${tariff.name} · ${formatRuDays(effectiveDays)}`
           : tariff.name;
-        const msg = buildPaymentMessage(config, { name: nameWithDays, price: formatMoney(effectivePrice, tariff.currency), amount: String(effectivePrice), currency: tariff.currency, action: "Нажмите кнопку ниже для оплаты через Lava:" }, discountArg);
+        const msg = buildPaymentMessage(config, { name: nameWithDays, price: formatMoney(priceWithDiscountLava, tariff.currency), amount: String(priceWithDiscountLava), currency: tariff.currency, action: "Нажмите кнопку ниже для оплаты:" }, discountArg);
         await editMessageContent(ctx, msg.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
       } catch (e: unknown) {
         const m = e instanceof Error ? e.message : "Ошибка создания платежа Lava";
@@ -2826,17 +3961,50 @@ composer.on("callback_query:data", async (ctx) => {
         const extraDevices = sel?.tariffId === tariff.id ? sel.extraDevices : 0;
         const { extrasTotal } = applyExtraDevicesPriceBot(tariff.pricePerExtraDevice ?? 0, extraDevices, tariff.deviceDiscountTiers, effectiveDays);
         const effectivePrice = unitPrice + extrasTotal;
-        const payment = await api.createLavatopPayment(token, { amount: effectivePrice, currency: tariff.currency, tariffId: tariff.id, tariffPriceOptionId: eff?.id, deviceCount: extraDevices, promoCode });
+        // см. yoomoney handler.
+        const asAdditional = addsubPending.get(userId) === tariff.id;
+        const extPairT = extendingSecondaryPending.get(userId);
+        const extendsSecondarySubId = extPairT && extPairT.tariffId === tariff.id ? extPairT.secondaryId : undefined;
+        // юзер выбрал «продлить без устройств».
+        // Флаг прокидываем в backend — там после успешной активации helper удалит устройства.
+        // НЕ удаляем здесь — юзер может закрыть экран оплаты и устройства останутся при нём.
+        const removeExtrasOnActivate = !!(extendsSecondarySubId && pendingDropExtras.get(userId) === extendsSecondarySubId);
+        let subExtrasForPeriod = 0;
+        if (extendsSecondarySubId && !removeExtrasOnActivate) {
+          try {
+            const allSubs = await api.getAllSubscriptions(token);
+            const target = allSubs.items?.find((it) => it.id === extendsSecondarySubId);
+            const monthly = target?.extraDevicesMonthlyPrice ?? 0;
+            if (monthly > 0 && effectiveDays > 0) {
+              subExtrasForPeriod = Math.round(monthly * (effectiveDays / 30) * 100) / 100;
+            }
+          } catch { /* ignore */ }
+        }
+        const totalPrice = effectivePrice + subExtrasForPeriod;
+        // см. yoomoney handler.
+        const meLavatop = await api.getMe(token);
+        const pdLavatop = meLavatop?.personalDiscountPercent ?? 0;
+        const { discountArg, finalPrice: priceWithDiscountLavatop } = buildTariffDiscountArg(totalPrice, pdLavatop, discountInfo, tariff.currency);
+        const payment = await api.createLavatopPayment(token, {
+          amount: totalPrice,
+          currency: tariff.currency,
+          tariffId: tariff.id,
+          tariffPriceOptionId: eff?.id,
+          deviceCount: extraDevices,
+          promoCode,
+          asAdditional: asAdditional || undefined,
+          extendsSecondarySubId,
+          removeExtrasOnActivate,
+        });
         if (promoCode) activeDiscountCode.delete(userId);
         selectedTariffOption.delete(userId);
-        const discountArg = discountInfo ? {
-          originalPrice: formatMoney(effectivePrice, tariff.currency),
-          discountedPrice: formatMoney(getDiscountedPrice(effectivePrice, discountInfo), tariff.currency),
-        } : undefined;
+        if (extendsSecondarySubId && removeExtrasOnActivate) extendingSecondaryPending.delete(userId);
+        if (asAdditional) addsubPending.delete(userId);
+        if (removeExtrasOnActivate) pendingDropExtras.delete(userId);
         const nameWithDays = (opts.length > 1 || (sel?.tariffId === tariff.id))
           ? `${tariff.name} · ${formatRuDays(effectiveDays)}`
           : tariff.name;
-        const msg = buildPaymentMessage(config, { name: nameWithDays, price: formatMoney(effectivePrice, tariff.currency), amount: String(effectivePrice), currency: tariff.currency, action: "Нажмите кнопку ниже для оплаты через Lava.top:" }, discountArg);
+        const msg = buildPaymentMessage(config, { name: nameWithDays, price: formatMoney(priceWithDiscountLavatop, tariff.currency), amount: String(priceWithDiscountLavatop), currency: tariff.currency, action: "Нажмите кнопку ниже для оплаты:" }, discountArg);
         await editMessageContent(ctx, msg.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
       } catch (e: unknown) {
         const m = e instanceof Error ? e.message : "Ошибка создания платежа Lava.top";
@@ -2865,17 +4033,50 @@ composer.on("callback_query:data", async (ctx) => {
         const extraDevices = sel?.tariffId === tariff.id ? sel.extraDevices : 0;
         const { extrasTotal } = applyExtraDevicesPriceBot(tariff.pricePerExtraDevice ?? 0, extraDevices, tariff.deviceDiscountTiers, effectiveDays);
         const effectivePrice = unitPrice + extrasTotal;
-        const payment = await api.createHeleketPayment(token, { amount: effectivePrice, currency: tariff.currency, tariffId: tariff.id, tariffPriceOptionId: eff?.id, deviceCount: extraDevices, promoCode });
+        // см. yoomoney handler.
+        const asAdditional = addsubPending.get(userId) === tariff.id;
+        const extPairT = extendingSecondaryPending.get(userId);
+        const extendsSecondarySubId = extPairT && extPairT.tariffId === tariff.id ? extPairT.secondaryId : undefined;
+        // юзер выбрал «продлить без устройств».
+        // Флаг прокидываем в backend — там после успешной активации helper удалит устройства.
+        // НЕ удаляем здесь — юзер может закрыть экран оплаты и устройства останутся при нём.
+        const removeExtrasOnActivate = !!(extendsSecondarySubId && pendingDropExtras.get(userId) === extendsSecondarySubId);
+        let subExtrasForPeriod = 0;
+        if (extendsSecondarySubId && !removeExtrasOnActivate) {
+          try {
+            const allSubs = await api.getAllSubscriptions(token);
+            const target = allSubs.items?.find((it) => it.id === extendsSecondarySubId);
+            const monthly = target?.extraDevicesMonthlyPrice ?? 0;
+            if (monthly > 0 && effectiveDays > 0) {
+              subExtrasForPeriod = Math.round(monthly * (effectiveDays / 30) * 100) / 100;
+            }
+          } catch { /* ignore */ }
+        }
+        const totalPrice = effectivePrice + subExtrasForPeriod;
+        // см. yoomoney handler.
+        const meHeleket = await api.getMe(token);
+        const pdHeleket = meHeleket?.personalDiscountPercent ?? 0;
+        const { discountArg, finalPrice: priceWithDiscountHeleket } = buildTariffDiscountArg(totalPrice, pdHeleket, discountInfo, tariff.currency);
+        const payment = await api.createHeleketPayment(token, {
+          amount: totalPrice,
+          currency: tariff.currency,
+          tariffId: tariff.id,
+          tariffPriceOptionId: eff?.id,
+          deviceCount: extraDevices,
+          promoCode,
+          asAdditional: asAdditional || undefined,
+          extendsSecondarySubId,
+          removeExtrasOnActivate,
+        });
         if (promoCode) activeDiscountCode.delete(userId);
         selectedTariffOption.delete(userId);
-        const discountArg = discountInfo ? {
-          originalPrice: formatMoney(effectivePrice, tariff.currency),
-          discountedPrice: formatMoney(getDiscountedPrice(effectivePrice, discountInfo), tariff.currency),
-        } : undefined;
+        if (extendsSecondarySubId && removeExtrasOnActivate) extendingSecondaryPending.delete(userId);
+        if (asAdditional) addsubPending.delete(userId);
+        if (removeExtrasOnActivate) pendingDropExtras.delete(userId);
         const nameWithDays = (opts.length > 1 || (sel?.tariffId === tariff.id))
           ? `${tariff.name} · ${formatRuDays(effectiveDays)}`
           : tariff.name;
-        const msg = buildPaymentMessage(config, { name: nameWithDays, price: formatMoney(effectivePrice, tariff.currency), amount: String(effectivePrice), currency: tariff.currency, action: "Нажмите кнопку ниже для оплаты через Heleket:" }, discountArg);
+        const msg = buildPaymentMessage(config, { name: nameWithDays, price: formatMoney(priceWithDiscountHeleket, tariff.currency), amount: String(priceWithDiscountHeleket), currency: tariff.currency, action: "Нажмите кнопку ниже для оплаты:" }, discountArg);
         await editMessageContent(ctx, msg.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
       } catch (e: unknown) {
         const m = e instanceof Error ? e.message : "Ошибка создания платежа Heleket";
@@ -2890,8 +4091,198 @@ composer.on("callback_query:data", async (ctx) => {
         await editMessageContent(ctx, "Доп. опции пока не доступны. Оформите подписку в разделе «Тарифы».", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
         return;
       }
-      const { text, entities } = titleWithEmoji("PACKAGE", "Доп. опции\n\nТрафик, устройства или серверы — докупка к подписке. Выберите опцию:", config?.botEmojis);
-      await editMessageContent(ctx, text, extraOptionsButtons(options, config?.botBackLabel ?? null, innerStyles, innerEmojiIds), entities);
+      // новый текст по эталону клиента.
+      // Заголовок «📦 Дополнительные опции» рисует titleWithEmoji — НЕ дублируем эмодзи в тексте.
+      const optsText = [
+        "Дополнительные опции",
+        "",
+        "Каждая подписка поддерживает до 4 устройств одновременно.",
+        "",
+        "✨ Если вы хотите подключить больше устройств, купите ещё одну подписку, либо:",
+        "➕ Вы можете докупить устройство для любой из имеющихся подписок.",
+        "",
+        "🗓️ Цена указана за 30 календарных дней",
+        "",
+        "Чтобы докупить устройство, нажмите кнопку:",
+      ].join("\n");
+      const { text, entities } = titleWithEmoji("PACKAGE", optsText, config?.botEmojis);
+      await editMessageContent(ctx, text, extraOptionsButtons(options, config?.botBackLabel ?? null, innerStyles, innerEmojiIds, config?.botEmojis ?? null), entities);
+      return;
+    }
+
+    // «📦 Выбор подписки для опции» — промежуточный шаг
+    // перед стандартным экраном выбора метода оплаты `pay_option:`.
+    // Если 1 подписка — Map ставится автоматом, редирект на pay_option:.
+    // Если 2+ — выбор кнопками → ставит Map → редирект на pay_option:.
+    // Callback: extra_opt_pick:<kind>:<productId>
+    if (data.startsWith("extra_opt_pick:")) {
+      const parts = data.split(":");
+      const kind = (parts[1] ?? "") as "traffic" | "devices" | "servers";
+      const productId = parts.length > 2 ? parts.slice(2).join(":") : "";
+      try {
+        const subs = await api.getAllSubscriptions(token);
+        const subItems = subs.items ?? [];
+        if (subItems.length === 0) {
+          await editMessageContent(ctx, "❌ Сначала оформите подписку — потом сможете покупать опции.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+          return;
+        }
+        extraOptionPending.set(userId, { kind, productId });
+
+        // рассчитываем актуальную цену
+        // для каждой подписки с объяснением (коэф по остатку дней + личная скидка).
+        const product = (config?.sellOptions ?? []).find((o) => o.kind === kind && o.id === productId);
+        const basePrice = product?.price ?? 0;
+        const me = await api.getMe(token).catch(() => null);
+        const personalDiscount = me?.personalDiscountPercent ?? 0;
+        const computeForSub = (s: { subscription?: unknown }) => {
+          const inner = s.subscription as Record<string, unknown> | null;
+          const innerData = inner
+            ? ((inner.response ?? inner.data ?? inner) as Record<string, unknown>)
+            : null;
+          const expireAtRaw = innerData?.expireAt ?? innerData?.expire_at;
+          let daysLeft = 30;
+          if (typeof expireAtRaw === "string" || typeof expireAtRaw === "number") {
+            const exp = typeof expireAtRaw === "number" ? new Date(expireAtRaw * 1000) : new Date(expireAtRaw);
+            if (!isNaN(exp.getTime())) {
+              daysLeft = Math.max(0, (exp.getTime() - Date.now()) / 86_400_000);
+            }
+          }
+          const coef = Math.max(1, daysLeft / 30);
+          // округление ВНИЗ до целых рублей — 230.87 → 230.
+          // Эта же цена идёт в бэк (Math.floor там же) — юзер платит ровно сколько видит.
+          const rawPrice = Math.floor(basePrice * coef);
+          const finalPrice = personalDiscount > 0
+            ? Math.max(0, Math.floor(rawPrice * (1 - personalDiscount / 100)))
+            : rawPrice;
+          return { daysLeft: Math.round(daysLeft), coef: Math.round(coef * 10) / 10, rawPrice, finalPrice };
+        };
+
+        const productName = product?.name ?? (kind === "devices" ? "Доп. устройство" : kind === "traffic" ? "Доп. трафик" : "Сервер");
+
+        if (subItems.length === 1) {
+          const only = subItems[0]!;
+          extraOptionTargetSub.set(userId, only.id);
+          const calc = computeForSub(only);
+          const lines = [
+            `📦 Опция: ${productName}`,
+            "",
+            `📲 Подписка: #${only.subscriptionIndex ?? 0}${only.tariffDisplayName ? ` (${only.tariffDisplayName})` : ""}`,
+            "",
+            `🗓️ Базовая цена: ${basePrice} ₽ за 30 дней`,
+            `⏰ Осталось дней: ${calc.daysLeft}`,
+            `📐 Коэффициент: ×${calc.coef} (дней / 30)`,
+            `💰 Цена за период: ${calc.rawPrice} ₽`,
+          ];
+          if (personalDiscount > 0) {
+            const discountAmount = Math.round((calc.rawPrice - calc.finalPrice) * 100) / 100;
+            lines.push(`💎 Ваша персональная скидка: −${personalDiscount}% (−${discountAmount} ₽)`);
+          }
+          lines.push("", `━━━━━━━━━━━━━━`, `💵 Итого к оплате: ${calc.finalPrice} ₽`);
+          await editMessageContent(ctx, lines.join("\n"), {
+            inline_keyboard: [
+              [{ text: `▶ Продолжить к оплате (${calc.finalPrice} ₽)`, callback_data: `pay_option:${kind}:${productId}` }],
+              [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+            ],
+          });
+          return;
+        }
+
+        // 2+ подписок → выбор с актуальной ценой для каждой.
+        const titleLines = [
+          `📦 К какой подписке применить опцию: ${productName}?`,
+          "",
+          `🗓️ Базовая цена: ${basePrice} ₽ за 30 дней.`,
+          `📐 Стоимость зависит от оставшегося количества дней подписки.`,
+          `Цена увеличивается пропорционально оставшимся дням подписки (×N от 30 дн).`,
+          `💡 Опция «${productName}» действует до окончания выбранной подписки.`,
+        ];
+        if (personalDiscount > 0) {
+          titleLines.push(`💎 К итогу применится ваша персональная скидка −${personalDiscount}%.`);
+        }
+        const rows: { text: string; callback_data: string }[][] = subItems.map((s) => {
+          const calc = computeForSub(s);
+          const tariffLabel = s.tariffDisplayName ? ` ${s.tariffDisplayName}` : "";
+          // убрали слово «Подписка» с кнопок — оставили #N.
+          const label = `#${s.subscriptionIndex ?? 0}${tariffLabel} — ${calc.finalPrice} ₽`;
+          return [{ text: label.slice(0, 60), callback_data: `extra_opt_setsub:${s.id}`.slice(0, 64) }];
+        });
+        rows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
+        await editMessageContent(ctx, titleLines.join("\n"), { inline_keyboard: rows });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
+    // T7c: после выбора подписки → ставим Map и форвардим на стандартный `pay_option:`.
+    // Берём kind+productId из extraOptionPending (поставлено в extra_opt_pick:).
+    if (data.startsWith("extra_opt_setsub:")) {
+      // subMarker = subscription.id для всех подписок.
+      const subMarker = data.slice("extra_opt_setsub:".length);
+      const pending = extraOptionPending.get(userId);
+      if (!pending) {
+        await editMessageContent(ctx, "⏳ Сессия выбора опции истекла. Откройте меню опций заново.", {
+          inline_keyboard: [[{ text: "📦 К опциям", callback_data: "menu:extra_options" }]],
+        });
+        return;
+      }
+      const { kind, productId } = pending;
+      if (subMarker) extraOptionTargetSub.set(userId, subMarker);
+
+      // подтверждение выбора с детальным
+      // расчётом цены (коэф по остатку дней + личная скидка).
+      try {
+        const subs = await api.getAllSubscriptions(token);
+        const target = subs.items?.find((it) => it.id === subMarker);
+        const product = (config?.sellOptions ?? []).find((o) => o.kind === kind && o.id === productId);
+        const basePrice = product?.price ?? 0;
+        const me = await api.getMe(token).catch(() => null);
+        const pd = me?.personalDiscountPercent ?? 0;
+        const inner = target?.subscription as Record<string, unknown> | null;
+        const innerData = inner ? ((inner.response ?? inner.data ?? inner) as Record<string, unknown>) : null;
+        const expireAtRaw = innerData?.expireAt ?? innerData?.expire_at;
+        let daysLeft = 30;
+        if (typeof expireAtRaw === "string" || typeof expireAtRaw === "number") {
+          const exp = typeof expireAtRaw === "number" ? new Date(expireAtRaw * 1000) : new Date(expireAtRaw);
+          if (!isNaN(exp.getTime())) daysLeft = Math.max(0, (exp.getTime() - Date.now()) / 86_400_000);
+        }
+        const coef = Math.max(1, daysLeft / 30);
+        // округление вниз до целых рублей.
+        const rawPrice = Math.floor(basePrice * coef);
+        const finalPrice = pd > 0 ? Math.max(0, Math.floor(rawPrice * (1 - pd / 100))) : rawPrice;
+        const productName = product?.name ?? (kind === "devices" ? "Доп. устройство" : kind === "traffic" ? "Доп. трафик" : "Сервер");
+        const lines = [
+          `📦 Опция: ${productName}`,
+          "",
+          `📲 Подписка: #${target?.subscriptionIndex ?? 0}${target?.tariffDisplayName ? ` (${target.tariffDisplayName})` : ""}`,
+          "",
+          `🗓️ Базовая цена: ${basePrice} ₽ за 30 дней`,
+          `⏰ Осталось дней: ${Math.round(daysLeft)}`,
+          `📐 Коэффициент: ×${Math.round(coef * 10) / 10}`,
+          `💰 Цена за период: ${rawPrice} ₽`,
+        ];
+        if (pd > 0) {
+          const discountAmount = Math.round((rawPrice - finalPrice) * 100) / 100;
+          lines.push(`💎 Персональная скидка: −${pd}% (−${discountAmount} ₽)`);
+        }
+        lines.push("", `━━━━━━━━━━━━━━`, `💵 Итого к оплате: ${finalPrice} ₽`);
+        await editMessageContent(ctx, lines.join("\n"), {
+          inline_keyboard: [
+            [{ text: `▶ Продолжить к оплате (${finalPrice} ₽)`, callback_data: `pay_option:${kind}:${productId}` }],
+            [{ text: "← Назад", callback_data: `extra_opt_pick:${kind}:${productId}` }],
+            [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+          ],
+        });
+      } catch {
+        // Fallback на простое подтверждение если расчёт не удался.
+        await editMessageContent(ctx, `📦 Подписка выбрана.`, {
+          inline_keyboard: [
+            [{ text: "▶ Продолжить к оплате", callback_data: `pay_option:${kind}:${productId}` }],
+            [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+          ],
+        });
+      }
       return;
     }
 
@@ -2905,8 +4296,38 @@ composer.on("callback_query:data", async (ctx) => {
         await editMessageContent(ctx, "Опция не найдена.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
         return;
       }
+      // T7c: consume target подписки (если был выбран). primary = передаём undefined backend'у.
+      const target = extraOptionTargetSub.get(userId);
+      const targetSubscriptionId = target && target !== "primary" ? target : undefined;
+
+      // рассчитываем pro-rata цену для display.
+      let displayPrice = option.price;
+      if (option.kind === "devices" && targetSubscriptionId) {
+        try {
+          const subs = await api.getAllSubscriptions(token);
+          const target_sub = subs.items?.find((it) => it.id === targetSubscriptionId);
+          const inner = target_sub?.subscription as Record<string, unknown> | null;
+          const innerData = inner ? ((inner.response ?? inner.data ?? inner) as Record<string, unknown>) : null;
+          const expireAtRaw = innerData?.expireAt ?? innerData?.expire_at;
+          let daysLeft = 30;
+          if (typeof expireAtRaw === "string" || typeof expireAtRaw === "number") {
+            const exp = typeof expireAtRaw === "number" ? new Date(expireAtRaw * 1000) : new Date(expireAtRaw);
+            if (!isNaN(exp.getTime())) daysLeft = Math.max(0, (exp.getTime() - Date.now()) / 86_400_000);
+          }
+          const coef = Math.max(1, daysLeft / 30);
+          displayPrice = Math.floor(option.price * coef);
+        } catch { /* ignore */ }
+      }
+      const me = await api.getMe(token).catch(() => null);
+      const pd = me?.personalDiscountPercent ?? 0;
+      if (pd > 0) {
+        displayPrice = Math.max(0, Math.floor(displayPrice * (1 - pd / 100)));
+      }
+
       try {
-        const result = await api.payOptionByBalance(token, { kind: option.kind, productId: option.id });
+        const result = await api.payOptionByBalance(token, { kind: option.kind, productId: option.id, targetSubscriptionId });
+        extraOptionTargetSub.delete(userId);
+        extraOptionPending.delete(userId);
         await editMessageContent(ctx, `✅ ${result.message}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка оплаты";
@@ -2925,19 +4346,62 @@ composer.on("callback_query:data", async (ctx) => {
         await editMessageContent(ctx, "Опция не найдена.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
         return;
       }
+      const target = extraOptionTargetSub.get(userId);
+      const targetSubscriptionId = target && target !== "primary" ? target : undefined;
+
+      // рассчитываем pro-rata цену для display.
+      let displayPrice = option.price;
+      if (option.kind === "devices" && targetSubscriptionId) {
+        try {
+          const subs = await api.getAllSubscriptions(token);
+          const target_sub = subs.items?.find((it) => it.id === targetSubscriptionId);
+          const inner = target_sub?.subscription as Record<string, unknown> | null;
+          const innerData = inner ? ((inner.response ?? inner.data ?? inner) as Record<string, unknown>) : null;
+          const expireAtRaw = innerData?.expireAt ?? innerData?.expire_at;
+          let daysLeft = 30;
+          if (typeof expireAtRaw === "string" || typeof expireAtRaw === "number") {
+            const exp = typeof expireAtRaw === "number" ? new Date(expireAtRaw * 1000) : new Date(expireAtRaw);
+            if (!isNaN(exp.getTime())) daysLeft = Math.max(0, (exp.getTime() - Date.now()) / 86_400_000);
+          }
+          const coef = Math.max(1, daysLeft / 30);
+          displayPrice = Math.floor(option.price * coef);
+        } catch { /* ignore */ }
+      }
+      const me = await api.getMe(token).catch(() => null);
+      const pd = me?.personalDiscountPercent ?? 0;
+      if (pd > 0) {
+        displayPrice = Math.max(0, Math.floor(displayPrice * (1 - pd / 100)));
+      }
+
       try {
-        const payment = await api.createYookassaPayment(token, {
-          extraOption: { kind: option.kind, productId: option.id },
-        });
+        // 54-ФЗ-чек prompt.
+        const savedEmailOp = me?.email ?? null;
         const optName = option.name || (option.kind === "traffic" ? `+${option.trafficGb} ГБ` : option.kind === "devices" ? `+${option.deviceCount} устр.` : "Сервер");
-        const msg = buildPaymentMessage(config, {
-          name: optName,
-          price: formatMoney(option.price, option.currency),
-          amount: String(option.price),
-          currency: option.currency,
-          action: "Нажмите кнопку ниже для оплаты через ЮKassa:",
+        const tokRcptOp = storePendingReceipt({
+          userId,
+          savedEmail: savedEmailOp,
+          builder: (receiptEmail) => api.createYookassaPayment(token, {
+            extraOption: { kind: option.kind, productId: option.id, targetSubscriptionId },
+            receiptEmail,
+          }),
+          finalize: async (payment, { receiptSentTo }) => {
+            const msg = buildPaymentMessage(config, {
+              name: optName,
+              price: formatMoney(displayPrice, option.currency),
+              amount: String(displayPrice),
+              currency: option.currency,
+              action: "Нажмите кнопку ниже для оплаты:",
+            });
+            const markup = payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds);
+            if (receiptSentTo) {
+              await ctx.reply(`${msg.text}\n\n${RECEIPT_OK_LINE(receiptSentTo)}`, { parse_mode: "HTML", reply_markup: markup });
+            } else {
+              await ctx.reply(msg.text, { entities: msg.entities, reply_markup: markup });
+            }
+            extraOptionTargetSub.delete(userId);
+          },
         });
-        await editMessageContent(ctx, msg.text, payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
+        await editMessageContent(ctx, receiptPromptText(savedEmailOp), receiptPromptKeyboard(tokRcptOp, savedEmailOp));
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа";
         const isAuthError = /401|unauthorized|истек|авториз|токен/i.test(msg);
@@ -2966,11 +4430,39 @@ composer.on("callback_query:data", async (ctx) => {
         await editMessageContent(ctx, "Опция не найдена.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
         return;
       }
+      const target = extraOptionTargetSub.get(userId);
+      const targetSubscriptionId = target && target !== "primary" ? target : undefined;
+
+      // рассчитываем pro-rata цену для display.
+      let displayPrice = option.price;
+      if (option.kind === "devices" && targetSubscriptionId) {
+        try {
+          const subs = await api.getAllSubscriptions(token);
+          const target_sub = subs.items?.find((it) => it.id === targetSubscriptionId);
+          const inner = target_sub?.subscription as Record<string, unknown> | null;
+          const innerData = inner ? ((inner.response ?? inner.data ?? inner) as Record<string, unknown>) : null;
+          const expireAtRaw = innerData?.expireAt ?? innerData?.expire_at;
+          let daysLeft = 30;
+          if (typeof expireAtRaw === "string" || typeof expireAtRaw === "number") {
+            const exp = typeof expireAtRaw === "number" ? new Date(expireAtRaw * 1000) : new Date(expireAtRaw);
+            if (!isNaN(exp.getTime())) daysLeft = Math.max(0, (exp.getTime() - Date.now()) / 86_400_000);
+          }
+          const coef = Math.max(1, daysLeft / 30);
+          displayPrice = Math.floor(option.price * coef);
+        } catch { /* ignore */ }
+      }
+      const me = await api.getMe(token).catch(() => null);
+      const pd = me?.personalDiscountPercent ?? 0;
+      if (pd > 0) {
+        displayPrice = Math.max(0, Math.floor(displayPrice * (1 - pd / 100)));
+      }
+
       try {
-        const payment = await api.createCryptopayPayment(token, { extraOption: { kind: option.kind, productId: option.id } });
+        const payment = await api.createCryptopayPayment(token, { extraOption: { kind: option.kind, productId: option.id, targetSubscriptionId } });
         const optName = option.name || (option.kind === "traffic" ? `+${option.trafficGb} ГБ` : option.kind === "devices" ? `+${option.deviceCount} устр.` : "Сервер");
-        const msg = buildPaymentMessage(config, { name: optName, price: formatMoney(option.price, option.currency), amount: String(option.price), currency: option.currency, action: "Нажмите кнопку ниже для оплаты через Crypto Bot:" });
+        const msg = buildPaymentMessage(config, { name: optName, price: formatMoney(displayPrice, option.currency), amount: String(displayPrice), currency: option.currency, action: "Нажмите кнопку ниже для оплаты:" });
         await editMessageContent(ctx, msg.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
+        extraOptionTargetSub.delete(userId);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа";
         const isAuthError = /401|unauthorized|истек|авториз|токен/i.test(msg);
@@ -2999,21 +4491,49 @@ composer.on("callback_query:data", async (ctx) => {
         await editMessageContent(ctx, "Опция не найдена.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
         return;
       }
+      const target = extraOptionTargetSub.get(userId);
+      const targetSubscriptionId = target && target !== "primary" ? target : undefined;
+
+      // рассчитываем pro-rata цену для display.
+      let displayPrice = option.price;
+      if (option.kind === "devices" && targetSubscriptionId) {
+        try {
+          const subs = await api.getAllSubscriptions(token);
+          const target_sub = subs.items?.find((it) => it.id === targetSubscriptionId);
+          const inner = target_sub?.subscription as Record<string, unknown> | null;
+          const innerData = inner ? ((inner.response ?? inner.data ?? inner) as Record<string, unknown>) : null;
+          const expireAtRaw = innerData?.expireAt ?? innerData?.expire_at;
+          let daysLeft = 30;
+          if (typeof expireAtRaw === "string" || typeof expireAtRaw === "number") {
+            const exp = typeof expireAtRaw === "number" ? new Date(expireAtRaw * 1000) : new Date(expireAtRaw);
+            if (!isNaN(exp.getTime())) daysLeft = Math.max(0, (exp.getTime() - Date.now()) / 86_400_000);
+          }
+          const coef = Math.max(1, daysLeft / 30);
+          displayPrice = Math.floor(option.price * coef);
+        } catch { /* ignore */ }
+      }
+      const me = await api.getMe(token).catch(() => null);
+      const pd = me?.personalDiscountPercent ?? 0;
+      if (pd > 0) {
+        displayPrice = Math.max(0, Math.floor(displayPrice * (1 - pd / 100)));
+      }
+
       try {
         const payment = await api.createYoomoneyPayment(token, {
-          amount: option.price,
+          amount: displayPrice,
           paymentType: "AC",
-          extraOption: { kind: option.kind, productId: option.id },
+          extraOption: { kind: option.kind, productId: option.id, targetSubscriptionId },
         });
         const optName = option.name || (option.kind === "traffic" ? `+${option.trafficGb} ГБ` : option.kind === "devices" ? `+${option.deviceCount} устр.` : "Сервер");
         const msg = buildPaymentMessage(config, {
           name: optName,
-          price: formatMoney(option.price, option.currency),
-          amount: String(option.price),
+          price: formatMoney(displayPrice, option.currency),
+          amount: String(displayPrice),
           currency: option.currency,
-          action: "Нажмите кнопку ниже для оплаты через ЮMoney:",
+          action: "Нажмите кнопку ниже для оплаты:",
         });
         await editMessageContent(ctx, msg.text, payUrlMarkup(payment.paymentUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
+        extraOptionTargetSub.delete(userId);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа ЮMoney";
         await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
@@ -3036,23 +4556,51 @@ composer.on("callback_query:data", async (ctx) => {
         await editMessageContent(ctx, "Неверный способ оплаты.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
         return;
       }
+      const target = extraOptionTargetSub.get(userId);
+      const targetSubscriptionId = target && target !== "primary" ? target : undefined;
+
+      // рассчитываем pro-rata цену для display.
+      let displayPrice = option.price;
+      if (option.kind === "devices" && targetSubscriptionId) {
+        try {
+          const subs = await api.getAllSubscriptions(token);
+          const target_sub = subs.items?.find((it) => it.id === targetSubscriptionId);
+          const inner = target_sub?.subscription as Record<string, unknown> | null;
+          const innerData = inner ? ((inner.response ?? inner.data ?? inner) as Record<string, unknown>) : null;
+          const expireAtRaw = innerData?.expireAt ?? innerData?.expire_at;
+          let daysLeft = 30;
+          if (typeof expireAtRaw === "string" || typeof expireAtRaw === "number") {
+            const exp = typeof expireAtRaw === "number" ? new Date(expireAtRaw * 1000) : new Date(expireAtRaw);
+            if (!isNaN(exp.getTime())) daysLeft = Math.max(0, (exp.getTime() - Date.now()) / 86_400_000);
+          }
+          const coef = Math.max(1, daysLeft / 30);
+          displayPrice = Math.floor(option.price * coef);
+        } catch { /* ignore */ }
+      }
+      const me = await api.getMe(token).catch(() => null);
+      const pd = me?.personalDiscountPercent ?? 0;
+      if (pd > 0) {
+        displayPrice = Math.max(0, Math.floor(displayPrice * (1 - pd / 100)));
+      }
+
       try {
         const payment = await api.createPlategaPayment(token, {
-          amount: option.price,
+          amount: displayPrice,
           currency: option.currency,
           paymentMethod: methodId,
           description: option.name || `${option.kind} ${option.id}`,
-          extraOption: { kind: option.kind, productId: option.id },
+          extraOption: { kind: option.kind, productId: option.id, targetSubscriptionId },
         });
         const optName = option.name || (option.kind === "traffic" ? `+${option.trafficGb} ГБ` : option.kind === "devices" ? `+${option.deviceCount} устр.` : "Сервер");
         const msg = buildPaymentMessage(config, {
           name: optName,
-          price: formatMoney(option.price, option.currency),
-          amount: String(option.price),
+          price: formatMoney(displayPrice, option.currency),
+          amount: String(displayPrice),
           currency: option.currency,
           action: "Нажмите кнопку ниже для оплаты:",
         });
         await editMessageContent(ctx, msg.text, payUrlMarkup(payment.paymentUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
+        extraOptionTargetSub.delete(userId);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа";
         await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
@@ -3076,15 +4624,43 @@ composer.on("callback_query:data", async (ctx) => {
       }
       const client = await api.getMe(token);
       const optName = option.name || (option.kind === "traffic" ? `+${option.trafficGb} ГБ` : option.kind === "devices" ? `+${option.deviceCount} устр.` : "Сервер");
+
+      // на экране выбора способа оплаты
+      // показываем РЕАЛЬНУЮ цену (с pro-rata + personal discount), а не базовую option.price.
+      let displayPrice = option.price;
+      if (option.kind === "devices") {
+        const target = extraOptionTargetSub.get(userId);
+        if (target && target !== "primary") {
+          try {
+            const subs = await api.getAllSubscriptions(token);
+            const targetSub = subs.items?.find((it) => it.id === target);
+            const inner = targetSub?.subscription as Record<string, unknown> | null;
+            const innerData = inner ? ((inner.response ?? inner.data ?? inner) as Record<string, unknown>) : null;
+            const expireAtRaw = innerData?.expireAt ?? innerData?.expire_at;
+            let daysLeft = 30;
+            if (typeof expireAtRaw === "string" || typeof expireAtRaw === "number") {
+              const exp = typeof expireAtRaw === "number" ? new Date(expireAtRaw * 1000) : new Date(expireAtRaw);
+              if (!isNaN(exp.getTime())) daysLeft = Math.max(0, (exp.getTime() - Date.now()) / 86_400_000);
+            }
+            const coef = Math.max(1, daysLeft / 30);
+            displayPrice = Math.floor(option.price * coef);
+          } catch { /* ignore */ }
+        }
+      }
+      const pd = client?.personalDiscountPercent ?? 0;
+      if (pd > 0) {
+        displayPrice = Math.max(0, Math.floor(displayPrice * (1 - pd / 100)));
+      }
+
       const choiceText = buildPaymentMessage(config, {
         name: optName,
-        price: formatMoney(option.price, option.currency),
-        amount: String(option.price),
+        price: formatMoney(displayPrice, option.currency),
+        amount: String(displayPrice),
         currency: option.currency,
         action: "Выберите способ оплаты:",
       });
       const markup = optionPaymentMethodButtons(
-        option,
+        { ...option, price: displayPrice },
         client?.balance ?? 0,
         config?.botBackLabel ?? null,
         innerStyles,
@@ -3115,6 +4691,59 @@ composer.on("callback_query:data", async (ctx) => {
         await editMessageContent(ctx, "Тариф не найден.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
         return;
       }
+
+      // если идёт ПРОДЛЕНИЕ подписки с
+      // докупленными устройствами — показываем промежуточный экран с детализацией цены
+      // и выбором: продлить со всеми устройствами / убрать устройства и продлить только тариф.
+      const extPair = extendingSecondaryPending.get(userId);
+      if (extPair && extPair.tariffId === tariff.id) {
+        try {
+          const allSubs = await api.getAllSubscriptions(token);
+          const targetSub = allSubs.items?.find((it) => it.id === extPair.secondaryId);
+          const extraDevices = targetSub?.extraDevices ?? 0;
+          const monthlyPrice = targetSub?.extraDevicesMonthlyPrice ?? 0;
+          if (extraDevices > 0 && monthlyPrice > 0) {
+            const extrasForPeriod = Math.round(monthlyPrice * (option.durationDays / 30) * 100) / 100;
+            const totalWith = option.price + extrasForPeriod;
+            // применяем личную скидку для отображения
+            const meExt = await api.getMe(token);
+            const pdExt = meExt?.personalDiscountPercent ?? 0;
+            const displayTotalWith = pdExt > 0 ? Math.max(0, Math.round(totalWith * (1 - pdExt / 100) * 100) / 100) : totalWith;
+            const displayPrice = pdExt > 0 ? Math.max(0, Math.round(option.price * (1 - pdExt / 100) * 100) / 100) : option.price;
+            const coef = option.durationDays / 30;
+            const coefStr = option.durationDays % 30 === 0 ? `${coef}` : coef.toFixed(1);
+            const lines = [
+              "🔄 Продление подписки",
+              "",
+              `📦 Тариф: ${tariff.name}`,
+              `⏰ Длительность: ${formatRuDays(option.durationDays)}`,
+              `💰 Базовая цена тарифа: ${displayPrice} ₽`,
+              "",
+              `📱 На этой подписке у вас докуплено: ${extraDevices} ${(() => { const n = extraDevices % 100; const n1 = n % 10; if (n > 10 && n < 20) return "доп. устройств"; if (n1 > 1 && n1 < 5) return "доп. устройства"; if (n1 === 1) return "доп. устройство"; return "доп. устройств"; })()}`,
+              `💵 Цена устройств: ${monthlyPrice} ₽ за 30 дней × ${coefStr} = ${extrasForPeriod} ₽`,
+              "",
+              `━━━━━━━━━━━━━━`,
+              `💵 Итого со всеми устройствами: ${displayTotalWith} ₽`,
+              `💵 Без доп. устройств: ${displayPrice} ₽`,
+              "",
+              `💡 По умолчанию в подписку входит ${tariff.includedDevices ?? 4} устройства, но у вас куплены дополнительные устройства.`,
+              "⚠️ Если продлить подписку без доп. устройств и при этом продолжить использовать прежнее количество устройств, сервис может перестать работать на некоторых из них.",
+            ];
+            await editMessageContent(ctx, lines.join("\n"), {
+              inline_keyboard: [
+                [{ text: `✅ Со всеми устройствами (${displayTotalWith} ₽)`, callback_data: `pay_ext_keep:${idx}` }],
+                [{ text: `🗑 Убрать устройства, продлить за ${displayPrice} ₽`, callback_data: `pay_ext_drop:${idx}` }],
+                [{ text: "← Назад", callback_data: `sub:detail:${targetSub?.type ?? "secondary"}:${extPair.secondaryId}` }],
+              ],
+            });
+            return;
+          }
+        } catch (e) {
+          console.warn("[bot] topt extras intermediate screen failed:", e);
+          // упало — продолжаем обычным flow без промежуточного экрана
+        }
+      }
+
       // Если в тарифе ВКЛЮЧЕНЫ доп. устройства — показываем picker.
       if (hasExtraDevices(tariff)) {
         const tiers = tariff.deviceDiscountTiers;
@@ -3148,6 +4777,52 @@ composer.on("callback_query:data", async (ctx) => {
       return;
     }
 
+    // продление с устройствами / без.
+    // pay_ext_keep:<idx> — оставить устройства, продолжить flow.
+    // pay_ext_drop:<idx> — сначала убрать устройства (extraDevices=0), потом продолжить.
+    if (data.startsWith("pay_ext_keep:") || data.startsWith("pay_ext_drop:")) {
+      const isKeep = data.startsWith("pay_ext_keep:");
+      const idxStr = data.slice(isKeep ? "pay_ext_keep:".length : "pay_ext_drop:".length);
+      const idx = parseInt(idxStr, 10);
+      const cache = tariffOptionsCache.get(userId);
+      const extPair = extendingSecondaryPending.get(userId);
+      if (!cache || !extPair || !Number.isFinite(idx) || idx < 0 || idx >= cache.options.length) {
+        await editMessageContent(ctx, "Сессия истекла. Откройте подписку заново.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+        return;
+      }
+      const option = cache.options[idx]!;
+      const { items } = await api.getPublicTariffs();
+      const tariff = items?.flatMap((c: TariffCategory) => c.tariffs).find((t: TariffItem) => t.id === cache.tariffId);
+      if (!tariff) {
+        await editMessageContent(ctx, "Тариф не найден.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+        return;
+      }
+      let subExtrasMonthlyPrice = 0;
+      try {
+        const allSubs = await api.getAllSubscriptions(token);
+        const target = allSubs.items?.find((it) => it.id === extPair.secondaryId);
+        if (!isKeep) {
+          // НЕ удаляем сразу — только запоминаем
+          // намерение. Реальный removeExtraDevices вызовется в handler'е способа оплаты
+          // (yookassa/balance/etc) ПЕРЕД созданием платежа. Если юзер передумает и
+          // вернётся назад — устройства останутся при нём.
+          pendingDropExtras.set(userId, extPair.secondaryId);
+          subExtrasMonthlyPrice = 0; // на экране оплаты показываем цену БЕЗ устройств
+        } else {
+          // KEEP: на всякий случай сбрасываем pending drop (если юзер передумал убирать).
+          pendingDropExtras.delete(userId);
+          subExtrasMonthlyPrice = target?.extraDevicesMonthlyPrice ?? 0;
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Ошибка";
+        await editMessageContent(ctx, `❌ Не удалось получить данные подписки: ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+        return;
+      }
+      selectedTariffOption.set(userId, { tariffId: tariff.id, option, extraDevices: 0 });
+      await showPaymentMethodsForTariff(ctx, userId, tariff, option, 0, config, innerStyles, innerEmojiIds, token, subExtrasMonthlyPrice);
+      return;
+    }
+
     if (data.startsWith("tdev:")) {
       // Шаг 2: выбрано количество ДОП. устройств (extras). Применяем скидку и показываем способы оплаты.
       const nStr = data.slice("tdev:".length);
@@ -3169,17 +4844,249 @@ composer.on("callback_query:data", async (ctx) => {
       return;
     }
 
+    // «💰 Продлить» для ЛЮБОЙ подписки (primary или доп.).
+    // Короткий callback (только subscriptionId) — пара tariffId+subId не влезает в 64-байтовый
+    // Telegram callback_data. Резолвим tariffId из подписки на стороне бота.
+    // Backend: metadata.extendsSecondarySubId → extendSecondarySubscription (работает для любой Subscription).
+    if (data.startsWith("pay_tariff_ext:")) {
+      const sid = data.slice("pay_tariff_ext:".length);
+      try {
+        const subs = await api.getAllSubscriptions(token);
+        // Раньше: фильтр type === "secondary". Теперь — любая подписка с этим id (root тоже).
+        const sec = subs.items?.find((it) => it.id === sid);
+        if (!sec || !sec.tariffId) {
+          await editMessageContent(ctx, "❌ Подписка или тариф не найдены.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+          return;
+        }
+        // pre-check кулдауна ДО показа экрана выбора провайдера.
+        // Если подписка в кулдауне — сразу выводим сообщение и кнопку «Назад».
+        try {
+          const cd = await api.checkSubscriptionCooldown(token, sid);
+          if (cd.blocked) {
+            // сообщение уже содержит свой эмодзи ⏳ — не дублируем 🚫.
+            await editMessageContent(ctx, cd.message, {
+              inline_keyboard: [
+                [{ text: backButton(config?.botEmojis ?? null).text, callback_data: `sub:detail:${sec.type}:${sid}` }],
+                [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+              ],
+            });
+            return;
+          }
+        } catch { /* ignore — пропустим check если эндпоинт упал */ }
+
+        const { items } = await api.getPublicTariffs();
+        const tariff = items?.flatMap((c: TariffCategory) => c.tariffs).find((t: TariffItem) => t.id === sec.tariffId);
+        if (!tariff) {
+          await editMessageContent(ctx, "❌ Тариф не найден.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+          return;
+        }
+        // Помечаем что эта оплата — продление именно этой secondary.
+        extendingSecondaryPending.set(userId, { tariffId: tariff.id, secondaryId: sid });
+        // Сбрасываем addsub-флаг (если был от прошлой сессии) — это не создание новой.
+        addsubPending.delete(userId);
+
+        const opts = sortedPriceOptions(tariff.priceOptions);
+        const desc = ((tariff as TariffItem & { description?: string | null }).description ?? "").trim();
+        // Если опций > 1 — picker длительности.
+        if (opts.length > 1) {
+          tariffOptionsCache.set(userId, { tariffId: tariff.id, options: opts });
+          const bestId = bestPricePerDayOptionId(opts);
+          // T-fix (11.05.2026): не дублируем `${tariff.name}` если desc уже содержит заголовок.
+          const text = desc
+            ? `🔄 Продление подписки\n\n${desc}\n\nВыберите тариф для продления:`
+            : `🔄 Продление подписки\n\n${tariff.name}\n\nВыберите длительность:`;
+          await editMessageContent(ctx, text, tariffOptionPickerButtons(opts, tariff.currency, bestId, null, innerStyles, innerEmojiIds, null, config?.botEmojis ?? null));
+          return;
+        }
+        // Одна опция — сразу к оплате (без picker'а доп. устройств для простоты продления).
+        const onlyOpt = opts[0] ?? null;
+        if (onlyOpt) {
+          selectedTariffOption.set(userId, { tariffId: tariff.id, option: onlyOpt, extraDevices: 0 });
+        }
+        // если у подписки есть extraDevices —
+        // показываем промежуточный экран ВСЕГДА (даже когда у тарифа одна опция длительности).
+        // Бывшее поведение «сразу к оплате» проглатывало кнопку «Убрать устройства».
+        if (onlyOpt) {
+          try {
+            const allSubs = await api.getAllSubscriptions(token);
+            const targetSub = allSubs.items?.find((it) => it.id === sid);
+            const extraDevices = targetSub?.extraDevices ?? 0;
+            const monthlyPrice = targetSub?.extraDevicesMonthlyPrice ?? 0;
+            if (extraDevices > 0 && monthlyPrice > 0) {
+              // Копия логики промежуточного экрана из `topt:` handler.
+              const extrasForPeriod = Math.floor(monthlyPrice * (onlyOpt.durationDays / 30));
+              const totalWith = onlyOpt.price + extrasForPeriod;
+              const coef = onlyOpt.durationDays / 30;
+              const coefStr = onlyOpt.durationDays % 30 === 0 ? `${coef}` : coef.toFixed(1);
+              const lines = [
+                "🔄 Продление подписки",
+                "",
+                `📦 Тариф: ${tariff.name}`,
+                `⏰ Длительность: ${formatRuDays(onlyOpt.durationDays)}`,
+                `💰 Базовая цена тарифа: ${onlyOpt.price} ₽`,
+                "",
+                `📱 На этой подписке у вас докуплено: ${extraDevices} ${(() => { const n = extraDevices % 100; const n1 = n % 10; if (n > 10 && n < 20) return "доп. устройств"; if (n1 > 1 && n1 < 5) return "доп. устройства"; if (n1 === 1) return "доп. устройство"; return "доп. устройств"; })()}`,
+                `💵 Цена устройств: ${monthlyPrice} ₽ за 30 дней × ${coefStr} = ${extrasForPeriod} ₽`,
+                "",
+                `━━━━━━━━━━━━━━`,
+                `💵 Итого со всеми устройствами: ${totalWith} ₽`,
+                `💵 Без доп. устройств: ${onlyOpt.price} ₽`,
+                "",
+                `💡 По умолчанию в подписку входит ${tariff.includedDevices ?? 4} устройства, но у вас куплены дополнительные устройства.`,
+              "⚠️ Если продлить подписку без доп. устройств и при этом продолжить использовать прежнее количество устройств, сервис может перестать работать на некоторых из них.",
+              ];
+              await editMessageContent(ctx, lines.join("\n"), {
+                inline_keyboard: [
+                  [{ text: `✅ Со всеми устройствами (${totalWith} ₽)`, callback_data: `pay_ext_keep:0` }],
+                  [{ text: `🗑 Убрать устройства, продлить за ${onlyOpt.price} ₽`, callback_data: `pay_ext_drop:0` }],
+                  [{ text: "← Назад", callback_data: `sub:detail:${targetSub?.type ?? "secondary"}:${sid}` }],
+                ],
+              });
+              // Кэшируем option для последующих pay_ext_keep/drop:0
+              tariffOptionsCache.set(userId, { tariffId: tariff.id, options: [onlyOpt] });
+              return;
+            }
+          } catch (e) {
+            console.warn("[pay_tariff_ext] intermediate screen failed:", e);
+          }
+        }
+        await showPaymentMethodsForTariff(ctx, userId, tariff, onlyOpt, 0, config, innerStyles, innerEmojiIds, token);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка загрузки";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
+    // picker подписок клиента с этим tariffId для продления.
+    // После выбора подписки → переход на pay_tariff_ext:<sid> (готовый flow продления secondary).
+    if (data.startsWith("renew_pick:")) {
+      const tariffId = data.slice("renew_pick:".length);
+      try {
+        const all = await api.getAllSubscriptions(token);
+        const matching = (all.items ?? []).filter((it) => it.tariffId === tariffId);
+        if (matching.length === 0) {
+          await editMessageContent(ctx, "❌ У вас нет подписок с этим тарифом — нечего продлевать.", {
+            inline_keyboard: [[{ text: "🏠 Главное меню", callback_data: "menu:main" }]],
+          });
+          return;
+        }
+        // сортируем по subscriptionIndex —
+        // primary (idx=0) идёт первой автоматически. Тип больше не нужен для роутинга.
+        const sorted = [...matching].sort((a, b) => (a.subscriptionIndex ?? 0) - (b.subscriptionIndex ?? 0));
+
+        // batch-проверка кулдауна для всех подписок этого тарифа.
+        // Заблокированные → бейдж 🚫 в кнопке. При клике handler `pay_tariff_ext` сам покажет сообщение.
+        const blockedSet = new Set<string>();
+        try {
+          const cdBatch = await api.checkSubscriptionsCooldownBatch(token, sorted.map((s) => s.id));
+          for (const it of (cdBatch.items ?? [])) {
+            if (it.blocked) blockedSet.add(it.subscriptionId);
+          }
+        } catch { /* ignore — без бейджей */ }
+
+        const bodyLines: string[] = ["🔌 Выберите подписку для продления:", ""];
+        const rows: { text: string; callback_data: string }[][] = [];
+        for (const s of sorted) {
+          const info = parseSubInfo(s);
+          const idx = s.subscriptionIndex ?? 0;
+          // primary slot = «Главная», остальные = «#N»
+          const typeText = idx === 0 ? "🌟 Главная" : `Подписка #${idx}`;
+          const isBlocked = blockedSet.has(s.id);
+          const blockedPrefix = isBlocked ? "🚫 " : "";
+          bodyLines.push(`${blockedPrefix}${info.statusEmojiSmall} ${typeText} — ${info.daysStr} до ${info.dateStr}${info.trafficSuffix}`);
+          // ВСЕ подписки идут через pay_tariff_ext:<id> — единый flow продления.
+          // Заблокированные тоже ведут в pay_tariff_ext — там pre-check покажет сообщение.
+          const callback = `pay_tariff_ext:${s.id}`;
+          const btnLabel = `${blockedPrefix}${idx === 0 ? "🌟 Главная" : "#" + idx} ${info.daysStr}`;
+          rows.push([{ text: btnLabel.slice(0, 60), callback_data: callback.slice(0, 64) }]);
+        }
+        { const bk = backButton(config?.botEmojis ?? null); rows.push([{ text: bk.text, callback_data: `pay_tariff:${tariffId}` }]); }
+        await editMessageContent(ctx, bodyLines.join("\n"), { inline_keyboard: rows });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
     if (data.startsWith("pay_tariff:")) {
       const rest = data.slice("pay_tariff:".length);
       const parts = rest.split(":");
       const tariffId = parts[0];
-      const methodIdFromBtn = parts.length >= 2 ? Number(parts[1]) : null;
+      // TEMP DEBUG: log incoming pay_tariff callback (to be removed after diagnosing).
+      console.log(`[pay_tariff] user=${userId} data="${data}" parts=${JSON.stringify(parts)} tariffId="${tariffId}"`);
+      // (bypass-маркеры из tariffActionChoiceButtons.
+      // burn  → юзер выбрал «🔥 Сменить основную (сжечь дни)» — пропускаем диалог,
+      //            идём в обычный flow (proration backend'а конвертирует/сжигает дни).
+      // add   → юзер выбрал «➕ Купить как доп. подписку» — пропускаем диалог,
+      //            ставим addsub-флаг (читается ниже в pay_<provider>: и Platega-ветке)
+      //            и идём в обычный flow (длительность/устройства/методы), но платёж
+      //            создаётся с asAdditional=true → backend пометит metadata, на webhook'е
+      //            activateTariffByPaymentId вызовет createAdditionalSubscription.
+      // T7b (11.05.2026):
+      // extsec:<secondaryId> → юзер нажал «💰 Продлить» в детали secondary-подписки.
+      //            Идём в обычный flow выбора длительности/устройств/оплаты, но в metadata
+      //            платежа добавляется extendsSecondarySubId → backend вызывает
+      //            extendSecondarySubscription (продлевает существующую, НЕ создаёт новую).
+      const isBurnBypass = parts[1] === "burn";
+      const isAddBypass = parts[1] === "add";
+      const isExtsec = parts[1] === "extsec" && parts.length >= 3;
+      const extsecSecondaryId = isExtsec ? parts.slice(2).join(":") : null;
+      // r — маркер «продление root» из renew_pick.
+      // Поведение идентично обычному pay_tariff: (без add), просто пропускает промежуточный
+      // экран «Продлить / Купить новую» (иначе бесконечный цикл при выборе основной подписки).
+      const isRenewRoot = parts[1] === "r";
+      const isBypass = isBurnBypass || isAddBypass || isExtsec || isRenewRoot;
+      const methodIdFromBtn = !isBypass && parts.length >= 2 ? Number(parts[1]) : null;
+      // T7b: запоминаем что юзер хочет продлить именно эту secondary.
+      // Consume'ся ниже при создании любого payment — параметр extendsSecondarySubId
+      // прокинется во все методы (balance/yookassa/yoomoney/cryptopay/heleket/lava/lavatop/platega).
+      if (isExtsec && extsecSecondaryId) {
+        extendingSecondaryPending.set(userId, { tariffId, secondaryId: extsecSecondaryId });
+        // При extsec НЕ ставим addsubPending (это не создание новой, а продление).
+      } else if (methodIdFromBtn == null) {
+        // если юзер вошёл в pay_tariff БЕЗ маркера extsec
+        // (т.е. это новая покупка / выбор тарифа), сбрасываем «висящий» Map от предыдущего
+        // нажатия «💰 Продлить». Иначе при следующей оплате прокидывается extendsSecondarySubId
+        // → бэк блокирует кулдауном.
+        // methodIdFromBtn != null означает что юзер уже на этапе выбора провайдера — Map нужен.
+        extendingSecondaryPending.delete(userId);
+      }
+      // Управление addsub-стейтом:
+      //   add → set; burn → clear; naked → clear (fresh choice).
+      //   extsec → НЕ трогаем addsub.
+      //   methodIdFromBtn != null (Platega-метод) — не трогаем здесь, ниже сами consume'м.
+      if (isAddBypass) {
+        addsubPending.set(userId, tariffId);
+      } else if (isBurnBypass || methodIdFromBtn == null) {
+        addsubPending.delete(userId);
+      }
       const { items } = await api.getPublicTariffs();
       const tariff = items?.flatMap((c: TariffCategory) => c.tariffs).find((t: TariffItem) => t.id === tariffId);
       if (!tariff) {
         await editMessageContent(ctx, "Тариф не найден.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
         return;
       }
+
+      // диалог «Покупка тарифа из другой категории» УБРАН.
+      // Раньше при клике на тариф другой категории показывался диалог-промежуток. Юзер не хотел
+      // лишнего шага → теперь сразу автоматически идём на «купить как новую подписку» (addsubPending),
+      // флоу длительности/устройств/оплаты не меняется, на webhook'е создастся параллельная sub.
+      if (methodIdFromBtn == null && !isBypass) {
+        try {
+          const me = await api.getMe(token);
+          const newCategory = items?.find((c) => c.tariffs.some((t) => t.id === tariffId));
+          if (me.currentTariff && me.currentTariff.categoryId && newCategory && newCategory.id !== me.currentTariff.categoryId) {
+            // Автоматически помечаем как additional — backend пометит metadata.isAdditionalSubscription
+            // → активация через createAdditionalSubscription (новая параллельная sub).
+            addsubPending.set(userId, tariff.id);
+          }
+        } catch {
+          // Если /me не ответил — не блокируем покупку, fallback в обычный flow.
+        }
+      }
+
       const opts = sortedPriceOptions(tariff.priceOptions);
       const existingSelection = selectedTariffOption.get(userId);
       const matchesThisTariff = existingSelection?.tariffId === tariff.id;
@@ -3187,16 +5094,66 @@ composer.on("callback_query:data", async (ctx) => {
       // При первичном входе (без methodId): picker длительности (если опций > 1),
       // потом picker доп. устройств (если включены), потом — методы оплаты.
       if (methodIdFromBtn == null) {
+        // T11+T12 (11.05.2026): подставляем `tariff.description` (rich-text админа)
+        // между названием и приглашением выбрать длительность.
+        // Если description пустой — экран как раньше: только название + «Выберите длительность».
         if (opts.length > 1) {
           tariffOptionsCache.set(userId, { tariffId: tariff.id, options: opts });
           const bestId = bestPricePerDayOptionId(opts);
-          const text = `${tariff.name}\n\nВыберите длительность подписки:`;
-          await editMessageContent(ctx, text, tariffOptionPickerButtons(opts, tariff.currency, bestId, config?.botBackLabel ?? null, innerStyles, innerEmojiIds));
+          const desc = ((tariff as TariffItem & { description?: string | null }).description ?? "").trim();
+          // заголовок тарифа теперь внутри description.
+          // Если desc есть — НЕ дублируем `${tariff.name}` сверху.
+          const text = desc
+            ? `${desc}\n\nВыберите тариф:`
+            : `${tariff.name}\n\nВыберите длительность подписки:`;
+          // проверяем, есть ли у клиента подписки с ЭТИМ tariffId.
+          // Если есть → сверху picker'а длительностей появится кнопка «🔌 Продлить подписку».
+          let hasOwnSubsWithThisTariff = false;
+          try {
+            const all = await api.getAllSubscriptions(token);
+            hasOwnSubsWithThisTariff = (all.items ?? []).some((it) => it.tariffId === tariff.id);
+          } catch { /* ignore — не блокируем покупку */ }
+          await editMessageContent(
+            ctx,
+            text,
+            tariffOptionPickerButtons(
+              opts,
+              tariff.currency,
+              bestId,
+              null,
+              innerStyles,
+              innerEmojiIds,
+              hasOwnSubsWithThisTariff ? tariff.id : null,
+              config?.botEmojis ?? null,
+            ),
+          );
           return;
         }
         const onlyOpt = opts[0] ?? null;
         if (onlyOpt) {
           selectedTariffOption.set(userId, { tariffId: tariff.id, option: onlyOpt, extraDevices: 0 });
+          // для тарифа с ОДНОЙ опцией длительности (Unblock и т.п.) —
+          // если у клиента уже есть подписка с этим тарифом, показываем промежуточный экран:
+          // «🔌 Продлить» / «🛒 Купить новую». Без подписки — сразу к оплате.
+          if (!isBypass) {
+            try {
+              const all = await api.getAllSubscriptions(token);
+              const hasMine = (all.items ?? []).some((it) => it.tariffId === tariff.id);
+              if (hasMine) {
+                const desc = ((tariff as TariffItem & { description?: string | null }).description ?? "").trim();
+                const introText = desc ? desc : tariff.name;
+                await editMessageContent(ctx, `${introText}\n\nУ вас уже есть подписка с этим тарифом. Что хотите сделать?`, {
+                  inline_keyboard: [
+                    [{ text: "🔌 Продлить подписку", callback_data: `renew_pick:${tariff.id}` }],
+                    [{ text: "🛒 Купить новую", callback_data: `pay_tariff:${tariff.id}:add` }],
+                    // «← Назад» к списку тарифов (привязка к bot_emojis.BACK).
+                    [{ text: backButton(config?.botEmojis ?? null).text, callback_data: "menu:tariffs" }],
+                  ],
+                });
+                return;
+              }
+            } catch { /* ignore — fallback в обычный flow */ }
+          }
           if (hasExtraDevices(tariff)) {
             const tiers = tariff.deviceDiscountTiers;
             const pricePerExtra = tariff.pricePerExtraDevice ?? 0;
@@ -3247,8 +5204,31 @@ composer.on("callback_query:data", async (ctx) => {
         ? `${tariff.name} · ${formatRuDays(effectiveDays)}${devicesSuffix}`
         : `${tariff.name}${devicesSuffix}`;
       const promoCode = discountInfoTariff?.code;
+      // если в addsub-режиме (через :add bypass), помечаем платёж
+      // как «купить как доп. подписку» — backend поставит metadata.isAdditionalSubscription
+      // и на webhook'е activateTariffByPaymentId создаст secondary вместо main.
+      const asAdditionalPlatega = addsubPending.get(userId) === tariff.id;
+      // T7b: если в режиме продления конкретной secondary — прокидываем её id.
+      const extPairPlatega = extendingSecondaryPending.get(userId);
+      const extendsSecondarySubIdPlatega = extPairPlatega && extPairPlatega.tariffId === tariff.id ? extPairPlatega.secondaryId : undefined;
+      // юзер выбрал «продлить без устройств».
+      // Флаг прокидываем в backend — там после успешной активации helper удалит устройства.
+      // НЕ удаляем здесь — юзер может закрыть экран оплаты и устройства останутся при нём.
+      const removeExtrasOnActivatePlatega = !!(extendsSecondarySubIdPlatega && pendingDropExtras.get(userId) === extendsSecondarySubIdPlatega);
+      let subExtrasForPeriodPlatega = 0;
+      if (extendsSecondarySubIdPlatega && !removeExtrasOnActivatePlatega) {
+        try {
+          const allSubs = await api.getAllSubscriptions(token);
+          const target = allSubs.items?.find((it) => it.id === extendsSecondarySubIdPlatega);
+          const monthly = target?.extraDevicesMonthlyPrice ?? 0;
+          if (monthly > 0 && effectiveDays > 0) {
+            subExtrasForPeriodPlatega = Math.round(monthly * (effectiveDays / 30) * 100) / 100;
+          }
+        } catch { /* ignore */ }
+      }
+      const totalPricePlatega = effectivePrice + subExtrasForPeriodPlatega;
       const payment = await api.createPlategaPayment(token, {
-        amount: effectivePrice,
+        amount: totalPricePlatega,
         currency: tariff.currency,
         paymentMethod: methodIdFromBtn,
         description: `Тариф: ${tariff.name}`,
@@ -3256,16 +5236,26 @@ composer.on("callback_query:data", async (ctx) => {
         tariffPriceOptionId: eff?.id,
         deviceCount: extraDevices,
         promoCode,
+        asAdditional: asAdditionalPlatega || undefined,
+        extendsSecondarySubId: extendsSecondarySubIdPlatega,
+        removeExtrasOnActivate: removeExtrasOnActivatePlatega,
       });
       if (promoCode) activeDiscountCode.delete(userId);
       selectedTariffOption.delete(userId);
+      if (asAdditionalPlatega) addsubPending.delete(userId);
+      if (extendsSecondarySubIdPlatega && removeExtrasOnActivatePlatega) extendingSecondaryPending.delete(userId);
+      if (removeExtrasOnActivatePlatega) pendingDropExtras.delete(userId);
+      const discountArgTariffUpdated = discountInfoTariff ? {
+        originalPrice: formatMoney(totalPricePlatega, tariff.currency),
+        discountedPrice: formatMoney(getDiscountedPrice(totalPricePlatega, discountInfoTariff), tariff.currency),
+      } : undefined;
       const msg = buildPaymentMessage(config, {
         name: nameWithDays,
-        price: formatMoney(effectivePrice, tariff.currency),
-        amount: String(effectivePrice),
+        price: formatMoney(totalPricePlatega, tariff.currency),
+        amount: String(totalPricePlatega),
         currency: tariff.currency,
         action: "Нажмите кнопку ниже для оплаты:",
-      }, discountArgTariff);
+      }, discountArgTariffUpdated);
       await editMessageContent(ctx, msg.text, payUrlMarkup(payment.paymentUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
       return;
     }
@@ -3286,12 +5276,25 @@ composer.on("callback_query:data", async (ctx) => {
       return;
     }
 
+    // «📱 Мои Устройства» — единый список устройств всех подписок
+    // (root + secondary) с пометкой «Подписка #N — тариф». Используется новый endpoint
+    // `/devices/all` который собирает devices из всех Remna-юзеров клиента.
     if (data === "menu:devices") {
       const lang = getUserLang(userId);
       try {
-        const { total, devices } = await api.getClientDevices(token);
-        lastDevicesList.set(userId, { devices });
-        if (devices.length === 0) {
+        const all = await api.getAllDevices(token);
+        // Маппим в стандартный формат для совместимости с devices:delete handler.
+        // T-fix (12.05.2026): пробрасываем subscriptionType + subscriptionId — нужны при удалении.
+        const flat = all.items.map((it) => ({
+          hwid: it.hwid,
+          platform: it.platform,
+          deviceModel: it.deviceModel,
+          createdAt: it.createdAt,
+          subscriptionType: it.subscriptionType,
+          subscriptionId: it.subscriptionId,
+        }));
+        lastDevicesList.set(userId, { devices: flat });
+        if (all.items.length === 0) {
           await editMessageContent(
             ctx,
             _t("devices.no_devices", lang),
@@ -3299,19 +5302,38 @@ composer.on("callback_query:data", async (ctx) => {
           );
           return;
         }
-        const lines = [_t("devices.delete_hint", lang) + "\n"];
+        // текст шапки берётся из настроек админки
+        // (`config.botDevicesText`). Fallback — i18n (`devices.delete_hint`).
+        const devicesHeader = (config?.botDevicesText ?? "").trim() || _t("devices.delete_hint", lang);
+        // Группируем устройства по подпискам — для красивого вывода.
+        const lines: string[] = [devicesHeader + "\n"];
         const rows: InlineMarkup["inline_keyboard"] = [];
-        devices.slice(0, 15).forEach((d, i) => {
-          const label = [d.platform, d.deviceModel].filter(Boolean).join(" · ") || d.hwid.slice(0, 12) + "…";
-          lines.push(`${i + 1}. ${label}`);
-          rows.push([{ text: `🗑 Удалить: ${label.slice(0, 25)}`, callback_data: `devices:delete:${i}` }]);
+        // Сначала группируем для заголовков, потом перебираем последовательно.
+        const groups = new Map<string, { label: string; devices: { idx: number; d: typeof all.items[number] }[] }>();
+        all.items.slice(0, 30).forEach((d, i) => {
+          const groupKey = `${d.subscriptionType}:${d.subscriptionId}`;
+          // root показываем как «Подписка #0»,
+          // а не «🌟 Основная» — чтобы юзер видел единый формат «Подписка #N».
+          const groupLabel = `Подписка #${d.subscriptionIndex}${d.tariffName ? ` ${d.tariffName}` : ""}`;
+          if (!groups.has(groupKey)) groups.set(groupKey, { label: groupLabel, devices: [] });
+          groups.get(groupKey)!.devices.push({ idx: i, d });
         });
-        rows.push([{ text: config?.botBackLabel ?? "◀️ В меню", callback_data: "menu:main" }]);
+        for (const [, grp] of groups) {
+          lines.push(`\n${grp.label}:`);
+          for (const { idx, d } of grp.devices) {
+            // приложение рядом с устройством.
+            const appPart = d.appName ? ` · 📱 ${d.appName}` : "";
+            const label = sanitizeLabel([d.platform, d.deviceModel].filter(Boolean).join(" · ") + appPart) || d.hwid.slice(0, 12) + "…";
+            lines.push(`  ${idx + 1}. ${label}`);
+            rows.push([{ text: sanitizeLabel(`🗑 Удалить #${idx + 1}: ${label.slice(0, 22)}`), callback_data: `devices:delete:${idx}` }]);
+          }
+        }
+        rows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
         await editMessageContent(ctx, lines.join("\n"), { inline_keyboard: rows });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка";
         await editMessageContent(ctx, `📱 Устройства\n\n❌ ${msg}`, {
-          inline_keyboard: [[{ text: config?.botBackLabel ?? "◀️ В меню", callback_data: "menu:main" }]],
+          inline_keyboard: [[{ text: "🏠 Главное меню", callback_data: "menu:main" }]],
         });
       }
       return;
@@ -3328,9 +5350,14 @@ composer.on("callback_query:data", async (ctx) => {
         });
         return;
       }
-      const hwid = stored.devices[index]!.hwid;
+      const dev = stored.devices[index]!;
+      const hwid = dev.hwid;
+      // T-fix (12.05.2026): передаём subscriptionType + subscriptionId — backend удалит ровно из этой подписки.
+      const subInfo = dev.subscriptionType && dev.subscriptionId
+        ? { type: dev.subscriptionType, id: dev.subscriptionId }
+        : undefined;
       try {
-        await api.postClientDeviceDelete(token, hwid);
+        await api.postClientDeviceDelete(token, hwid, subInfo);
         const nextDevices = stored.devices.filter((_, i) => i !== index);
         lastDevicesList.set(userId, { devices: nextDevices });
         if (nextDevices.length === 0) {
@@ -3343,16 +5370,16 @@ composer.on("callback_query:data", async (ctx) => {
           const lines = [_t("devices.deleted", lang) + "\n"];
           const rows: InlineMarkup["inline_keyboard"] = [];
           nextDevices.slice(0, 15).forEach((d, i) => {
-            const label = [d.platform, d.deviceModel].filter(Boolean).join(" · ") || d.hwid.slice(0, 12) + "…";
+            const label = sanitizeLabel([d.platform, d.deviceModel].filter(Boolean).join(" · ")) || d.hwid.slice(0, 12) + "…";
             lines.push(`${i + 1}. ${label}`);
-            rows.push([{ text: `🗑 Удалить: ${label.slice(0, 25)}`, callback_data: `devices:delete:${i}` }]);
+            rows.push([{ text: sanitizeLabel(`🗑 Удалить: ${label.slice(0, 25)}`), callback_data: `devices:delete:${i}` }]);
           });
-          rows.push([{ text: config?.botBackLabel ?? "◀️ В меню", callback_data: "menu:main" }]);
+          rows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
           await editMessageContent(ctx, lines.join("\n"), { inline_keyboard: rows });
         }
       } catch (e: unknown) {
         await editMessageContent(ctx, `❌ ${e instanceof Error ? e.message : "Ошибка"}`, {
-          inline_keyboard: [[{ text: config?.botBackLabel ?? "◀️ В меню", callback_data: "menu:devices" }]],
+          inline_keyboard: [[{ text: "🏠 Главное меню", callback_data: "menu:main" }]],
         });
       }
       return;
@@ -3408,6 +5435,47 @@ composer.on("callback_query:data", async (ctx) => {
       return;
     }
 
+    // экран «💼 Мой баланс» с балансом, статистикой
+    // (потрачено / накоплено реф.) и кнопкой пополнения. Открывается из menu:tariffs.
+    if (data === "menu:balance") {
+      try {
+        const me = await api.getMe(token);
+        const stats = await api.getReferralStats(token).catch(() => null);
+        const currency = (me?.preferredCurrency ?? "RUB").toUpperCase();
+        const sym = currency === "RUB" ? "₽" : currency === "USD" ? "$" : currency;
+        const balance = (me?.balance ?? 0).toFixed(2);
+        const totalEarned = stats ? stats.totalEarned.toFixed(2) : "0.00";
+        const totalSpent = stats ? stats.totalSpent.toFixed(2) : "0.00";
+        const lines: string[] = [
+          "💼 Мой баланс",
+          "",
+          `💵 Доступно: **${balance} ${sym}**`,
+          "",
+          "📊 Статистика:",
+          `• 🛒 Потрачено с баланса: ${totalSpent} ${sym}`,
+          `• 👥 Начислено от рефералов: ${totalEarned} ${sym}`,
+          "",
+          "💡 С баланса можно оплатить любую подписку или докупить устройство.",
+          "",
+          "Пополнить баланс можно с помощью кнопки «💳 Пополнить баланс» или через 👥 Реферальную программу.",
+        ];
+        const { text, entities } = applyMarkdownAndEmoji(lines.join("\n"), config?.botEmojis ?? null);
+        await editMessageContent(ctx, text, {
+          inline_keyboard: [
+            [{ text: "💳 Пополнить баланс", callback_data: "menu:topup" }],
+            [{ text: "👥 Реферальная программа", callback_data: "menu:referral" }],
+            // «← Назад» к списку тарифов (привязка к bot_emojis.BACK).
+            [{ text: backButton(config?.botEmojis ?? null).text, callback_data: "menu:tariffs" }],
+            [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+          ],
+        }, entities);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
     if (data === "menu:topup") {
       const lang = getUserLang(userId);
       const client = await api.getMe(token);
@@ -3437,7 +5505,7 @@ composer.on("callback_query:data", async (ctx) => {
           amount,
           paymentType: "AC",
         });
-        const yooTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency)}\n\nНажмите кнопку ниже для оплаты через ЮMoney:`, config?.botEmojis);
+        const yooTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency)}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
         await editMessageContent(ctx, yooTopup.text, payUrlMarkup(payment.paymentUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), yooTopup.entities);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа ЮMoney";
@@ -3455,9 +5523,23 @@ composer.on("callback_query:data", async (ctx) => {
       }
       const client = await api.getMe(token);
       try {
-        const payment = await api.createYookassaPayment(token, { amount, currency: "RUB" });
-        const yooTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, "RUB")}\n\nНажмите кнопку ниже для оплаты через ЮKassa:`, config?.botEmojis);
-        await editMessageContent(ctx, yooTopup.text, payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), yooTopup.entities);
+        // 54-ФЗ-чек prompt.
+        const savedEmailTp = client?.email ?? null;
+        const tokRcptTp = storePendingReceipt({
+          userId,
+          savedEmail: savedEmailTp,
+          builder: (receiptEmail) => api.createYookassaPayment(token, { amount, currency: "RUB", receiptEmail }),
+          finalize: async (payment, { receiptSentTo }) => {
+            const yooTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, "RUB")}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
+            const markup = payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds);
+            if (receiptSentTo) {
+              await ctx.reply(`${yooTopup.text}\n\n${RECEIPT_OK_LINE(receiptSentTo)}`, { parse_mode: "HTML", reply_markup: markup });
+            } else {
+              await ctx.reply(yooTopup.text, { entities: yooTopup.entities, reply_markup: markup });
+            }
+          },
+        });
+        await editMessageContent(ctx, receiptPromptText(savedEmailTp), receiptPromptKeyboard(tokRcptTp, savedEmailTp));
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа ЮKassa";
         await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
@@ -3475,7 +5557,7 @@ composer.on("callback_query:data", async (ctx) => {
       const client = await api.getMe(token);
       try {
         const payment = await api.createCryptopayPayment(token, { amount, currency: client.preferredCurrency ?? "RUB" });
-        const cpTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency ?? "RUB")}\n\nНажмите кнопку ниже для оплаты через Crypto Bot:`, config?.botEmojis);
+        const cpTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency ?? "RUB")}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
         await editMessageContent(ctx, cpTopup.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), cpTopup.entities);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа Crypto Bot";
@@ -3494,7 +5576,7 @@ composer.on("callback_query:data", async (ctx) => {
       const client = await api.getMe(token);
       try {
         const payment = await api.createLavaPayment(token, { amount, currency: client.preferredCurrency ?? "RUB" });
-        const lvTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency ?? "RUB")}\n\nНажмите кнопку ниже для оплаты через Lava:`, config?.botEmojis);
+        const lvTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency ?? "RUB")}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
         await editMessageContent(ctx, lvTopup.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), lvTopup.entities);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа Lava";
@@ -3513,7 +5595,7 @@ composer.on("callback_query:data", async (ctx) => {
       const client = await api.getMe(token);
       try {
         const payment = await api.createLavatopPayment(token, { amount, currency: client.preferredCurrency ?? "RUB" });
-        const lvTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency ?? "RUB")}\n\nНажмите кнопку ниже для оплаты через Lava.top:`, config?.botEmojis);
+        const lvTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency ?? "RUB")}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
         await editMessageContent(ctx, lvTopup.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), lvTopup.entities);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа Lava.top";
@@ -3532,7 +5614,7 @@ composer.on("callback_query:data", async (ctx) => {
       const client = await api.getMe(token);
       try {
         const payment = await api.createHeleketPayment(token, { amount, currency: client.preferredCurrency ?? "RUB" });
-        const hkTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency ?? "RUB")}\n\nНажмите кнопку ниже для оплаты через Heleket:`, config?.botEmojis);
+        const hkTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency ?? "RUB")}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
         await editMessageContent(ctx, hkTopup.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), hkTopup.entities);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания платежа Heleket";
@@ -3543,6 +5625,17 @@ composer.on("callback_query:data", async (ctx) => {
 
     if (data.startsWith("topup:")) {
       const rest = data.slice("topup:".length);
+      // «Ввести свою сумму» — переход в conversation flow.
+      // Бот ждёт следующее сообщение от юзера как сумму, затем создаёт payment.
+      if (rest === "custom") {
+        awaitingCustomTopup.add(userId);
+        await editMessageContent(
+          ctx,
+          "✏️ Введите сумму пополнения числом (например: 250, 750, 1500). Минимум 50 ₽.",
+          { inline_keyboard: [[{ text: backButton(config?.botEmojis ?? null).text, callback_data: "menu:topup" }]] },
+        );
+        return;
+      }
       const parts = rest.split(":");
       const amountStr = parts[0];
       const amount = Number(amountStr);
@@ -3582,7 +5675,7 @@ composer.on("callback_query:data", async (ctx) => {
       if (methods.length === 0 && yooEnabled && !yookassaEnabled) {
         try {
           const payment = await api.createYoomoneyPayment(token, { amount, paymentType: "AC" });
-          const yooTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency)}\n\nНажмите кнопку ниже для оплаты через ЮMoney:`, config?.botEmojis);
+          const yooTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency)}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
           await editMessageContent(ctx, yooTopup.text, payUrlMarkup(payment.paymentUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), yooTopup.entities);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : "Ошибка создания платежа ЮMoney";
@@ -3593,9 +5686,23 @@ composer.on("callback_query:data", async (ctx) => {
       // Если только ЮKassa — сразу создаём платёж ЮKassa
       if (methods.length === 0 && yookassaEnabled) {
         try {
-          const payment = await api.createYookassaPayment(token, { amount, currency: "RUB" });
-          const yooTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, "RUB")}\n\nНажмите кнопку ниже для оплаты через ЮKassa:`, config?.botEmojis);
-          await editMessageContent(ctx, yooTopup.text, payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), yooTopup.entities);
+          // 54-ФЗ-чек prompt.
+          const savedEmailTp2 = client?.email ?? null;
+          const tokRcptTp2 = storePendingReceipt({
+            userId,
+            savedEmail: savedEmailTp2,
+            builder: (receiptEmail) => api.createYookassaPayment(token, { amount, currency: "RUB", receiptEmail }),
+            finalize: async (payment, { receiptSentTo }) => {
+              const yooTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, "RUB")}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
+              const markup = payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds);
+              if (receiptSentTo) {
+                await ctx.reply(`${yooTopup.text}\n\n${RECEIPT_OK_LINE(receiptSentTo)}`, { parse_mode: "HTML", reply_markup: markup });
+              } else {
+                await ctx.reply(yooTopup.text, { entities: yooTopup.entities, reply_markup: markup });
+              }
+            },
+          });
+          await editMessageContent(ctx, receiptPromptText(savedEmailTp2), receiptPromptKeyboard(tokRcptTp2, savedEmailTp2));
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : "Ошибка создания платежа ЮKassa";
           await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
@@ -3622,24 +5729,140 @@ composer.on("callback_query:data", async (ctx) => {
         await editMessageContent(ctx, _t("referral.link_unavailable", lang), backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
         return;
       }
+      // новый текст по эталону клиента + статистика из /referral-stats.
+      const stats = await api.getReferralStats(token).catch(() => null);
       const linkSite = appUrl ? `${appUrl}/cabinet/register?ref=${encodeURIComponent(client.referralCode)}` : null;
       const linkBot = `https://t.me/${ctx.me?.username ?? "bot"}?start=ref_${client.referralCode}`;
-      // Показываем фактический персональный процент клиента.
-      // Фолбэк на дефолт только если персональный не задан (null/undefined).
-      const p1 = client.referralPercent ?? (config?.defaultReferralPercent ?? 0);
-      const p2 = config?.referralPercentLevel2 ?? 0;
-      const p3 = config?.referralPercentLevel3 ?? 0;
-      let rest = `${_t("referral.title", lang)}\n\n${_t("referral.description", lang)}\n\n`;
-      rest += `${_t("referral.how_it_works", lang)}\n`;
-      rest += `• ${_t("referral.level1", lang, { percent: String(p1) })}\n`;
-      rest += `• ${_t("referral.level2", lang, { percent: String(p2) })}\n`;
-      rest += `• ${_t("referral.level3", lang, { percent: String(p3) })}\n`;
-      rest += `\n${_t("referral.earnings_info", lang)}`;
-      rest += `\n\n${_t("referral.your_links", lang)}`;
-      if (linkSite) rest += `\n\n${_t("referral.site", lang)}\n` + linkSite;
-      rest += `\n\n${_t("referral.bot", lang)}\n` + linkBot;
-      const { text: refText, entities: refEntities } = titleWithEmoji("LINK", rest, config?.botEmojis);
-      await editMessageContent(ctx, refText, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), refEntities);
+      const p1 = stats?.referralPercent ?? client.referralPercent ?? (config?.defaultReferralPercent ?? 0);
+      const p2 = stats?.referralPercentLevel2 ?? (config?.referralPercentLevel2 ?? 0);
+      const fmt = (n: number) => `${Math.round(n)}₽`;
+      const lines: string[] = [
+        "👥 Реферальная программа",
+        "",
+        "Поделитесь ссылкой с друзьями и получайте процент со всех их пополнений! 🤝",
+        "",
+        `👥 Рефералы 1 уровня: ${p1}%`,
+        `Вы получаете ${p1}% от пополнений тех, кто перешёл по вашей ссылке.`,
+        `• Переходов по вашей ссылке: ${stats?.l1Clicks ?? 0}`,
+        `• Приобрели подписку: ${stats?.l1Purchased ?? 0}`,
+        `• Доход с рефералов 1 уровня: ${fmt(stats?.l1Earned ?? 0)}`,
+        "",
+        `🤝 Рефералы 2 уровня: ${p2}%`,
+        `Вы получаете ${p2}% от пополнений рефералов ваших рефералов.`,
+        `• Приглашено вашими рефералами: ${stats?.l2InvitesCount ?? 0}`,
+        `• Доход с рефералов 2 уровня: ${fmt(stats?.l2Earned ?? 0)}`,
+        "",
+        `💰 Ваш заработок (всего): ${fmt(stats?.totalEarned ?? 0)}`,
+        `💸 Выведено: ${fmt(stats?.totalWithdrawn ?? 0)}`,
+        `🛒 Потрачено: ${fmt(stats?.totalSpent ?? 0)}`,
+        `💵 Доступно: ${fmt(stats?.availableBalance ?? client.balance ?? 0)}`,
+        "",
+        "🔗 Ваша реферальная ссылка:",
+        "",
+        "Telegram Бот:",
+        linkBot,
+      ];
+      if (linkSite) {
+        lines.push("");
+        lines.push("Сайт:");
+        lines.push(linkSite);
+      }
+      lines.push("");
+      lines.push("💡 С реферального баланса можно оплатить подписку или вывести эти средства на свой кошелёк.");
+
+      // T-fix (11.05.2026): кнопки по эталону клиента.
+      // 1. «📢 Поделиться ссылкой» — t.me/share URL для пересылки
+      // 2. «💳 Оплатить/продлить доступ» — callback menu:tariffs (можно купить с реф. баланса)
+      // 3. «💰 Заявка на вывод (от 3000₽)» — conversation flow withdraw:start
+      // формат как в gift — `url=` + `text=`.
+      // Ссылку В САМ ТЕКСТ НЕ кладём — она уже идёт через параметр `url=` и
+      // выводится TG-клиентом ПЕРВОЙ строкой автоматически. Если продублировать
+      // в shareText — получим две одинаковых ссылки подряд (баг юзера 14.05).
+      const shareText = `\n🛡 Надёжный VPN, который реально работает!\n\nРаботает там, где другие не справляются.\n\n💡 Нажми на ссылку выше, чтобы подключиться.`;
+      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(linkBot)}&text=${encodeURIComponent(shareText)}`;
+      const rows: ({ text: string; url: string } | { text: string; callback_data: string })[][] = [];
+      rows.push([{ text: "📢 Поделиться ссылкой", url: shareUrl }]);
+      rows.push([{ text: "💳 Оплатить/продлить доступ", callback_data: "menu:tariffs" }]);
+      rows.push([{ text: "💰 Заявка на вывод (от 3000₽)", callback_data: "withdraw:start" }]);
+      rows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
+
+      const { text: refText, entities: refEntities } = titleWithEmoji("LINK", lines.join("\n"), config?.botEmojis);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await editMessageContent(ctx, refText, { inline_keyboard: rows as any }, refEntities);
+      return;
+    }
+
+    // Conversation flow для вывода USDT TRC20.
+    // Шаг 1: withdraw:start — спрашиваем сумму (минимум 3000)
+    // Шаг 2 (text): юзер вводит сумму → проверяем → спрашиваем кошелёк TRC20
+    // Шаг 3 (text): юзер вводит кошелёк → показываем подтверждение
+    // Шаг 4: withdraw:confirm:<amount>:<wallet> → создаём заявку
+    if (data === "withdraw:start") {
+      try {
+        const me = await api.getMe(token);
+        const balance = me?.balance ?? 0;
+        if (balance < 3000) {
+          await editMessageContent(
+            ctx,
+            `💰 Заявка на вывод (USDT TRC20)\n\n⚠️ Минимальная сумма вывода — 3000₽\n\nВаш текущий баланс: ${balance.toFixed(2)}₽\n\nПродолжайте приглашать друзей по реферальной ссылке — и накопите нужную сумму!`,
+            {
+              inline_keyboard: [
+                [{ text: "👥 К рефералке", callback_data: "menu:referral" }],
+                [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+              ],
+            },
+          );
+          return;
+        }
+        awaitingWithdrawAmount.add(userId);
+        awaitingWithdrawWallet.delete(userId);
+        await editMessageContent(
+          ctx,
+          `💰 Заявка на вывод (USDT TRC20)\n\nВведите сумму для вывода (минимум 3000₽).\nДоступно: ${balance.toFixed(2)}₽`,
+          {
+            inline_keyboard: [
+              [{ text: "❌ Отмена", callback_data: "menu:referral" }],
+            ],
+          },
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
+    if (data.startsWith("withdraw:confirm:")) {
+      // Формат: withdraw:confirm:<amount>:<wallet>
+      const parts = data.slice("withdraw:confirm:".length).split(":");
+      const amount = parseFloat(parts[0] ?? "0");
+      const wallet = parts.slice(1).join(":");
+      if (!Number.isFinite(amount) || amount < 3000 || !wallet) {
+        await editMessageContent(ctx, "❌ Некорректные данные заявки. Попробуйте снова.", {
+          inline_keyboard: [[{ text: "💰 К рефералке", callback_data: "menu:referral" }]],
+        });
+        return;
+      }
+      try {
+        const result = await api.createWithdrawal(token, { amount, walletTrc20: wallet });
+        awaitingWithdrawAmount.delete(userId);
+        awaitingWithdrawWallet.delete(userId);
+        await editMessageContent(
+          ctx,
+          `✅ ${result.message}\n\n💸 Сумма: ${amount.toFixed(2)}₽\n🏦 Кошелёк: ${wallet}\n\nКак только администратор обработает заявку — мы пришлём уведомление в этот чат.`,
+          {
+            inline_keyboard: [
+              [{ text: "👥 К рефералке", callback_data: "menu:referral" }],
+              [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+            ],
+          },
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка";
+        await editMessageContent(ctx, `❌ ${msg}`, {
+          inline_keyboard: [[{ text: "👥 К рефералке", callback_data: "menu:referral" }]],
+        });
+      }
       return;
     }
 
@@ -3654,10 +5877,118 @@ composer.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    if (data === "menu:trial" || data === "trial:confirm") {
+    // несколько триалов с настраиваемыми тарифами.
+    // - Если доступных 0 → "Уже использовали все триалы" + back.
+    // - Если 1 → автоактивация (как раньше — без выбора).
+    // - Если 2+ → показать список с кнопками.
+    // Старый callback `trial:confirm` оставлен как back-compat (legacy single-trial flow).
+    if (data === "menu:trial") {
+      try {
+        const { items } = await api.getAvailableTrials(token);
+        if (items.length === 0) {
+          await editMessageContent(
+            ctx,
+            "🎁 Пробные подписки\n\nВсе доступные пробные подписки уже использованы.",
+            backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds),
+          );
+          return;
+        }
+        // убрана авто-активация при 1 триале —
+        // юзер всегда явно выбирает триал кнопкой (даже если он один).
+        // Старая логика if (items.length === 1) → activateTrialById удалена.
+        if (false as boolean) {
+          return;
+        }
+        // 2+ триалов → выбор.
+        // новый текст по эталону клиента — заголовок + описание
+        // каждого триала из поля description в БД (rich-text), вместо короткой строки «• N дн. (Тариф)».
+        const lines: string[] = ["🎁 Получить пробную подписку", "", "📱 Выберите тип подписки", ""];
+        for (const t of items) {
+          const desc = (t.description ?? "").trim();
+          if (desc) {
+            lines.push(desc);
+          } else {
+            // Fallback на старый формат, если description не заполнен.
+            const tariffStr = t.tariffName ? ` (${t.tariffName})` : "";
+            lines.push(`• ${t.name} — ${t.durationDays} дн.${tariffStr}`);
+          }
+          lines.push("");
+        }
+        lines.push("Выберите тип подписки:");
+        const rows: { text: string; callback_data: string }[][] = items.map((t) => [
+          { text: `${t.name} — ${t.durationDays} дн.`.slice(0, 64), callback_data: `trial:activate:${t.id}` },
+        ]);
+        rows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
+        await editMessageContent(ctx, lines.join("\n"), { inline_keyboard: rows });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка загрузки триалов";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
+    // T15: активация конкретного триала по ID из списка.
+    if (data.startsWith("trial:activate:")) {
+      const trialId = data.slice("trial:activate:".length);
+      try {
+        const result = await api.activateTrialById(token, trialId);
+        // новый UX после активации триала по запросу клиента.
+        // Кнопки: 📲 Инструкции по установке (URL) / 🌐 Локации / 📋 Мои подписки / 🏠 Главное меню.
+        // Текст: «✅ Пробная подписка ... активирована.\n\n🔗 Ссылка подписки: ...\n\nДля подключения нажмите «📲 Подключиться»».
+        type Row = ({ text: string; callback_data: string } | { text: string; url: string })[];
+        const rows: Row[] = [];
+        if (result.subscriptionUrl && result.subscriptionUrl.trim()) {
+          rows.push([{ text: "📲 Инструкции по установке", url: result.subscriptionUrl.trim() }]);
+        }
+        if (result.tariffHasLocations && result.tariffId) {
+          rows.push([{ text: "🌐 Локации", callback_data: `menu:locations:${result.tariffId}` }]);
+        }
+        rows.push([{ text: "📋 Мои подписки", callback_data: "menu:my_subs" }]);
+        rows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
+        // подсказка «если инструкция не открылась».
+        const fallback = instructionFallbackText(config);
+        const linkBlock = result.subscriptionUrl && result.subscriptionUrl.trim()
+          ? `\n\n🔗 Ссылка подписки:\n${result.subscriptionUrl.trim()}\n\nДля подключения нажмите кнопку «📲 Инструкции по установке»:\n\n${fallback}`
+          : "";
+        await editMessageContent(
+          ctx,
+          `✅ ${result.message}${linkBlock}`,
+          { inline_keyboard: rows },
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка активации";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
+    // Back-compat для legacy `trial:confirm` (дефолтный single-trial flow).
+    if (data === "trial:confirm") {
       try {
         const result = await api.activateTrial(token);
-        await editMessageContent(ctx, `✅ ${result.message}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+        // после активации запрашиваем /subscription/all,
+        // берём URL первой активной подписки клиента — рендерим тот же красивый UX
+        // что после нового trial:activate (📲 Инструкции / 🔗 Ссылка подписки / Подключиться).
+        let subscriptionUrl: string | null = null;
+        try {
+          const all = await api.getAllSubscriptions(token);
+          const first = (all.items ?? []).find((it) => it.remnawaveUuid && it.subscription);
+          if (first) {
+            const sub = first.subscription as { subscriptionUrl?: string; response?: { subscriptionUrl?: string }; data?: { subscriptionUrl?: string } } | null;
+            subscriptionUrl = sub?.subscriptionUrl ?? sub?.response?.subscriptionUrl ?? sub?.data?.subscriptionUrl ?? null;
+          }
+        } catch { /* ignore */ }
+
+        type Row = ({ text: string; callback_data: string } | { text: string; url: string })[];
+        const rows: Row[] = [];
+        if (subscriptionUrl) rows.push([{ text: "📲 Инструкции по установке", url: subscriptionUrl }]);
+        rows.push([{ text: "📋 Мои подписки", callback_data: "menu:my_subs" }]);
+        rows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
+        const fallbackLegacy = instructionFallbackText(config);
+        const linkBlock = subscriptionUrl
+          ? `\n\n🔗 Ссылка подписки:\n${subscriptionUrl}\n\nДля подключения нажмите кнопку «📲 Инструкции по установке»:\n\n${fallbackLegacy}`
+          : "";
+        await editMessageContent(ctx, `✅ ${result.message}${linkBlock}`, { inline_keyboard: rows });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка активации";
         await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
@@ -3667,37 +5998,614 @@ composer.on("callback_query:data", async (ctx) => {
 
     if (data === "menu:vpn") {
       const lang = getUserLang(userId);
-      const subRes = await api.getSubscription(token);
-      const vpnUrl = getSubscriptionUrl(subRes.subscription);
-      if (!vpnUrl) {
-        await editMessageContent(ctx, _t("vpn.link_unavailable", lang), backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
-        return;
+      // «🔌 Подключиться» из главного меню.
+      // Старое поведение: показывал ссылку ТОЛЬКО для основной подписки → юзеры с
+      // дополнительными подписками не могли через эту кнопку получить нужный URL.
+      // Новое поведение:
+      //   • 0 подписок (включая secondary) → "у вас нет подписок"
+      //   • 1 подписка (любая)            → форвардим на sub:connect:<type>:<id> (выдача URL)
+      //   • 2+ подписок                   → picker подписок → каждая ведёт на sub:connect:
+      try {
+        const all = await api.getAllSubscriptions(token);
+        const items = all.items ?? [];
+        if (items.length === 0) {
+          await editMessageContent(ctx, _t("vpn.link_unavailable", lang), backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+          return;
+        }
+        if (items.length === 1) {
+          // Один сабклик — одна ссылка. Эмулируем sub:connect: чтобы не дублировать flow.
+          const only = items[0]!;
+          const appUrl = config?.publicAppUrl?.replace(/\/$/, "") ?? null;
+          const useRemna = config?.useRemnaSubscriptionPage === true;
+          let url: string | null = null;
+          let webAppPath: string | null = null;
+          if (only.type === "root") {
+            url = getSubscriptionUrl(only.subscription);
+            webAppPath = appUrl ? `${appUrl}/cabinet/subscribe` : null;
+          } else {
+            // T17: secondary в menu:vpn уже отфильтрована (purchasedAsGift=false), активация не нужна.
+            const giftRes = await api.getGiftSubscriptionUrl(token, only.id);
+            if (useRemna) {
+              const byUuid = await api.getSubscriptionByUuid(token, giftRes.uuid);
+              url = getSubscriptionUrl(byUuid.subscription);
+            }
+            webAppPath = appUrl ? `${appUrl}/cabinet/subscribe?uuid=${encodeURIComponent(giftRes.uuid)}` : null;
+          }
+          if (useRemna && url) {
+            await editMessageContent(ctx, `📲 Ссылка на подписку:\n\n${url}`, {
+              inline_keyboard: [
+                [{ text: "📲 Открыть страницу подключения", url }],
+                // T16-fix (11.05.2026): «menu:back» нигде не зарегистрирован → кнопка ломалась.
+                // Используем «menu:main» который рендерит главное меню. Текст — «🏠 Главное меню».
+                [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+              ],
+            });
+          } else if (webAppPath) {
+            await editMessageContent(ctx, "📲 Подключитесь через мини-приложение:", {
+              inline_keyboard: [
+                [{ text: "📲 Открыть страницу подключения", web_app: { url: webAppPath } }],
+                [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+              ],
+            });
+          } else if (url) {
+            await editMessageContent(ctx, `📲 Ссылка на подписку:\n\n${url}\n\nОткройте её в приложении VPN.`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+          } else {
+            await editMessageContent(ctx, _t("vpn.link_unavailable", lang), backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+          }
+          return;
+        }
+        // 2+ подписок → picker. Кнопка ведёт на sub:connect:<type>:<id> (готовый handler).
+        // T16-fix (11.05.2026): добавляем наглядную инфу о каждой подписке (срок + трафик)
+        // — как в menu:my_subs. parseSubInfo даёт {idx, daysStr, dateStr, trafficSuffix, statusEmojiSmall}.
+        const sorted = [...items].sort((a, b) => {
+          if (a.type !== b.type) return a.type === "root" ? -1 : 1;
+          return (a.subscriptionIndex ?? 0) - (b.subscriptionIndex ?? 0);
+        });
+        const bodyLines: string[] = [
+          "📲 К какой подписке хотите подключиться?",
+          "",
+          "Выберите её ниже — выдадим ссылку для приложения.",
+          "",
+        ];
+        const rows: { text: string; callback_data: string }[][] = [];
+        for (const s of sorted) {
+          const info = parseSubInfo(s);
+          const idx = s.subscriptionIndex ?? 0;
+          const tariff = (s.tariffDisplayName || "—").slice(0, 30);
+          const trialMark = s.trialId ? " 🎁" : "";
+          // везде единый формат «Подписка #N» (включая root).
+          // Body: «Подписка #0 (🌐 Стандартная) — 120 дн. до 07.09.2026»
+          //       «Подписка #2 (🔒 Unblock) — 30 дн. до 09.06.2026 | 0/90 ГБ»
+          const typeText = `Подписка #${idx}`;
+          bodyLines.push(`${info.statusEmojiSmall} ${typeText}${trialMark} ${tariff}`);
+          bodyLines.push(`    📅 ${info.daysStr} до ${info.dateStr}${info.trafficSuffix}`);
+          bodyLines.push("");
+          // Button label остаётся коротким — иначе не влезает в 64 байта callback.
+          const btnLabel = `#${idx}${trialMark} ${tariff}`;
+          rows.push([{ text: btnLabel.slice(0, 60), callback_data: `sub:connect:${s.type}:${s.id}`.slice(0, 64) }]);
+        }
+        rows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
+        await editMessageContent(ctx, bodyLines.join("\n").trim(), { inline_keyboard: rows });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
       }
+      return;
+    }
+
+    // ——— My subscriptions (root + secondary) handlers ———
+    // Унифицированный список ВСЕХ подписок клиента (основная + доп./подаренные).
+    // Бот тянет данные через /api/client/subscription/all (один запрос на оба типа).
+    // Карточка подписки даёт «Подключиться» (URL подписки) и «Продлить» (пока ведёт
+    // в общий menu:tariffs — Commit 2 заменит на category-aware экран).
+
+    if (data === "menu:my_subs") {
+      try {
+        const result = await api.getAllSubscriptions(token);
+        if (!result.items?.length) {
+          await editMessageContent(
+            ctx,
+            "📋 Мои подписки\n\nУ вас пока нет активных подписок.",
+            backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds),
+          );
+          return;
+        }
+        // Sort: root первая, затем secondary по subscriptionIndex.
+        const sorted = [...result.items].sort((a, b) => {
+          if (a.type !== b.type) return a.type === "root" ? -1 : 1;
+          return (a.subscriptionIndex ?? 0) - (b.subscriptionIndex ?? 0);
+        });
+        // Формат тела: «🌐 #N — N дн. до DD.MM.YYYY [| used/limit ГБ]» (по строке на подписку).
+        // Формат кнопки: «✅ #N <typeEmoji> <tariff> (N дн.)».
+        // Дни жирные (через **markdown** + applyMarkdownAndEmoji).
+        const bodyLines = [`📋 Мои подписки (**${sorted.length}**)`, ""];
+        const buttonItems = sorted.map((it) => {
+          const info = parseSubInfo(it);
+          // T15.4: маркер 🎁 для триал-подписок в текстовой строке (под лимит callback_data
+          // в кнопках уже не влезает, поэтому только в body).
+          const trialBodyMark = it.trialId ? " 🎁" : "";
+          // без названия тарифа в текстовой строке —
+          // для истёкших «❌ истекла», для активных «N дн. до DD.MM.YYYY [+трафик]».
+          if (info.isExpired) {
+            bodyLines.push(`${info.typeEmoji} #${info.idx}${trialBodyMark} — ❌ истекла`);
+          } else {
+            bodyLines.push(`${info.typeEmoji} #${info.idx}${trialBodyMark} — **${info.daysStr}** до ${info.dateStr}${info.trafficSuffix}`);
+          }
+          // tariffDisplayName уже содержит эмодзи категории (🌐/🔒) в начале — не дублируем
+          // typeEmoji в лейбле кнопки. Slice 38 → запас под Telegram-лимит 64 байта.
+          const tariff = (it.tariffDisplayName || "—").slice(0, 38);
+          // T15.4: для trial — компактный маркер 🎁 в конце лейбла кнопки.
+          const trialBtnMark = it.trialId ? " 🎁" : "";
+          const lifetimeStr = info.isExpired ? "истекла" : info.daysStr;
+          const label = `${info.statusEmojiSmall} #${info.idx} ${tariff} (${lifetimeStr})${trialBtnMark}`;
+          return { type: it.type, id: it.id, label };
+        });
+        const { text, entities } = applyMarkdownAndEmoji(bodyLines.join("\n"), config?.botEmojis ?? null);
+        await editMessageContent(
+          ctx,
+          text,
+          mySubsListButtons(buttonItems, config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
+          entities,
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка загрузки";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
+    if (data.startsWith("sub:detail:")) {
+      // Формат callback_data: sub:detail:<root|secondary>:<id>
+      const rest = data.slice("sub:detail:".length);
+      const sep = rest.indexOf(":");
+      if (sep === -1) return;
+      const subType = rest.slice(0, sep) as "root" | "secondary";
+      const subId = rest.slice(sep + 1);
+      // очистка маркера если юзер вернулся в детали подписки
+      pendingDropExtras.delete(userId);
+      try {
+        const result = await api.getAllSubscriptions(token);
+        const item = result.items.find((it) => it.type === subType && it.id === subId);
+        if (!item) {
+          await editMessageContent(
+            ctx,
+            "❌ Подписка не найдена",
+            { inline_keyboard: [[{ text: "← К списку", callback_data: "menu:my_subs" }]] },
+          );
+          return;
+        }
+        const idx = item.subscriptionIndex ?? 0;
+        const tariff = item.tariffDisplayName || "—";
+        // Извлекаем все нужные поля из сырого Remnawave user (через .response/.data wrapper).
+        const subData = item.subscription as Record<string, unknown> | null;
+        const inner = subData
+          ? ((subData.response ?? subData.data ?? subData) as Record<string, unknown>)
+          : null;
+
+        // Статус
+        const status = (inner?.status ?? inner?.userStatus ?? "ACTIVE") as string;
+        const statusLabel =
+          status === "ACTIVE" ? "🟢 Активна" :
+          status === "EXPIRED" ? "🔴 Истекла" :
+          status === "LIMITED" ? "🟡 Ограничена" :
+          status === "DISABLED" ? "🔴 Отключена" :
+          `🟡 ${status}`;
+
+        // Дата + время + дни
+        const expireAtRaw = inner?.expireAt ?? inner?.expire_at;
+        let expireDateTimeStr = "";
+        let daysLeftStr = "";
+        if (typeof expireAtRaw === "string" || typeof expireAtRaw === "number") {
+          const expireAt = typeof expireAtRaw === "number" ? new Date(expireAtRaw * 1000) : new Date(expireAtRaw);
+          if (!isNaN(expireAt.getTime())) {
+            expireDateTimeStr = expireAt.toLocaleString("ru-RU", {
+              day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
+            });
+            const days = Math.max(0, Math.ceil((expireAt.getTime() - Date.now()) / 86_400_000));
+            daysLeftStr = `${days} ${formatDaysRu(days)}`;
+          }
+        }
+
+        // Устройства: «Устройств: N доступно» (доступно = limit - used).
+        const deviceLimit = inner?.hwidDeviceLimit ?? inner?.deviceLimit ?? inner?.device_limit;
+        const devicesUsed = inner?.devicesUsed ?? inner?.devices_used;
+        let devicesLine = "";
+        if (typeof deviceLimit === "number") {
+          const available = typeof devicesUsed === "number" ? Math.max(0, deviceLimit - devicesUsed) : deviceLimit;
+          devicesLine = `📱 Устройств: ${available} доступно`;
+        }
+
+        // Трафик: используется/лимит. Если без лимита — «X.XX GB / ♾».
+        const tlimit = inner?.trafficLimitBytes ?? inner?.traffic_limit_bytes;
+        const tused = (inner?.userTraffic as { usedTrafficBytes?: number } | undefined)?.usedTrafficBytes
+          ?? inner?.trafficUsedBytes ?? inner?.usedTrafficBytes ?? inner?.traffic_used_bytes;
+        const limitNum = typeof tlimit === "string" ? parseFloat(tlimit) : Number(tlimit);
+        const usedNum = typeof tused === "string" ? parseFloat(tused) : Number(tused);
+        const usedGb = bytesToGb(Number.isFinite(usedNum) ? usedNum : 0);
+        let trafficLine = `📈 Трафик —  ${usedGb} GB`;
+        if (Number.isFinite(limitNum) && limitNum > 0) {
+          trafficLine = `📈 Трафик —  ${usedGb} / ${bytesToGb(limitNum)} GB`;
+        } else {
+          trafficLine = `📈 Трафик —  ${usedGb} GB / ♾`;
+        }
+
+        // Ссылка для подключения
+        const subUrl = getSubscriptionUrl(item.subscription);
+
+        // T15.4 (11.05.2026): пометка «🎁 Пробная» для подписок, созданных через trial.
+        // убрали разделение «Основная/Дополнительная» — после унификации
+        // все подписки равные. Триал-метка остаётся (это отдельная семантика, не root/secondary).
+        const isTrialSub = !!item.trialId;
+        const trialMark = isTrialSub ? "🎁 Пробная" : "";
+        const lines = [
+          `📲 Подписка #${idx}`,
+          "",
+        ];
+        if (trialMark) lines.push(trialMark);
+        lines.push(`💎 Тариф: ${tariff}`);
+        lines.push(`📊 Статус подписки — ${statusLabel}`);
+        if (expireDateTimeStr) lines.push(`📅 до ${expireDateTimeStr}`);
+        if (daysLeftStr) lines.push(`⏰ осталось ${daysLeftStr}`);
+        if (devicesLine) lines.push(devicesLine);
+        lines.push(trafficLine);
+        if (subUrl) {
+          lines.push("");
+          lines.push("🔗 Ссылка для подключения:");
+          lines.push(subUrl);
+          // подсказка «если инструкции не открываются»
+          // прямо в карточке деталей подписки (sub:detail) — здесь юзер видит ссылку чаще всего.
+          lines.push("");
+          lines.push(instructionFallbackText(config));
+        }
+        const text = lines.join("\n");
+
+        // подгружаем tariff.locations чтобы решить —
+        // показывать ли кнопку «🌐 Локации» в детали подписки.
+        let tariffHasLocations = false;
+        if (item.tariffId) {
+          try {
+            const { items: tariffsByCat } = await api.getPublicTariffs();
+            const tariffFull = tariffsByCat?.flatMap((c: TariffCategory) => c.tariffs).find((t: TariffItem) => t.id === item.tariffId);
+            tariffHasLocations = !!((tariffFull as TariffItem & { locations?: string | null } | undefined)?.locations?.trim());
+          } catch {
+            /* ignore — без кнопки локаций */
+          }
+        }
+        await editMessageContent(
+          ctx,
+          text,
+          // пробрасываем tariffId — кнопка «Продлить» откроет оплату
+          // СРАЗУ для этого тарифа (без выбора в menu:tariffs).
+          // T15.4: пробрасываем isTrialSub → CTA «Конвертировать в платную» вместо «Продлить».
+          // пробрасываем subUrl — кнопка «📲 Инструкции по установке»
+          // открывает его напрямую (без промежуточного экрана со ссылкой).
+          subDetailButtons(subType, subId, backToSubsListLabel(config?.botEmojis ?? null), innerStyles, innerEmojiIds, item.tariffId, tariffHasLocations, isTrialSub, item.autoRenewEnabled === true, subUrl, item.extraDevices ?? 0),
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
+    // «🗑 Убрать доп. устройства».
+    // Confirm-диалог → removeExtraDevices API → extraDevices=0 + hwid kick в Remna.
+    if (data.startsWith("sub:remove_extras:")) {
+      const rest = data.slice("sub:remove_extras:".length);
+      const sep = rest.indexOf(":");
+      if (sep === -1) return;
+      const subType = rest.slice(0, sep) as "root" | "secondary";
+      const subId = rest.slice(sep + 1);
+      await editMessageContent(
+        ctx,
+        "🗑 Убрать все доп. устройства?\n\n" +
+        "• С подписки уберутся все докупленные устройства\n" +
+        "• Лимит устройств вернётся к базовому (по тарифу)\n" +
+        "• Активные «лишние» устройства будут отключены\n" +
+        "• Возврата денег НЕТ — устройства отработали свой срок\n\n" +
+        "Подтвердить?",
+        {
+          inline_keyboard: [
+            [{ text: "✅ Да, убрать", callback_data: `sub:remove_extras_confirm:${subType}:${subId}` }],
+            [{ text: "❌ Отмена", callback_data: `sub:detail:${subType}:${subId}` }],
+          ],
+        },
+      );
+      return;
+    }
+    if (data.startsWith("sub:remove_extras_confirm:")) {
+      const rest = data.slice("sub:remove_extras_confirm:".length);
+      const sep = rest.indexOf(":");
+      if (sep === -1) return;
+      const subType = rest.slice(0, sep) as "root" | "secondary";
+      const subId = rest.slice(sep + 1);
+      try {
+        const result = await api.removeExtraDevices(token, subType, subId);
+        const msg = result.hwidKicked > 0
+          ? `🗑 Готово!\n\n• Убрано: ${result.extraDevicesRemoved} устройств\n• Отключено активных: ${result.hwidKicked}\n• Новый лимит: ${result.newDeviceLimit}\n\nПри следующем продлении цена будет без надбавки за устройства.`
+          : `🗑 Готово!\n\n• Убрано: ${result.extraDevicesRemoved} устройств\n• Новый лимит: ${result.newDeviceLimit}\n\nПри следующем продлении цена будет без надбавки за устройства.`;
+        await editMessageContent(
+          ctx,
+          msg,
+          {
+            inline_keyboard: [
+              [{ text: "← К подписке", callback_data: `sub:detail:${subType}:${subId}` }],
+              [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+            ],
+          },
+        );
+      } catch (e: unknown) {
+        const errMsg = e instanceof Error ? e.message : "Ошибка";
+        await editMessageContent(ctx, `❌ ${errMsg}`, {
+          inline_keyboard: [[{ text: "← К подписке", callback_data: `sub:detail:${subType}:${subId}` }]],
+        });
+      }
+      return;
+    }
+
+    // «🔄 Обновить подписку» — диалог подтверждения.
+    // Текст приходит из system_settings.reissue_warning_text (правило №3).
+    // toggle автосписания на подписку.
+    // Если баланс пустой и юзер пытается включить — backend вернёт ошибку с code=EMPTY_BALANCE.
+    if (data.startsWith("sub:autorenew:")) {
+      const rest = data.slice("sub:autorenew:".length);
+      const sep = rest.indexOf(":");
+      if (sep === -1) return;
+      const subType = rest.slice(0, sep) as "root" | "secondary";
+      const subId = rest.slice(sep + 1);
+      try {
+        // Определяем текущее состояние через /subscription/all → autoRenewEnabled
+        const all = await api.getAllSubscriptions(token);
+        const item = all.items.find((it) => it.type === subType && it.id === subId);
+        const wasEnabled = item?.autoRenewEnabled === true;
+        if (wasEnabled) {
+          // Просто выключаем без подтверждения.
+          await api.toggleSubAutoRenew(token, subType, subId, false);
+          await editMessageContent(
+            ctx,
+            "🛑 Автосписание выключено.\n\nПодписка больше не будет продлеваться автоматически.",
+            {
+              inline_keyboard: [
+                [{ text: backToSubLabel(config?.botEmojis ?? null), callback_data: `sub:detail:${subType}:${subId}` }],
+                [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+              ],
+            },
+          );
+        } else {
+          // Включаем — диалог подтверждения. Текст зависит от наличия YooKassa-recurring.
+          const me = await api.getMe(token).catch(() => null);
+          const ykCardTitle = me?.yookassaPaymentMethodTitle?.trim();
+          const ykRecurringOn = (config as { yookassaRecurringEnabled?: boolean } | null)?.yookassaRecurringEnabled === true;
+          const hasYkFallback = ykRecurringOn && !!ykCardTitle;
+
+          // если у клиента есть сохранённая карта YooKassa
+          // и в админке включены рекуррентные платежи → предупреждаем что списание может идти с карты.
+          let dialogText: string;
+          if (hasYkFallback) {
+            dialogText = [
+              "♻️ Автосписание подписки",
+              "",
+              "Когда срок этой подписки подойдёт к концу — мы автоматически продлим её. Порядок списания:",
+              "",
+              "1️⃣ Сначала спишем с **баланса**.",
+              `2️⃣ Если на балансе не хватит — недостающую сумму **спишем с вашей сохранённой карты ЮKassa** (${ykCardTitle}).`,
+              "",
+              "💡 Сохранённая карта была привязана при предыдущей оплате через ЮKassa. Если хотите её отвязать — обратитесь в поддержку.",
+              "",
+              "❗ Включая автосписание, вы соглашаетесь на регулярные списания с указанной карты согласно условиям оферты.",
+              "",
+              "Подтвердить включение?",
+            ].join("\n");
+          } else {
+            dialogText = [
+              "♻️ Автосписание с баланса",
+              "",
+              "Когда срок этой подписки подойдёт к концу — мы автоматически продлим её с вашего баланса.",
+              "",
+              "💡 Если на балансе не будет хватать средств — продление пропустится, мы уведомим вас.",
+              "",
+              "Подтвердить включение?",
+            ].join("\n");
+          }
+
+          const { text: msgText, entities: msgEntities } = applyMarkdownAndEmoji(dialogText, config?.botEmojis ?? null);
+          await editMessageContent(
+            ctx,
+            msgText,
+            {
+              inline_keyboard: [
+                [{ text: "✅ Включить", callback_data: `sub:autorenew_confirm:${subType}:${subId}` }],
+                [{ text: "❌ Отмена", callback_data: `sub:detail:${subType}:${subId}` }],
+              ],
+            },
+            msgEntities,
+          );
+        }
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
+    if (data.startsWith("sub:autorenew_confirm:")) {
+      const rest = data.slice("sub:autorenew_confirm:".length);
+      const sep = rest.indexOf(":");
+      if (sep === -1) return;
+      const subType = rest.slice(0, sep) as "root" | "secondary";
+      const subId = rest.slice(sep + 1);
+      try {
+        await api.toggleSubAutoRenew(token, subType, subId, true);
+        await editMessageContent(
+          ctx,
+          "✅ Автосписание включено!\n\nПодписка будет автоматически продлеваться с баланса при приближении срока истечения.",
+          {
+            inline_keyboard: [
+              [{ text: backToSubLabel(config?.botEmojis ?? null), callback_data: `sub:detail:${subType}:${subId}` }],
+              [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+            ],
+          },
+        );
+      } catch (e: unknown) {
+        // Если backend вернул EMPTY_BALANCE — показываем предложение пополнить.
+        const errMsg = e instanceof Error ? e.message : "Ошибка";
+        if (errMsg.includes("EMPTY_BALANCE") || errMsg.includes("Баланс пустой")) {
+          await editMessageContent(
+            ctx,
+            "❌ Баланс пустой\n\nЧтобы включить автосписание — сначала пополните баланс или получите реферальные начисления.",
+            {
+              inline_keyboard: [
+                [{ text: "💳 Пополнить баланс", callback_data: "menu:topup" }],
+                [{ text: "👥 Реферальная программа", callback_data: "menu:referral" }],
+                [{ text: backToSubLabel(config?.botEmojis ?? null), callback_data: `sub:detail:${subType}:${subId}` }],
+              ],
+            },
+          );
+        } else {
+          await editMessageContent(ctx, `❌ ${errMsg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+        }
+      }
+      return;
+    }
+
+    if (data.startsWith("sub:reissue:")) {
+      const rest = data.slice("sub:reissue:".length);
+      const sep = rest.indexOf(":");
+      if (sep === -1) return;
+      const subType = rest.slice(0, sep) as "root" | "secondary";
+      const subId = rest.slice(sep + 1);
+      const text = ((config as { reissueWarningText?: string | null })?.reissueWarningText ?? "").trim()
+        || "⚠️ Обновление подписки\n\nБот выдаст вам новую подписку с аналогичным сроком действия. Старая перестанет работать.\n\nВы действительно обновить подписку?";
+      await editMessageContent(ctx, text, {
+        inline_keyboard: [[
+          { text: "✅ Да", callback_data: `sub:reissue_confirm:${subType}:${subId}` },
+          { text: "❌ Нет", callback_data: `sub:detail:${subType}:${subId}` },
+        ]],
+      });
+      return;
+    }
+
+    // T13: подтверждение перевыпуска subscription URL.
+    if (data.startsWith("sub:reissue_confirm:")) {
+      const rest = data.slice("sub:reissue_confirm:".length);
+      const sep = rest.indexOf(":");
+      if (sep === -1) return;
+      const subType = rest.slice(0, sep) as "root" | "secondary";
+      const subId = rest.slice(sep + 1);
+      try {
+        const result = await api.reissueSubscription(token, subType, subId);
+        const newUrl = result.subscriptionUrl ?? "—";
+        // подсказка «если инструкция не открылась».
+        await editMessageContent(ctx, `✅ Подписка обновлена!\n\n🔗 Новая ссылка для подключения:\n${newUrl}\n\nСтарая ссылка больше не работает. Не забудьте заново добавить подписку в приложение.\n\n${instructionFallbackText(config)}`, {
+          inline_keyboard: [[{ text: backToSubLabel(config?.botEmojis ?? null), callback_data: `sub:detail:${subType}:${subId}` }]],
+        });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка обновления подписки";
+        await editMessageContent(ctx, `❌ ${msg}`, {
+          inline_keyboard: [[{ text: backToSubLabel(config?.botEmojis ?? null), callback_data: `sub:detail:${subType}:${subId}` }]],
+        });
+      }
+      return;
+    }
+
+    if (data.startsWith("sub:connect:")) {
+      // Формат: sub:connect:<root|secondary>:<id>
+      // Для root — берём URL основной подписки (как menu:vpn).
+      // Для secondary — переиспользуем gift activation+url flow.
+      const rest = data.slice("sub:connect:".length);
+      const sep = rest.indexOf(":");
+      if (sep === -1) return;
+      const subType = rest.slice(0, sep) as "root" | "secondary";
+      const subId = rest.slice(sep + 1);
       const appUrl = config?.publicAppUrl?.replace(/\/$/, "") ?? null;
       const useRemna = config?.useRemnaSubscriptionPage === true;
-      if (useRemna) {
-        const vpnTitle = titleWithEmoji("SERVERS", `${_t("vpn.connect_title", lang)}\n\n${_t("vpn.connect_hint", lang)}`, config?.botEmojis);
-        await editMessageContent(ctx, vpnTitle.text, openSubscribePageMarkup(appUrl ?? "", config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds, vpnUrl), vpnTitle.entities);
-      } else if (appUrl) {
-        const vpnTitle = titleWithEmoji("SERVERS", `${_t("vpn.connect_title", lang)}\n\n${_t("vpn.connect_hint", lang)}`, config?.botEmojis);
-        await editMessageContent(ctx, vpnTitle.text, openSubscribePageMarkup(appUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), vpnTitle.entities);
-      } else {
-        const vpnTitle2 = titleWithEmoji("SERVERS", `Подключиться к VPN\n\nОткройте ссылку в приложении VPN:\n${vpnUrl}`, config?.botEmojis);
-        await editMessageContent(ctx, vpnTitle2.text, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), vpnTitle2.entities);
+      // кнопка «К подписке» на экране ссылки подключения
+      // ведёт ОБРАТНО в picker «🔌 Подключиться автоматически» (menu:vpn), а не в детали
+      // конкретной подписки. Так юзер может быстро выбрать другую подписку для подключения.
+      const backCallback = "menu:vpn";
+      try {
+        let url: string | null = null;
+        let webAppPath: string | null = null;
+        if (subType === "root") {
+          const subRes = await api.getSubscription(token);
+          url = getSubscriptionUrl(subRes.subscription);
+          webAppPath = appUrl ? `${appUrl}/cabinet/subscribe` : null;
+        } else {
+          // T17: secondary в Мои подписки уже отфильтрована (purchasedAsGift=false), активация не нужна.
+          const giftRes = await api.getGiftSubscriptionUrl(token, subId);
+          if (useRemna) {
+            const byUuid = await api.getSubscriptionByUuid(token, giftRes.uuid);
+            url = getSubscriptionUrl(byUuid.subscription);
+          }
+          webAppPath = appUrl ? `${appUrl}/cabinet/subscribe?uuid=${encodeURIComponent(giftRes.uuid)}` : null;
+        }
+
+        // подсказка «если инструкция не открылась».
+        const fallbackSub = instructionFallbackText(config);
+        if (useRemna && url) {
+          // Remna sub-page включена → отдаём прямую ссылку на неё (URL-кнопкой).
+          await editMessageContent(
+            ctx,
+            `📲 Ссылка на подписку:\n\n${url}\n\n${fallbackSub}`,
+            {
+              inline_keyboard: [
+                [{ text: "📲 Открыть страницу подключения", url }],
+                [{ text: backToSubLabel(config?.botEmojis ?? null), callback_data: backCallback }],
+              ],
+            },
+          );
+        } else if (webAppPath) {
+          await editMessageContent(
+            ctx,
+            `📲 Подключитесь через мини-приложение:\n\n${fallbackSub}`,
+            {
+              inline_keyboard: [
+                [{ text: "📲 Открыть страницу подключения", web_app: { url: webAppPath } }],
+                [{ text: backToSubLabel(config?.botEmojis ?? null), callback_data: backCallback }],
+              ],
+            },
+          );
+        } else if (url) {
+          // Нет publicAppUrl и нет Remna sub-page — показываем сырую ссылку.
+          await editMessageContent(
+            ctx,
+            `📲 Ссылка на подписку:\n\n${url}\n\nОткройте её в приложении VPN.\n\n${fallbackSub}`,
+            { inline_keyboard: [[{ text: backToSubLabel(config?.botEmojis ?? null), callback_data: backCallback }]] },
+          );
+        } else {
+          await editMessageContent(
+            ctx,
+            "❌ Не удалось получить ссылку на подписку",
+            { inline_keyboard: [[{ text: backToSubLabel(config?.botEmojis ?? null), callback_data: backCallback }]] },
+          );
+        }
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка получения ссылки";
+        await editMessageContent(
+          ctx,
+          `❌ ${msg}`,
+          { inline_keyboard: [[{ text: backToSubLabel(config?.botEmojis ?? null), callback_data: backCallback }]] },
+        );
       }
       return;
     }
 
     // ——— Gift / Secondary Subscriptions handlers ———
 
+    // T11 (11.05.2026, ред. 2): экран «🎁 Подарить подписку».
+    // Текст — новый эталонный из system_settings.gift_intro_text (скрин 11),
+    // кнопки — оригинальные `giftMenuButtons` (как в бэкапе): купить / активировать / мои подарки / назад.
+    // Решение по UX (11.05.2026): «верни кнопки на те, которые были, текст оставь».
     if (data === "menu:gift") {
       if (!config?.giftSubscriptionsEnabled) {
         await editMessageContent(ctx, "Функция подарков недоступна.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
         return;
       }
+      const intro = ((config as { giftIntroText?: string | null })?.giftIntroText ?? "").trim()
+        || "🎁 Подарки и подписки\n\nЗдесь вы можете купить новые подписки, подарить их или активировать подарок.";
       await editMessageContent(
         ctx,
-        "🎁 Подарки и подписки\n\nЗдесь вы можете купить дополнительные подписки, подарить их или активировать подарок.",
+        intro,
         giftMenuButtons(config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
       );
       return;
@@ -3709,9 +6617,18 @@ composer.on("callback_query:data", async (ctx) => {
         await editMessageContent(ctx, "Тарифы не настроены.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
         return;
       }
+      // новый текст по эталону клиента (с описанием каждого тарифа).
+      const text = [
+        "Выберите тип подписки, которую хотите подарить:",
+        "",
+        "🚀 Стандартная — стандартная подписка с доступом ко всем локациям",
+        "🔓 Unblock — позволяет оставаться на связи в любых ситуациях. Помогает, если у вас в регионе действуют ограничения интернета (отключают интернет), либо локации из обычной подписки уже не спасают.",
+        "Есть лимит по трафику",
+        "🔓∞ Безлимитный Unblock — Unblock без лимита трафика",
+      ].join("\n");
       await editMessageContent(
         ctx,
-        "🛒 Купить доп. подписку\n\nВыберите тариф:",
+        text,
         giftTariffButtons(markHasOptions(items), config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
       );
       return;
@@ -3729,17 +6646,15 @@ composer.on("callback_query:data", async (ctx) => {
       // Если опций > 1 — показываем picker длительности.
       if (opts.length > 1) {
         giftOptionsCache.set(userId, { tariffId, options: opts });
-        const bestId = bestPricePerDayOptionId(opts);
         const text = `🎁 ${tariff.name}\n\nВыберите длительность подписки:`;
         // Используем тот же picker длительности что и для основных тарифов, но с другим callback prefix.
-        // Для этого собираем кнопки вручную.
+        // звёздочка «лучшая цена за день» убрана по запросу клиента.
         const tariffPay = "success" as const;
         const rows: { text: string; callback_data: string }[][] = opts.map((o, idx) => {
-          const star = bestId && o.id === bestId ? "🌟 " : "";
           const sym = tariff.currency.toUpperCase() === "RUB" ? "₽" : tariff.currency.toUpperCase() === "USD" ? "$" : tariff.currency;
-          return [{ text: `${star}${o.durationDays} дн — ${o.price} ${sym}`.slice(0, 64), callback_data: `gift_topt:${idx}` }];
+          return [{ text: `${o.durationDays} дн — ${o.price} ${sym}`.slice(0, 64), callback_data: `gift_topt:${idx}` }];
         });
-        rows.push([{ text: config?.botBackLabel ?? "◀️ В меню", callback_data: "menu:gift" }]);
+        rows.push([{ text: "🏠 Главное меню", callback_data: "menu:main" }]);
         await editMessageContent(ctx, text, { inline_keyboard: rows.map((r) => r.map((b) => ({ ...b, style: tariffPay }))) } as InlineMarkup);
         return;
       }
@@ -3807,12 +6722,104 @@ composer.on("callback_query:data", async (ctx) => {
         selectedGiftOption.delete(userId);
         await editMessageContent(
           ctx,
-          `✅ Дополнительная подписка создана!\n\nПодписка #${result.subscriptionIndex}\n\nВы можете активировать её на своём аккаунте или подарить другу.`,
-          giftPostPurchaseButtons(result.secondarySubscriptionId, result.subscriptionIndex, config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
+          `✅ Подписка создана!\n\nПодписка #${result.subscriptionIndex}\n\nВы можете активировать её на своём аккаунте или подарить другу.`,
+          giftPostPurchaseButtons(result.subscriptionId, result.subscriptionIndex, config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
         );
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка оплаты";
         await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
+    // покупка подарочной через внешние платёжки.
+    // Создаём обычный pay_tariff* платёж с флагом asGift=true. Webhook при оплате
+    // создаст Subscription с purchasedAsGift=true (попадёт в «🎁 Мои подарки» юзера).
+    if (data.startsWith("gift_pay_yookassa:") || data.startsWith("gift_pay_yoomoney:") || data.startsWith("gift_pay_cryptopay:") || data.startsWith("gift_pay_heleket:") || data.startsWith("gift_pay_lava:")) {
+      const provider = data.startsWith("gift_pay_yookassa:") ? "yookassa"
+        : data.startsWith("gift_pay_yoomoney:") ? "yoomoney"
+        : data.startsWith("gift_pay_cryptopay:") ? "cryptopay"
+        : data.startsWith("gift_pay_heleket:") ? "heleket"
+        : "lava";
+      const tariffId = data.slice(data.indexOf(":") + 1);
+      try {
+        const { items } = await api.getPublicTariffs();
+        const tariff = items?.flatMap((c: TariffCategory) => c.tariffs).find((t: TariffItem) => t.id === tariffId);
+        if (!tariff) {
+          await editMessageContent(ctx, "Тариф не найден.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+          return;
+        }
+        const sel = selectedGiftOption.get(userId);
+        const opts = sortedPriceOptions(tariff.priceOptions);
+        const eff = sel?.tariffId === tariff.id ? sel.option : (opts.length === 1 ? opts[0]! : null);
+        const unitPrice = eff?.price ?? tariff.price;
+        const effectiveDays = eff?.durationDays ?? tariff.durationDays;
+        const extraDevices = sel?.tariffId === tariff.id ? sel.extraDevices : 0;
+        const { extrasTotal } = applyExtraDevicesPriceBot(tariff.pricePerExtraDevice ?? 0, extraDevices, tariff.deviceDiscountTiers, effectiveDays);
+        const effectivePrice = unitPrice + extrasTotal;
+
+        // T-unify: создаём платёж с покупкой подарочной. На бэке metadata.purchasedAsGift=true.
+        // Используем тот же flow что обычная asAdditional покупка, но с дополнительным флагом.
+        const nameWithDaysGift = `🎁 ${tariff.name} · ${formatRuDays(effectiveDays)} (подарочная)`;
+        const renderGiftFinal = async (payUrl: string, receiptSentTo: string | null) => {
+          const msg = buildPaymentMessage(config, {
+            name: nameWithDaysGift,
+            price: formatMoney(effectivePrice, tariff.currency),
+            amount: String(effectivePrice),
+            currency: tariff.currency,
+            action: "Нажмите кнопку ниже для оплаты:",
+          });
+          const markup = payUrlMarkup(payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds);
+          if (receiptSentTo) {
+            await ctx.reply(`${msg.text}\n\n${RECEIPT_OK_LINE(receiptSentTo)}`, { parse_mode: "HTML", reply_markup: markup });
+          } else {
+            await ctx.reply(msg.text, { entities: msg.entities, reply_markup: markup });
+          }
+        };
+
+        if (provider === "yookassa") {
+          // 54-ФЗ-чек prompt только для ЮКассы.
+          const meGf = await api.getMe(token);
+          const savedEmailGf = meGf?.email ?? null;
+          const tokRcptGf = storePendingReceipt({
+            userId,
+            savedEmail: savedEmailGf,
+            builder: (receiptEmail) => api.createYookassaPayment(token, { amount: effectivePrice, currency: "RUB", tariffId: tariff.id, tariffPriceOptionId: eff?.id, deviceCount: extraDevices, asAdditional: true, asGift: true, receiptEmail }),
+            finalize: async (payment, { receiptSentTo }) => {
+              selectedGiftOption.delete(userId);
+              await renderGiftFinal(payment.confirmationUrl, receiptSentTo);
+            },
+          });
+          await editMessageContent(ctx, receiptPromptText(savedEmailGf), receiptPromptKeyboard(tokRcptGf, savedEmailGf));
+          return;
+        }
+
+        // Остальные провайдеры — как было (без чека-prompt).
+        let payUrl: string | null = null;
+        if (provider === "yoomoney") {
+          const p = await api.createYoomoneyPayment(token, { amount: effectivePrice, paymentType: "AC", tariffId: tariff.id, tariffPriceOptionId: eff?.id, deviceCount: extraDevices, asAdditional: true, asGift: true });
+          payUrl = p.paymentUrl;
+        } else if (provider === "cryptopay") {
+          const p = await api.createCryptopayPayment(token, { amount: effectivePrice, currency: tariff.currency, tariffId: tariff.id, tariffPriceOptionId: eff?.id, deviceCount: extraDevices, asAdditional: true, asGift: true });
+          payUrl = p.payUrl;
+        } else if (provider === "heleket") {
+          const p = await api.createHeleketPayment(token, { amount: effectivePrice, currency: tariff.currency, tariffId: tariff.id, tariffPriceOptionId: eff?.id, deviceCount: extraDevices, asAdditional: true, asGift: true });
+          payUrl = p.payUrl;
+        } else {
+          const p = await api.createLavaPayment(token, { amount: effectivePrice, currency: "RUB", tariffId: tariff.id, tariffPriceOptionId: eff?.id, deviceCount: extraDevices, asAdditional: true, asGift: true });
+          payUrl = p.payUrl;
+        }
+
+        selectedGiftOption.delete(userId);
+
+        if (!payUrl) {
+          await editMessageContent(ctx, "❌ Не удалось получить ссылку оплаты", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+          return;
+        }
+        await renderGiftFinal(payUrl, null);
+      } catch (e: unknown) {
+        const errMsg = e instanceof Error ? e.message : "Ошибка создания платежа";
+        await editMessageContent(ctx, `❌ ${errMsg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
       }
       return;
     }
@@ -3823,14 +6830,17 @@ composer.on("callback_query:data", async (ctx) => {
         if (!result.subscriptions?.length) {
           await editMessageContent(
             ctx,
-            "📋 Мои подписки\n\nУ вас пока нет дополнительных подписок.",
-            giftCodeResultButtons(config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
+            "🎁 Мои подарки\n\nУ вас нет купленных подарочных подписок.\n\nКупите подписку через «🛒 Купить новую подписку» — она появится здесь.",
+            giftCodeResultButtons(config?.botBackLabel ?? null, innerStyles, innerEmojiIds, config?.botEmojis ?? null),
           );
           return;
         }
+        // «🎁 Мои подарки» — только подписки купленные через gift flow.
+        // Для GIFT_RESERVED — кнопки «Показать код» / «Отменить» / «Забрать себе».
+        // Для без статуса — «Подарить» / «Удалить» / «Забрать себе».
         await editMessageContent(
           ctx,
-          `📋 Мои подписки\n\nУ вас ${result.subscriptions.length} доп. подписок:`,
+          `🎁 Мои подарки\n\nУ вас ${result.subscriptions.length} ${result.subscriptions.length === 1 ? "подарочная подписка" : "подарочных подписок"}:\n\n📌 Если подписка БЕЗ кода:\n• «🎁 Подарить» — создать код для друга\n• «✅ Забрать себе» — перенести в «📋 Мои подписки»\n• «🗑 Удалить» — отменить покупку\n\n📌 Если КОД УЖЕ СОЗДАН (нажмите на подписку):\n• Откроется ссылка на подарок — переслать другу\n• «❌ Отменить код» — снять резерв подарка\n• «✅ Забрать себе» — отменить код и забрать себе`,
           giftSubscriptionButtons(result.subscriptions, config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
         );
       } catch (e: unknown) {
@@ -3840,12 +6850,36 @@ composer.on("callback_query:data", async (ctx) => {
       return;
     }
 
+    // явная кнопка «✅ Забрать себе».
+    // Снимает purchasedAsGift и переносит подписку из «🎁 Мои подарки» в «📋 Мои подписки».
+    if (data.startsWith("gift:take_self:")) {
+      const subscriptionId = data.slice("gift:take_self:".length);
+      try {
+        await api.activateGiftForSelf(token, subscriptionId);
+        await editMessageContent(
+          ctx,
+          "✅ Подписка перенесена в «📋 Мои подписки»!\n\nТеперь её можно подключить через главное меню → «🔌 Подключиться».",
+          {
+            inline_keyboard: [
+              [{ text: "📋 Мои подписки", callback_data: "menu:my_subs" }],
+              [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+            ],
+          },
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка переноса";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
     if (data.startsWith("gift:connect:")) {
       const subscriptionId = data.slice("gift:connect:".length);
       try {
-        // Сначала активируем подписку (снимаем GIFT_RESERVED, если есть)
-        await api.activateGiftForSelf(token, subscriptionId).catch(() => {});
-        // Потом получаем URL
+        // больше НЕ зовём activateGiftForSelf автоматически.
+        // Раньше при простом получении URL подарок автоматом «забирался себе» →
+        // подписка пропадала из «🎁 Мои подарки» и появлялась в «📋 Мои подписки».
+        // Теперь забрать себе можно ТОЛЬКО явной кнопкой «✅ Забрать себе» в gift menu.
         const result = await api.getGiftSubscriptionUrl(token, subscriptionId);
         const appUrl2 = config?.publicAppUrl?.replace(/\/$/, "") ?? null;
 
@@ -3876,10 +6910,10 @@ composer.on("callback_query:data", async (ctx) => {
           ? {
               inline_keyboard: [
                 [{ text: "📲 Подключиться", web_app: { url: webUrl } }],
-                [{ text: config?.botBackLabel ?? "← Назад", callback_data: "menu:gift" }],
+                [{ text: backButton(config?.botEmojis ?? null).text, callback_data: "menu:gift" }],
               ],
             }
-          : giftCodeResultButtons(config?.botBackLabel ?? null, innerStyles, innerEmojiIds);
+          : giftCodeResultButtons(config?.botBackLabel ?? null, innerStyles, innerEmojiIds, config?.botEmojis ?? null);
         await editMessageContent(
           ctx,
           `📲 Ссылка на подписку:\n\n${webUrl ?? `Подписка UUID: ${result.uuid}`}`,
@@ -3892,17 +6926,89 @@ composer.on("callback_query:data", async (ctx) => {
       return;
     }
 
+    // noop — заголовок-разделитель в gift list, ничего не делает.
+    if (data.startsWith("gift:noop:")) {
+      await ctx.answerCallbackQuery({ text: "Используйте кнопки ниже для управления кодом подарка" }).catch(() => {});
+      return;
+    }
+
+    // «🎁 Показать код» — повторно показать share-UI для уже созданного кода.
+    // Грузит активный GiftCode по subId через новый endpoint /gift/active-code/:subId.
+    if (data.startsWith("gift:show_code:")) {
+      const subscriptionId = data.slice("gift:show_code:".length);
+      try {
+        const result = await api.getActiveGiftCodeForSubscription(token, subscriptionId);
+        const expiresAt = new Date(result.expiresAt).toLocaleDateString("ru-RU");
+        const tariffLabel = result.tariffName ? `\nТариф: ${result.tariffName}` : "";
+        const botUsername = ctx.me?.username ?? "";
+        const giftUrl = botUsername ? `https://t.me/${botUsername}?start=gift_${result.code}` : "";
+        // Telegram share API требует `?url=` параметр —
+        // без него share-окно не открывается на десктопе и части мобильных клиентов.
+        // Ссылка автоматически идёт как preview-карточка сверху. Это нативное поведение TG,
+        // изменить порядок невозможно через стандартное share API.
+        // новый текст для шеринга подарочной подписки.
+        const shareText = `У меня для тебя подарок 🎁\n \nПодписка на сервис безопасного удалённого доступа 🛡 \n\n💡 Нажми на ссылку, чтобы активировать:\n\n${giftUrl}`;
+        const shareUrl = giftUrl ? `https://t.me/share/url?url=${encodeURIComponent(giftUrl)}&text=${encodeURIComponent(shareText)}` : "";
+        const buttons: (({ text: string; callback_data: string } | { text: string; url: string })[])[] = [];
+        if (shareUrl) buttons.push([{ text: "📤 Поделиться в Telegram", url: shareUrl }]);
+        // убрана кнопка «🔗 Ссылка на подарок (для пересылки)»
+        // по запросу клиента — ссылка уже видна в тексте сообщения, копируется тапом.
+        buttons.push([{ text: "❌ Отменить код", callback_data: `gift:cancel_code:${subscriptionId}` }]);
+        buttons.push([{ text: backButton(config?.botEmojis ?? null).text, callback_data: "gift:subscriptions" }]);
+        await editMessageContent(
+          ctx,
+          `🎁 Активный подарочный код:\n\nКод: \`${result.code}\`${tariffLabel}\n\n📲 Перешлите получателю эту ссылку — она откроет бота и активирует подписку автоматически:\n${giftUrl}\n\nКод действителен до ${expiresAt}.`,
+          { inline_keyboard: buttons },
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка загрузки кода";
+        await editMessageContent(ctx, `❌ ${msg}`, {
+          inline_keyboard: [[{ text: "← К подаркам", callback_data: "gift:subscriptions" }]],
+        });
+      }
+      return;
+    }
+
+    // «❌ Отменить код» — отменяет активный gift code и снимает GIFT_RESERVED.
+    // Подписка возвращается в покупаемое состояние: можно создать новый код / подарить / удалить.
+    if (data.startsWith("gift:cancel_code:")) {
+      const subscriptionId = data.slice("gift:cancel_code:".length);
+      try {
+        // Сначала находим активный код по подписке, потом отменяем по нему.
+        const codeInfo = await api.getActiveGiftCodeForSubscription(token, subscriptionId);
+        await api.cancelGiftCode(token, codeInfo.code);
+        await editMessageContent(
+          ctx,
+          `✅ Подарочный код отменён.\n\nПодписка снова доступна для подарка или активации.`,
+          {
+            inline_keyboard: [
+              [{ text: "🎁 К моим подаркам", callback_data: "gift:subscriptions" }],
+              [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+            ],
+          },
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка отмены";
+        await editMessageContent(ctx, `❌ ${msg}`, {
+          inline_keyboard: [[{ text: "← К подаркам", callback_data: "gift:subscriptions" }]],
+        });
+      }
+      return;
+    }
+
     if (data.startsWith("gift:give:")) {
       const subscriptionId = data.slice("gift:give:".length);
       try {
-        const result = await api.createGiftCode(token, { secondarySubscriptionId: subscriptionId });
-        const expiresAt = new Date(result.expiresAt).toLocaleDateString("ru-RU");
-        const tariffLabel = result.tariffName ? `\nТариф: ${result.tariffName}` : "";
+        const result = await api.createGiftCode(token, { subscriptionId: subscriptionId });
 
-        // Формируем ссылку на подарок и кнопку "Поделиться"
-        const appUrl = config?.publicAppUrl?.replace(/\/$/, "") ?? "";
-        const giftUrl = appUrl ? `${appUrl}/gift/${result.code}` : "";
-        const shareText = `🎁 Я дарю тебе VPN-подписку STEALTHNET${result.tariffName ? ` (${result.tariffName})` : ""}! Активируй по ссылке:`;
+        // ссылка teper deep-link в Telegram-бот.
+        const botUsername = ctx.me?.username ?? "";
+        const giftUrl = botUsername ? `https://t.me/${botUsername}?start=gift_${result.code}` : "";
+
+        // `?url=` обязателен — иначе share не работает на части клиентов.
+        // URL всегда идёт превью сверху (нативное поведение TG, не меняется через standard share API).
+        // новый текст для шеринга подарочной подписки.
+        const shareText = `У меня для тебя подарок 🎁\n \nПодписка на сервис безопасного удалённого доступа 🛡 \n\n💡 Нажми на ссылку, чтобы активировать:\n\n${giftUrl}`;
         const shareUrl = giftUrl
           ? `https://t.me/share/url?url=${encodeURIComponent(giftUrl)}&text=${encodeURIComponent(shareText)}`
           : "";
@@ -3911,16 +7017,24 @@ composer.on("callback_query:data", async (ctx) => {
         if (shareUrl) {
           buttons.push([{ text: "📤 Поделиться в Telegram", url: shareUrl }]);
         }
-        if (giftUrl) {
-          buttons.push([{ text: "🔗 Ссылка на подарок", url: giftUrl }]);
-        }
-        buttons.push([{ text: config?.botBackLabel ?? "← Назад", callback_data: "menu:gift" }]);
+        buttons.push([{ text: "❌ Отменить код", callback_data: `gift:cancel_code:${subscriptionId}` }]);
+        buttons.push([{ text: backButton(config?.botEmojis ?? null).text, callback_data: "menu:gift" }]);
 
-        await editMessageContent(
-          ctx,
-          `🎁 Подарочный код создан!\n\nКод: \`${result.code}\`${tariffLabel}\n\nОтправьте этот код получателю или поделитесь ссылкой. Код действителен до ${expiresAt}.`,
-          { inline_keyboard: buttons },
-        );
+        // два формата текста подарка из ТЗ клиента —
+        // 1) Стандартная (без трафика) — формат «Код / Тариф / N дней».
+        // 2) Unblock (с трафиком) — формат «N дней, NN GB» + «💡 Чтобы скопировать ссылку, нажмите...».
+        const hasTrafficLimit = result.trafficLimitBytes != null && result.trafficLimitBytes > 0;
+        const tariffDisplay = result.tariffName ?? "Подписка";
+        const trafficGb = hasTrafficLimit ? `${Math.round((result.trafficLimitBytes ?? 0) / 1024 ** 3)} GB` : "";
+        const days = result.durationDays ?? 0;
+        let msgText: string;
+        if (hasTrafficLimit) {
+          msgText = `💝 Подарочная ${tariffDisplay} готова!\n\n✅ Оплата прошла успешно.\n📅 ${days} дней, ${trafficGb}\n\n👉 Перешлите ссылку человеку, которому хотите подарить подписку ⬇️\n\n💡 Чтобы скопировать ссылку, нажмите на неё один раз.\n\n${giftUrl}\n\n🎉 При переходе по ссылке подписка автоматически активируется!`;
+        } else {
+          msgText = `💝 Подарочная подписка готова!\n\n✅ Оплата прошла успешно.\nКод: \`${result.code}\`\nТариф: ${tariffDisplay}\n📅 ${days} дней\n\n👉 Перешлите ссылку человеку, которому хотите подарить подписку ⬇️\n\n${giftUrl}\n\n🎉 При переходе по ссылке подписка автоматически активируется!`;
+        }
+
+        await editMessageContent(ctx, msgText, { inline_keyboard: buttons });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка создания кода";
         await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
@@ -3935,7 +7049,7 @@ composer.on("callback_query:data", async (ctx) => {
         await editMessageContent(
           ctx,
           `✅ ${result.message || "Подписка удалена"}`,
-          giftCodeResultButtons(config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
+          giftCodeResultButtons(config?.botBackLabel ?? null, innerStyles, innerEmojiIds, config?.botEmojis ?? null),
         );
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка удаления";
@@ -3946,10 +7060,16 @@ composer.on("callback_query:data", async (ctx) => {
 
     if (data === "gift:redeem") {
       awaitingGiftCode.add(userId);
+      // «← Назад» в gift меню + «🏠 Главное меню».
       await editMessageContent(
         ctx,
         "🎁 Введите подарочный код:",
-        backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds),
+        {
+          inline_keyboard: [
+            [{ text: backButton(config?.botEmojis ?? null).text, callback_data: "menu:gift" }],
+            [{ text: "🏠 Главное меню", callback_data: "menu:main" }],
+          ],
+        },
       );
       return;
     }
@@ -3961,7 +7081,7 @@ composer.on("callback_query:data", async (ctx) => {
           await editMessageContent(
             ctx,
             "🎟️ Мои подарки\n\nУ вас пока нет подарочных кодов.",
-            giftCodeResultButtons(config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
+            giftCodeResultButtons(config?.botBackLabel ?? null, innerStyles, innerEmojiIds, config?.botEmojis ?? null),
           );
           return;
         }
@@ -3972,7 +7092,7 @@ composer.on("callback_query:data", async (ctx) => {
         await editMessageContent(
           ctx,
           `🎟️ Мои подарки\n\n${lines}`,
-          giftCodesListButtons(result.codes, config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
+          giftCodesListButtons(result.codes, config?.botBackLabel ?? null, innerStyles, innerEmojiIds, config?.botEmojis ?? null),
         );
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка загрузки";
@@ -3988,7 +7108,7 @@ composer.on("callback_query:data", async (ctx) => {
         await editMessageContent(
           ctx,
           `✅ ${result.message}`,
-          giftCodeResultButtons(config?.botBackLabel ?? null, innerStyles, innerEmojiIds),
+          giftCodeResultButtons(config?.botBackLabel ?? null, innerStyles, innerEmojiIds, config?.botEmojis ?? null),
         );
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Ошибка отмены";
@@ -4061,6 +7181,29 @@ composer.on("message:text", async (ctx) => {
   if (ctx.message.text?.startsWith("/")) return;
   const userId = ctx.from?.id;
   if (!userId) return;
+
+  // клиент вводит email для 54-ФЗ-чека ЮКассы.
+  if (hasPendingEmailInput(userId)) {
+    const raw = ctx.message.text?.trim() ?? "";
+    if (!isValidEmail(raw)) {
+      await ctx.reply("⚠️ Это не похоже на email. Введите валидный адрес (например, example@mail.com), или нажмите /start для отмены.");
+      return;
+    }
+    const tok = takePendingEmailInput(userId)!;
+    const p = takePendingReceipt(tok);
+    if (!p) {
+      await ctx.reply("⏰ Сессия истекла. Откройте «Оплатить» ещё раз.");
+      return;
+    }
+    try {
+      const payment = await p.builder(raw);
+      await p.finalize(payment, { receiptSentTo: raw });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Ошибка создания платежа ЮKassa";
+      await ctx.reply(`❌ ${msg}`);
+    }
+    return;
+  }
 
   // Админ: ввод текста рассылки
   if (awaitingBroadcastMessage.has(userId)) {
@@ -4171,7 +7314,7 @@ composer.on("message:text", async (ctx) => {
   if (awaitingGiftCode.has(userId)) {
     awaitingGiftCode.delete(userId);
     const code = ctx.message.text.trim().toUpperCase();
-    const menuKb = { reply_markup: { inline_keyboard: [[{ text: publicConfig?.botBackLabel ?? "← Назад", callback_data: "menu:gift" }]] } };
+    const menuKb = { reply_markup: { inline_keyboard: [[{ text: backButton(publicConfig?.botEmojis ?? null).text, callback_data: "menu:gift" }]] } };
     if (!code) {
       await ctx.reply("Код не может быть пустым.", menuKb);
       return;
@@ -4197,6 +7340,95 @@ composer.on("message:text", async (ctx) => {
       const msg = e instanceof Error ? e.message : "Ошибка активации подарка";
       await ctx.reply(`❌ ${msg}`, menuKb);
     }
+    return;
+  }
+
+  // conversation для кастомного пополнения баланса.
+  if (awaitingCustomTopup.has(userId)) {
+    const raw = ctx.message.text.trim().replace(/[,\s]/g, ".").replace(/[^\d.]/g, "");
+    const amount = parseFloat(raw);
+    awaitingCustomTopup.delete(userId);
+    if (!Number.isFinite(amount) || amount < 50) {
+      await ctx.reply("❌ Минимальная сумма — 50 ₽. Попробуйте снова через «💳 Пополнить баланс».", { reply_markup: { inline_keyboard: [[{ text: "💳 Пополнить баланс", callback_data: "menu:topup" }]] } });
+      return;
+    }
+    // Эмулируем callback topup:<amount> чтобы отрисовался стандартный пикер методов.
+    const client = await api.getMe(token);
+    const cfgT = await api.getPublicConfig().catch(() => null);
+    const topupTitle = titleWithEmoji("CARD", `Пополнить баланс на ${formatMoney(amount, client.preferredCurrency)}\n\nВыберите способ оплаты:`, cfgT?.botEmojis);
+    await ctx.reply(topupTitle.text, {
+      entities: topupTitle.entities?.length ? topupTitle.entities : undefined,
+      reply_markup: topupPaymentMethodButtons(
+        String(amount),
+        cfgT?.plategaMethods ?? [],
+        cfgT?.botBackLabel ?? null,
+        undefined,
+        undefined,
+        !!cfgT?.yoomoneyEnabled,
+        !!cfgT?.yookassaEnabled,
+        !!cfgT?.cryptopayEnabled,
+        !!cfgT?.heleketEnabled,
+        !!cfgT?.lavaEnabled,
+        !!cfgT?.lavatopEnabled,
+      ),
+    });
+    return;
+  }
+
+  // conversation для заявки на вывод USDT TRC20.
+  // Шаг 1 — пользователь вводит сумму (если в awaitingWithdrawAmount).
+  if (awaitingWithdrawAmount.has(userId)) {
+    const raw = ctx.message.text.trim().replace(/[,\s]/g, ".").replace(/[^\d.]/g, "");
+    const amount = parseFloat(raw);
+    // «👥 К рефералке» → «↩️ Отмена» во время ввода данных заявки.
+    const backRef = { reply_markup: { inline_keyboard: [[{ text: "↩️ Отмена", callback_data: "menu:referral" }]] } };
+    if (!Number.isFinite(amount) || amount < 3000) {
+      await ctx.reply("❌ Минимальная сумма вывода — 3000₽. Введите корректную сумму или нажмите «Отмена».", backRef);
+      return;
+    }
+    try {
+      const me = await api.getMe(token);
+      if ((me?.balance ?? 0) < amount) {
+        await ctx.reply(`❌ Недостаточно средств. Доступно: ${(me?.balance ?? 0).toFixed(2)}₽`, backRef);
+        awaitingWithdrawAmount.delete(userId);
+        return;
+      }
+    } catch {
+      // ignore — backend всё равно проверит при создании
+    }
+    awaitingWithdrawAmount.delete(userId);
+    awaitingWithdrawWallet.set(userId, amount);
+    await ctx.reply(
+      `✅ Сумма: ${amount.toFixed(2)}₽\n\n🏦 Теперь введите ваш кошелёк USDT TRC20 (адрес начинается с T):`,
+      backRef,
+    );
+    return;
+  }
+
+  // Шаг 2 — пользователь вводит кошелёк (если есть в awaitingWithdrawWallet).
+  if (awaitingWithdrawWallet.has(userId)) {
+    const wallet = ctx.message.text.trim();
+    const amount = awaitingWithdrawWallet.get(userId)!;
+    // «👥 К рефералке» → «↩️ Отмена» во время ввода кошелька.
+    const backRef = { reply_markup: { inline_keyboard: [[{ text: "↩️ Отмена", callback_data: "menu:referral" }]] } };
+    // Базовая валидация TRC20-адреса (длина 34, начинается с T, base58 алфавит).
+    if (!/^T[A-Za-z0-9]{33}$/.test(wallet)) {
+      await ctx.reply("❌ Некорректный кошелёк TRC20.\n\nАдрес должен начинаться с буквы T и содержать 34 символа.\nПопробуйте снова:", backRef);
+      return;
+    }
+    awaitingWithdrawWallet.delete(userId);
+    const callbackData = `withdraw:confirm:${amount}:${wallet}`.slice(0, 64);
+    await ctx.reply(
+      `📋 Проверьте заявку на вывод:\n\n💸 Сумма: ${amount.toFixed(2)}₽\n🏦 Кошелёк TRC20: ${wallet}\n\nПодтвердите создание заявки:`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "✅ Подтвердить", callback_data: callbackData }],
+            [{ text: "❌ Отмена", callback_data: "menu:referral" }],
+          ],
+        },
+      },
+    );
     return;
   }
 
@@ -4279,7 +7511,7 @@ composer.on("message:text", async (ctx) => {
     // Если только ЮMoney (нет platega, нет ЮKassa) — сразу создаём
     if (methods.length === 0 && yooEnabled) {
       const payment = await api.createYoomoneyPayment(token, { amount: num, paymentType: "AC" });
-      const topupMsgYoo = titleWithEmoji("CARD", `Пополнение на ${formatMoney(num, client.preferredCurrency)}\n\nНажмите кнопку ниже для оплаты через ЮMoney:`, config?.botEmojis);
+      const topupMsgYoo = titleWithEmoji("CARD", `Пополнение на ${formatMoney(num, client.preferredCurrency)}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
       await ctx.reply(topupMsgYoo.text, {
         entities: topupMsgYoo.entities.length ? topupMsgYoo.entities : undefined,
         reply_markup: payUrlMarkup(payment.paymentUrl, config?.botBackLabel ?? null, backStyle, msgEmojiIds),
@@ -4289,7 +7521,7 @@ composer.on("message:text", async (ctx) => {
     // Если только ЮKassa
     if (methods.length === 0 && yookassaEnabledMsg) {
       const payment = await api.createYookassaPayment(token, { amount: num, currency: "RUB" });
-      const topupMsgYoo = titleWithEmoji("CARD", `Пополнение на ${formatMoney(num, "RUB")}\n\nНажмите кнопку ниже для оплаты через ЮKassa:`, config?.botEmojis);
+      const topupMsgYoo = titleWithEmoji("CARD", `Пополнение на ${formatMoney(num, "RUB")}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
       await ctx.reply(topupMsgYoo.text, {
         entities: topupMsgYoo.entities.length ? topupMsgYoo.entities : undefined,
         reply_markup: payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, backStyle, msgEmojiIds),
@@ -4299,7 +7531,7 @@ composer.on("message:text", async (ctx) => {
     // Если только Crypto Pay
     if (methods.length === 0 && cryptopayEnabledMsg) {
       const payment = await api.createCryptopayPayment(token, { amount: num, currency: client.preferredCurrency });
-      const topupMsgCp = titleWithEmoji("CARD", `Пополнение на ${formatMoney(num, client.preferredCurrency)}\n\nНажмите кнопку ниже для оплаты через Crypto Bot:`, config?.botEmojis);
+      const topupMsgCp = titleWithEmoji("CARD", `Пополнение на ${formatMoney(num, client.preferredCurrency)}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
       await ctx.reply(topupMsgCp.text, {
         entities: topupMsgCp.entities.length ? topupMsgCp.entities : undefined,
         reply_markup: payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, backStyle, msgEmojiIds),
@@ -4328,29 +7560,43 @@ composer.on("message", async (ctx) => {
   await tryAutoDeleteUnknown(ctx);
 });
 
-// Список клонов запрашивается до createBotWithProxy — иначе API ещё не поднят и fetch падает («fetch failed»).
+// Дожидаемся API чтобы перед стартом получить публичный конфиг и translations.
 await waitForApi();
 
 const botInstances: Bot[] = [];
-const tokens = await resolveActiveBotTokens(BOT_TOKEN);
-for (const token of tokens) {
+{
+  const token = BOT_TOKEN.trim();
+  if (!token) {
+    throw new Error("BOT_TOKEN не задан в env");
+  }
   const b = await createBotWithProxy(token);
   b.use(composer);
   b.catch((err) => console.error(`[Bot ${token.slice(0, 6)}…] error:`, err));
   botInstances.push(b);
 }
-// start() для long polling не завершается — нельзя await по очереди, иначе второй клон никогда не поднимется.
+// start() для long polling не завершается — нельзя await, иначе после старта код не пойдёт дальше.
 for (const b of botInstances) {
   const token = b.token;
   void b.start({
     onStart: async (info) => {
       console.log(`Bot @${info.username ?? "?"} started`);
-      void api.reportBotMeUsername(token, info.username);
       try {
         const cfg = await api.getPublicConfig();
         if (cfg?.translations) setTranslations(cfg.translations);
       } catch {
         /* ignore */
+      }
+      // ─── T8: установить меню команд в синей панельке Telegram ───
+      // /link и прочие хендлеры остаются работающими, но в меню НЕ выводятся.
+      try {
+        await b.api.setMyCommands([
+          { command: "start", description: "Главное меню" },
+          { command: "subscriptions", description: "Моя подписка / инструкции" },
+          { command: "referral", description: "Реферальная программа" },
+          { command: "support", description: "Поддержка" },
+        ]);
+      } catch (e) {
+        console.error(`[Bot @${info.username}] setMyCommands failed:`, e);
       }
     },
   });
