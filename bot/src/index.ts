@@ -7586,62 +7586,11 @@ const botInstances: Bot[] = [];
   b.catch((err) => console.error(`[Bot ${token.slice(0, 6)}…] error:`, err));
   botInstances.push(b);
 }
-// ——— Ручной polling ———
-console.log("[Bot] Starting manual polling...");
-const tgUrl = (process.env.TELEGRAM_API_URL || "https://api.telegram.org").replace(/\/$/, "");
-const pollToken = process.env.BOT_TOKEN?.trim() ?? "";
-
-// Проверяем связь с зеркалом
-try {
-  const meRes = await fetch(`${tgUrl}/bot${pollToken}/getMe`);
-  const meData = await meRes.json() as { ok: boolean; result?: { username?: string } };
-  console.log(`[Bot] Mirror check: ${meData.ok ? "✅" : "❌"} bot @${meData.result?.username ?? "?"}`);
-} catch (e) {
-  console.error(`[Bot] ❌ Mirror unreachable:`, e);
+// ——— Запуск long polling ———
+for (const b of botInstances) {
+  console.log(`[Bot] Starting long polling...`);
+  b.start({
+    drop_pending_updates: true,
+    onStart: (info) => console.log(`[Bot] ✅ Bot @${info.username} started`),
+  }).catch((err) => console.error("[Bot] start failed:", err));
 }
-
-// Запускаем polling
-let offset = 0;
-(async () => {
-  for (const b of botInstances) {
-    const bToken = b.token;
-    console.log(`[Bot] Setting botInfo for ${bToken.slice(0, 6)}…`);
-    // Устанавливаем botInfo вручную, т.к. b.init() может зависнуть на зеркале
-    const meRes = await fetch(`${tgUrl}/bot${bToken}/getMe`);
-    const meData = await meRes.json();
-    if (meData.ok) {
-      b.botInfo = meData.result;
-      console.log(`[Bot] Bot initialized: @${b.botInfo?.username ?? "?"}`);
-    } else {
-      console.error("[Bot] Failed to get bot info:", JSON.stringify(meData));
-    }
-    console.log(`[Bot] Polling for ${bToken.slice(0, 6)}…`);
-    while (true) {
-      try {
-        const url = `${tgUrl}/bot${bToken}/getUpdates?timeout=0&offset=${offset}`;
-        const res = await fetch(url);
-        const data = await res.json() as { ok: boolean; result?: Array<any> };
-        if (!data.ok) {
-          console.error("[Bot] getUpdates fail:", JSON.stringify(data));
-          await new Promise((r) => setTimeout(r, 5000));
-          continue;
-        }
-        const updates = data.result ?? [];
-        if (updates.length > 0) {
-          console.log(`[Bot] ${updates.length} update(s), first ID: ${updates[0].update_id}`);
-        }
-        for (const update of updates) {
-          try {
-            await b.handleUpdate(update);
-          } catch (err) {
-            console.error(`[Bot] Handler error for update ${update.update_id}:`, err);
-          }
-          offset = update.update_id + 1;
-        }
-      } catch (err) {
-        console.error("[Bot] Fetch error:", (err as Error).message);
-      }
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-  }
-  })().catch((err) => console.error("[Bot] Fatal:", err));
