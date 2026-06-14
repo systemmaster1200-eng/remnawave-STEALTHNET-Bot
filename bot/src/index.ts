@@ -7589,32 +7589,88 @@ const botInstances: Bot[] = [];
   b.catch((err) => console.error(`[Bot ${token.slice(0, 6)}…] error:`, err));
   botInstances.push(b);
 }
-// ——— Ручной polling (для совместимости с Telegram API зеркалами) ———
-for (const b of botInstances) {
-  const token = b.token;
-  console.log(`[Bot] Starting manual polling for ${token.slice(0, 6)}…`);
-  let offset = 0;
-  const tgUrl = (process.env.TELEGRAM_API_URL || "https://api.telegram.org").replace(/\/$/, "");
-  console.log(`[Bot] Polling URL: ${tgUrl}`);
+// ——— Ручной polling ———
+console.log("[Bot] Starting manual polling...");
+const tgUrl = (process.env.TELEGRAM_API_URL || "https://api.telegram.org").replace(/\/$/, "");
+const pollToken = process.env.BOT_TOKEN?.trim() ?? "";
+
+// Проверяем связь с зеркалом
+try {
+  const meRes = await fetch(`${tgUrl}/bot${pollToken}/getMe`);
+  const meData = await meRes.json() as { ok: boolean; result?: { username?: string } };
+  console.log(`[Bot] Mirror check: ${meData.ok ? "✅" : "❌"} bot @${meData.result?.username ?? "?"}`);
+} catch (e) {
+  console.error(`[Bot] ❌ Mirror unreachable:`, e);
+}
+
+// Запускаем polling
+let offset = 0;
+(async () => {
+  for (const b of botInstances) {
+    const bToken = b.token;
+    console.log(`[Bot] Polling for ${bToken.slice(0, 6)}…`);
+    while (true) {
+      try {
+        const url = `${tgUrl}/bot${bToken}/getUpdates?timeout=0&offset=${offset}`;
+        const res = await fetch(url);
+        const data = await res.json() as { ok: boolean; result?: Array<any> };
+        if (!data.ok) {
+          console.error("[Bot] getUpdates fail:", JSON.stringify(data));
+          await new Promise((r) => setTimeout(r, 5000));
+          continue;
+        }
+        const updates = data.result ?? [];
+        if (updates.length > 0) {
+          console.log(`[Bot] ${updates.length} update(s), first ID: ${updates[0].update_id}`);
+        }
+        for (const update of updates) {
+          try {
+            await b.handleUpdate(update);
+          } catch (err) {
+            console.error(`[Bot] Handler error for update ${update.update_id}:`, err);
+          }
+          offset = update.update_id + 1;
+        }
+      } catch (err) {
+        console.error("[Bot] Fetch error:", (err as Error).message);
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+})().catch((err) => console.error("[Bot] Fatal:", err));
+  } catch (e) {
+    console.error(`[Bot] ❌ Mirror unreachable:`, e);
+  }
 
   (async function poll() {
     while (true) {
       try {
         const url = `${tgUrl}/bot${token}/getUpdates?timeout=1&offset=${offset}`;
-        const res = await fetch(url);
-        const data = await res.json() as { ok: boolean; result?: Array<{ update_id: number }> };
-        if (data.ok && data.result?.length) {
-          for (const update of data.result) {
-            try {
-              await b.handleUpdate(update);
-            } catch (err) {
-              console.error(`[Bot] Handle update ${update.update_id} error:`, err);
-            }
-            offset = update.update_id + 1;
+        const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+        const data = await res.json() as { ok: boolean; result?: Array<any> };
+        if (!data.ok) {
+          console.error("[Bot] getUpdates failed:", JSON.stringify(data));
+          await new Promise((r) => setTimeout(r, 2000));
+          continue;
+        }
+        const updates = data.result ?? [];
+        if (updates.length > 0) {
+          console.log(`[Bot] Received ${updates.length} update(s)`);
+        }
+        for (const update of updates) {
+          try {
+            await b.handleUpdate(update);
+          } catch (err) {
+            console.error(`[Bot] Update ${update.update_id} handler error:`, err);
           }
+          offset = update.update_id + 1;
         }
       } catch (err) {
-        console.error("[Bot] Poll error:", err);
+        if ((err as Error).name === "TimeoutError" || (err as Error).message?.includes("timeout")) {
+          // timeout это нормально для long polling
+        } else {
+          console.error("[Bot] Poll fetch error:", (err as Error).message);
+        }
       }
       await new Promise((r) => setTimeout(r, 1000));
     }
