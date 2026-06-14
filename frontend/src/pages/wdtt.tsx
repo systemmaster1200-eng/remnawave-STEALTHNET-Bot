@@ -156,6 +156,16 @@ function NodesTab({ token }: { token: string }) {
     setTimeout(() => setTestResult(null), 4000);
   };
 
+  const deleteNode = async (id: string, name: string) => {
+    if (!confirm(`Удалить ноду «${name}»? Это действие необратимо.`)) return;
+    try {
+      await api.deleteWdttNode(token, id);
+      fetchNodes();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Ошибка удаления");
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
@@ -184,8 +194,9 @@ function NodesTab({ token }: { token: string }) {
                   {statusBadge(n.status)}
                   <span className="text-xs text-muted-foreground">{n.currentSlots}/{n.capacity ?? "∞"} слотов</span>
                   <Button variant="ghost" size="sm" onClick={() => fetchDetail(n.id)}><Server className="h-4 w-4" /></Button>
-                  <Button variant="ghost" size="sm" onClick={() => testNode(n.id)}><Wifi className="h-4 w-4" /></Button>
+                  <Button variant="ghost" size="sm" onClick={() => testNode(n.id)} title="Тест"><Wifi className="h-4 w-4" /></Button>
                   <Button variant="ghost" size="sm" onClick={() => setShowEdit(n)}><Pencil className="h-4 w-4" /></Button>
+                  <Button variant="ghost" size="sm" onClick={() => deleteNode(n.id, n.name)} title="Удалить" className="text-destructive hover:text-destructive"><Trash2 className="h-4 w-4" /></Button>
                 </div>
               </div>
             </Card>
@@ -479,7 +490,7 @@ function CreateCategoryDialog({ token, open, onClose, onCreated }: { token: stri
 }
 
 function CreateTariffDialog({ token, categories, open, onClose, onCreated }: { token: string; categories: WdttCategoryItem[]; open: boolean; onClose: () => void; onCreated: () => void }) {
-  const [categoryId, setCategoryId] = useState(categories[0]?.id || "");
+  const [categoryId, setCategoryId] = useState("");
   const [name, setName] = useState("");
   const [proxyCount, setProxyCount] = useState(1);
   const [durationDays, setDurationDays] = useState(30);
@@ -488,21 +499,35 @@ function CreateTariffDialog({ token, categories, open, onClose, onCreated }: { t
   const [currency, setCurrency] = useState("USD");
   const [sortOrder, setSortOrder] = useState(0);
   const [enabled, setEnabled] = useState(true);
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    if (open && categories.length > 0 && !categoryId) {
+      setCategoryId(categories[0]?.id || "");
+    }
+  }, [open, categories]);
 
   const handleCreate = async () => {
-    const trafficLimitBytes = trafficGb ? BigInt(Math.round(parseFloat(trafficGb) * 1024 ** 3)).toString() : null;
-    await api.createWdttTariff(token, {
-      categoryId,
-      name,
-      proxyCount,
-      durationDays,
-      trafficLimitBytes,
-      price,
-      currency,
-      sortOrder,
-      enabled,
-    });
-    onCreated();
+    if (!name || !categoryId) return;
+    setCreating(true);
+    try {
+      const trafficLimitBytes = trafficGb ? BigInt(Math.round(parseFloat(trafficGb) * 1024 ** 3)).toString() : null;
+      await api.createWdttTariff(token, {
+        categoryId,
+        name,
+        proxyCount,
+        durationDays,
+        trafficLimitBytes,
+        price,
+        currency,
+        sortOrder,
+        enabled,
+      });
+      onCreated();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Ошибка создания тарифа");
+    }
+    setCreating(false);
   };
 
   return (
@@ -511,9 +536,13 @@ function CreateTariffDialog({ token, categories, open, onClose, onCreated }: { t
         <DialogHeader><DialogTitle>Создать WDTT тариф</DialogTitle></DialogHeader>
         <div className="space-y-4">
           <div><Label>Категория</Label>
-            <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className="flex h-10 w-full rounded-xl border bg-background px-3 py-2 text-sm">
-              {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
+            {categories.length === 0 ? (
+              <p className="text-sm text-muted-foreground mt-1">Сначала создайте категорию</p>
+            ) : (
+              <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className="flex h-10 w-full rounded-xl border bg-background px-3 py-2 text-sm">
+                {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            )}
           </div>
           <div><Label>Название</Label><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="WDTT 30 дней" /></div>
           <div className="grid grid-cols-2 gap-3">
@@ -543,7 +572,10 @@ function CreateTariffDialog({ token, categories, open, onClose, onCreated }: { t
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Отмена</Button>
-          <Button onClick={handleCreate} disabled={!name || !categoryId}>Создать</Button>
+          <Button onClick={handleCreate} disabled={creating || !name || !categoryId}>
+            {creating && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            Создать
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
