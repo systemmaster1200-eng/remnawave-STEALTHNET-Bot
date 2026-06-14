@@ -76,6 +76,7 @@ services:
       start_period: 600s
     networks:
       - stealthnet
+      - remnawave-network
 
   # ── Telegram Bot ────────────────────────────────────────────────
   bot:
@@ -152,3 +153,5 @@ volumes:
 networks:
   stealthnet:
     driver: bridge
+  remnawave-network:
+    external: true
