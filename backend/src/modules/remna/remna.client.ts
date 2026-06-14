@@ -14,9 +14,14 @@ export function isRemnaConfigured(): boolean {
 }
 
 function getHeaders(): Record<string, string> {
+  let fwdHost = "";
+  try { fwdHost = new URL(REMNA_API_URL).hostname; } catch { fwdHost = "localhost"; }
   const h: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${REMNA_ADMIN_TOKEN}`,
+    "X-Forwarded-For": "127.0.0.1",
+    "X-Forwarded-Proto": "https",
+    "X-Forwarded-Host": fwdHost,
   };
   if (REMNA_SECRET_KEY) {
     const colonIdx = REMNA_SECRET_KEY.indexOf(":");
