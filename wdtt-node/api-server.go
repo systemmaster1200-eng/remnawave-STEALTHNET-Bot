@@ -231,6 +231,7 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		Ports:     ports,
 	}
 	saveDB()
+	restartWdttServer()
 
 	wdttLink := buildWdttLink(password, vkHash)
 
@@ -278,6 +279,7 @@ func handleDeleteKey(w http.ResponseWriter, r *http.Request) {
 
 	delete(db.Passwords, password)
 	saveDB()
+	restartWdttServer()
 
 	log.Printf("[API] Revoked key: %s", password)
 
