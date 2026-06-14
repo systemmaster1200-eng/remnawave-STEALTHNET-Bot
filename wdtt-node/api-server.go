@@ -18,7 +18,6 @@ import (
 	"time"
 )
 
-// Database matches the WDTT server's passwords.json format
 type Database struct {
 	MainPassword string                    `json:"main_password"`
 	AdminID      string                    `json:"admin_id"`
@@ -45,11 +44,12 @@ type ClientDevice struct {
 }
 
 var (
-	db      *Database
-	dbMutex sync.Mutex
-	dbFile  string
+	db       *Database
+	dbMutex  sync.Mutex
+	dbFile   string
 	serverIP string
-	wdttPorts string // "56000,56001,9000"
+	wdttPorts string
+	defaultVkHash string
 )
 
 const (
@@ -100,15 +100,19 @@ func saveDB() {
 	os.WriteFile(dbFile, data, 0600)
 }
 
+// Restart the WDTT server process by sending SIGTERM to the parent start.sh
+// which will restart it via the restart loop
 func restartWdttServer() {
 	log.Println("[API] Restarting WDTT server...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "kill", "-HUP", "1")
+
+	// Find and kill wdtt-server process
+	cmd := exec.Command("pkill", "-SIGTERM", "wdtt-server")
 	cmd.Run()
-	// Alternative: use systemctl if available
-	cmd2 := exec.CommandContext(ctx, "killall", "-HUP", "wdtt-server")
-	cmd2.Run()
+
+	// Wait a moment for the process to die
+	time.Sleep(2 * time.Second)
+
+	log.Println("[API] WDTT server restarted")
 }
 
 func getPublicIP() string {
@@ -135,6 +139,9 @@ func buildWdttLink(password, vkHash string) string {
 		dtlsPort = strings.TrimSpace(parts[0])
 		wgPort = strings.TrimSpace(parts[1])
 		tunPort = strings.TrimSpace(parts[2])
+	}
+	if vkHash == "" {
+		vkHash = defaultVkHash
 	}
 	return fmt.Sprintf("wdtt://%s:%s:%s:%s:%s:%s", getPublicIP(), dtlsPort, wgPort, tunPort, password, vkHash)
 }
@@ -172,8 +179,9 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Password         string `json:"password"`
+		Password          string `json:"password"`
 		TrafficLimitBytes string `json:"traffic_limit_bytes"`
+		VkHash            string `json:"vk_hash"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
@@ -200,12 +208,27 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 
 	// Check if password already exists
 	if _, exists := db.Passwords[password]; exists {
-		http.Error(w, `{"error":"password already exists"}`, 409)
+		// Password exists — return its info (idempotent)
+		entry := db.Passwords[password]
+		vkHash := entry.VkHash
+		if vkHash == "" {
+			vkHash = defaultVkHash
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"password":  password,
+			"vk_hash":   vkHash,
+			"wdtt_link": buildWdttLink(password, vkHash),
+			"expires_at": time.Unix(entry.ExpiresAt, 0).Format(time.RFC3339),
+		})
 		return
 	}
 
-	// Parse VK hash from request or use default
-	vkHash := ""
+	// Use provided VK hash or default
+	vkHash := req.VkHash
+	if vkHash == "" {
+		vkHash = defaultVkHash
+	}
 	ports := wdttPorts
 
 	// Create password entry (expires in 30 days by default)
@@ -219,10 +242,7 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 
 	wdttLink := buildWdttLink(password, vkHash)
 
-	// Restart server to pick up changes
-	go restartWdttServer()
-
-	log.Printf("[API] Created key: %s (expires: %s)", password, time.Unix(expiresAt, 0).Format("2006-01-02"))
+	log.Printf("[API] Created key: %s (vk_hash: %s, expires: %s)", password, vkHash[:min(8, len(vkHash))], time.Unix(expiresAt, 0).Format("2006-01-02"))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(201)
@@ -232,6 +252,13 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		"wdtt_link": wdttLink,
 		"expires_at": time.Unix(expiresAt, 0).Format(time.RFC3339),
 	})
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // DELETE /api/keys/:password - Revoke a key
@@ -259,9 +286,6 @@ func handleDeleteKey(w http.ResponseWriter, r *http.Request) {
 
 	delete(db.Passwords, password)
 	saveDB()
-
-	// Restart server to pick up changes
-	go restartWdttServer()
 
 	log.Printf("[API] Revoked key: %s", password)
 
@@ -294,16 +318,20 @@ func handleListKeys(w http.ResponseWriter, r *http.Request) {
 	keys := make([]map[string]interface{}, 0)
 	for password, entry := range db.Passwords {
 		isExpired := entry.ExpiresAt > 0 && time.Now().Unix() > entry.ExpiresAt
+		vkHash := entry.VkHash
+		if vkHash == "" {
+			vkHash = defaultVkHash
+		}
 		keys = append(keys, map[string]interface{}{
-			"password":      password,
-			"vk_hash":       entry.VkHash,
-			"expires_at":    time.Unix(entry.ExpiresAt, 0).Format(time.RFC3339),
-			"is_expired":    isExpired,
+			"password":       password,
+			"vk_hash":        vkHash,
+			"expires_at":     time.Unix(entry.ExpiresAt, 0).Format(time.RFC3339),
+			"is_expired":     isExpired,
 			"is_deactivated": entry.IsDeactivated,
-			"device_id":     entry.DeviceID,
-			"down_bytes":    entry.DownBytes,
-			"up_bytes":      entry.UpBytes,
-			"wdtt_link":     buildWdttLink(password, entry.VkHash),
+			"device_id":      entry.DeviceID,
+			"down_bytes":     entry.DownBytes,
+			"up_bytes":       entry.UpBytes,
+			"wdtt_link":      buildWdttLink(password, vkHash),
 		})
 	}
 
@@ -331,9 +359,15 @@ func main() {
 	}
 
 	serverIP = os.Getenv("PUBLIC_HOST")
+	defaultVkHash = os.Getenv("VK_HASH")
 
 	loadDB()
 	log.Printf("[API] Loaded %d passwords from %s", len(db.Passwords), dbFile)
+	if defaultVkHash != "" {
+		log.Printf("[API] Default VK hash: %s...", defaultVkHash[:min(12, len(defaultVkHash))])
+	} else {
+		log.Printf("[API] WARNING: No VK_HASH set. wdtt:// links may not work without VK hash.")
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/keys", handleCreateKey)
