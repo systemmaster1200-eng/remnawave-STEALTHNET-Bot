@@ -7591,6 +7591,8 @@ for (const b of botInstances) {
   console.log(`[Bot] Starting long polling...`);
   b.start({
     drop_pending_updates: false,
+    timeout: 5,
+    limit: 100,
     onStart: (info) => console.log(`[Bot] ✅ Bot @${info.username} started`),
   }).catch((err) => console.error("[Bot] start failed:", err));
 }
