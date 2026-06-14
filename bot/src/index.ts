@@ -7608,6 +7608,9 @@ let offset = 0;
 (async () => {
   for (const b of botInstances) {
     const bToken = b.token;
+    console.log(`[Bot] Initializing bot ${bToken.slice(0, 6)}…`);
+    await b.init();
+    console.log(`[Bot] Bot initialized: @${b.botInfo?.username ?? "?"}`);
     console.log(`[Bot] Polling for ${bToken.slice(0, 6)}…`);
     while (true) {
       try {
