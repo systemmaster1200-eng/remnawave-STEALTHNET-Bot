@@ -7637,42 +7637,4 @@ let offset = 0;
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
-})().catch((err) => console.error("[Bot] Fatal:", err));
-  } catch (e) {
-    console.error(`[Bot] ❌ Mirror unreachable:`, e);
-  }
-
-  (async function poll() {
-    while (true) {
-      try {
-        const url = `${tgUrl}/bot${token}/getUpdates?timeout=1&offset=${offset}`;
-        const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
-        const data = await res.json() as { ok: boolean; result?: Array<any> };
-        if (!data.ok) {
-          console.error("[Bot] getUpdates failed:", JSON.stringify(data));
-          await new Promise((r) => setTimeout(r, 2000));
-          continue;
-        }
-        const updates = data.result ?? [];
-        if (updates.length > 0) {
-          console.log(`[Bot] Received ${updates.length} update(s)`);
-        }
-        for (const update of updates) {
-          try {
-            await b.handleUpdate(update);
-          } catch (err) {
-            console.error(`[Bot] Update ${update.update_id} handler error:`, err);
-          }
-          offset = update.update_id + 1;
-        }
-      } catch (err) {
-        if ((err as Error).name === "TimeoutError" || (err as Error).message?.includes("timeout")) {
-          // timeout это нормально для long polling
-        } else {
-          console.error("[Bot] Poll fetch error:", (err as Error).message);
-        }
-      }
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  })().catch((err) => console.error("[Bot] Poll loop error:", err));
-}
+  })().catch((err) => console.error("[Bot] Fatal:", err));
