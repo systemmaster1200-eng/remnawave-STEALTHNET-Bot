@@ -24,6 +24,7 @@ services:
       - PUBLIC_HOST=${PUBLIC_HOST:-}
       # API ключ для авторизации запросов от STEALTHNET
       - API_KEY=${API_KEY:-}
+      - VK_HASH=${VK_HASH:-}
     volumes:
       # Данные сервера (ключи, пароли, конфиги)
       - wdtt-data:/etc/wdtt
