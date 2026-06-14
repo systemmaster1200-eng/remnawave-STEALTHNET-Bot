@@ -7604,7 +7604,8 @@ for (const b of botInstances) {
         console.error("[Bot] Failed to load config:", e);
       }
     },
-    drop_pending_updates: true,
+    drop_pending_updates: false,
+    timeout: 5,
   }).catch((err) => {
     console.error("[Bot] ❌ start() failed:", err);
   });
