@@ -1125,7 +1125,6 @@ model Subscription {
   tariff          Tariff?    @relation("SubscriptionTariff", fields: [tariffId], references: [id], onDelete: SetNull)
   autoRenewTariff Tariff?    @relation("SubscriptionAutoRenewTariff", fields: [autoRenewTariffId], references: [id], onDelete: SetNull)
   trial           Trial?     @relation(fields: [trialId], references: [id], onDelete: SetNull)
-  giftCodes       GiftCode[] @relation("SubscriptionGiftCodes")
   payments        Payment[]  @relation("PaymentSubscription")
 
   @@unique([ownerId, subscriptionIndex])
