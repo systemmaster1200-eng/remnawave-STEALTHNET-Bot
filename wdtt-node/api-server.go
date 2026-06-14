@@ -171,79 +171,31 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Password          string `json:"password"`
-		TrafficLimitBytes string `json:"traffic_limit_bytes"`
-		VkHash            string `json:"vk_hash"`
+		VkHash string `json:"vk_hash"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
-	dbMutex.Lock()
-	defer dbMutex.Unlock()
-
-	loadDB()
-
-	// Generate password if not provided
-	password := req.Password
+	// Используем main password — он всегда работает без перезапуска сервера
+	password := os.Getenv("MAIN_PASSWORD")
 	if password == "" {
-		for i := 0; i < 10; i++ {
-			candidate := generatePassword()
-			if _, exists := db.Passwords[candidate]; !exists {
-				password = candidate
-				break
-			}
-		}
-		if password == "" {
-			http.Error(w, `{"error":"failed to generate unique password"}`, 500)
-			return
-		}
-	}
-
-	// Check if password already exists
-	if _, exists := db.Passwords[password]; exists {
-		// Password exists — return its info (idempotent)
-		entry := db.Passwords[password]
-		vkHash := entry.VkHash
-		if vkHash == "" {
-			vkHash = defaultVkHash
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"password":  password,
-			"vk_hash":   vkHash,
-			"wdtt_link": buildWdttLink(password, vkHash),
-			"expires_at": time.Unix(entry.ExpiresAt, 0).Format(time.RFC3339),
-		})
+		http.Error(w, `{"error":"MAIN_PASSWORD not set"}`, 500)
 		return
 	}
 
-	// Use provided VK hash or default
 	vkHash := req.VkHash
 	if vkHash == "" {
 		vkHash = defaultVkHash
 	}
-	ports := wdttPorts
-
-	// Create password entry (expires in 30 days by default)
-	expiresAt := time.Now().Add(30 * 24 * time.Hour).Unix()
-	db.Passwords[password] = &PasswordEntry{
-		ExpiresAt: expiresAt,
-		VkHash:    vkHash,
-		Ports:     ports,
-	}
-	saveDB()
-	restartWdttServer()
 
 	wdttLink := buildWdttLink(password, vkHash)
-
-	log.Printf("[API] Created key: %s (vk_hash: %s, expires: %s)", password, vkHash[:min(8, len(vkHash))], time.Unix(expiresAt, 0).Format("2006-01-02"))
+	log.Printf("[API] Key created for client (vk_hash: %s)", vkHash[:min(8, len(vkHash))])
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(201)
+	w.WriteHeader(200)
 	json.NewEncoder(w).Encode(map[string]string{
 		"password":  password,
 		"vk_hash":   vkHash,
 		"wdtt_link": wdttLink,
-		"expires_at": time.Unix(expiresAt, 0).Format(time.RFC3339),
 	})
 }
 
@@ -279,7 +231,6 @@ func handleDeleteKey(w http.ResponseWriter, r *http.Request) {
 
 	delete(db.Passwords, password)
 	saveDB()
-	restartWdttServer()
 
 	log.Printf("[API] Revoked key: %s", password)
 
