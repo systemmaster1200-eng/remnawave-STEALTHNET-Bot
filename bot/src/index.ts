@@ -106,6 +106,8 @@ async function waitForApi(maxRetries = 10, delayMs = 3000): Promise<Awaited<Retu
 }
 
 async function createBotWithProxy(token: string): Promise<Bot> {
+  const tgApiUrl = (process.env.TELEGRAM_API_URL || "").replace(/\/$/, "");
+
   try {
     console.log("[Bot] Checking API config for proxy...");
     const cfg = await waitForApi();
@@ -116,6 +118,7 @@ async function createBotWithProxy(token: string): Promise<Bot> {
         console.log("[Proxy] Telegram Bot API через HTTP прокси");
         return new Bot(token, {
           client: { baseFetchConfig: { dispatcher: new UndiciProxyAgent(url) } as any },
+          ...(tgApiUrl ? { client: { root: tgApiUrl } as any } : {}),
         });
       }
       if (lower.startsWith("socks5://") || lower.startsWith("socks4://") || lower.startsWith("socks://")) {
@@ -123,6 +126,7 @@ async function createBotWithProxy(token: string): Promise<Bot> {
         const agent = new SocksProxyAgent(url);
         return new Bot(token, {
           client: { baseFetchConfig: { agent } as any },
+          ...(tgApiUrl ? { client: { root: tgApiUrl } as any } : {}),
         });
       }
       console.warn(`[Proxy] Неизвестный протокол прокси: ${url}, запуск без прокси`);
@@ -130,6 +134,12 @@ async function createBotWithProxy(token: string): Promise<Bot> {
   } catch {
     console.warn("[Bot] Не удалось получить конфиг, запуск без прокси");
   }
+
+  if (tgApiUrl) {
+    console.log(`[Bot] Telegram API mirror: ${tgApiUrl}`);
+    return new Bot(token, { client: { root: tgApiUrl } as any });
+  }
+
   return new Bot(token);
 }
 

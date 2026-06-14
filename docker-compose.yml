@@ -87,6 +87,7 @@ services:
     environment:
       BOT_TOKEN: "${BOT_TOKEN:-}"
       API_URL: "http://api:5000"
+      TELEGRAM_API_URL: "${TELEGRAM_API_URL:-}"
     depends_on:
       api:
         condition: service_healthy
