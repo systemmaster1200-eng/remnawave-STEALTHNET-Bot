@@ -1,3 +1,11 @@
 node_modules/
 backend/dist/
 frontend/dist/
+.env
+.env.local
+.env.*.local
+backend/.env
+bot/.env
+frontend/.env.local
+.codex-*
+**/.codex-*
