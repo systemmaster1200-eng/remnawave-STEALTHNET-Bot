@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { motion } from "framer-motion";
 import { LogIn, Shield, Loader2 } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
 import { api } from "@/lib/api";
@@ -425,12 +424,7 @@ export function ClientLoginPage() {
       {/* Background blobs */}
       <div className="absolute -top-40 -left-40 w-96 h-96 rounded-full bg-primary/20 blur-[120px] pointer-events-none" />
       <div className="absolute -bottom-40 -right-40 w-96 h-96 rounded-full bg-primary/10 blur-[120px] pointer-events-none" />
-      <motion.div
-        initial={{ opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3 }}
-        className="w-full max-w-md"
-      >
+      <div className="w-full max-w-md animate-in fade-in slide-in-from-bottom-3 duration-300">
         <div className="flex items-center justify-center gap-2 mb-6 min-h-[2.5rem]">
           {brand.logo ? (
             <span className="flex items-center justify-center h-11 px-3">
@@ -577,7 +571,7 @@ export function ClientLoginPage() {
         
           </div>
         </div>
-      </motion.div>
+      </div>
     </div>
   );
 }

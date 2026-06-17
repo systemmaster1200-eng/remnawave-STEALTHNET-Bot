@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
-import { motion } from "framer-motion";
 import { Mail, Shield, Loader2 } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -32,11 +31,7 @@ export function ClientVerifyEmailPage() {
 
   return (
     <div className="min-h-svh flex flex-col items-center justify-center bg-gradient-to-b from-background to-muted/20 p-4">
-      <motion.div
-        initial={{ opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="w-full max-w-md"
-      >
+      <div className="w-full max-w-md animate-in fade-in slide-in-from-bottom-3 duration-300">
         <div className="flex items-center justify-center gap-2 mb-6">
           <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
             <Shield className="h-6 w-6" />
@@ -66,7 +61,7 @@ export function ClientVerifyEmailPage() {
             )}
           </CardContent>
         </Card>
-      </motion.div>
+      </div>
     </div>
   );
 }

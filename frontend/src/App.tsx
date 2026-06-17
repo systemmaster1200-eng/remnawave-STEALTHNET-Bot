@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 
 const routerFutureFlags = {
@@ -9,85 +9,156 @@ import { AuthProvider, useAuth } from "@/contexts/auth";
 import { ClientAuthProvider, useClientAuth } from "@/contexts/client-auth";
 import { ThemeProvider } from "@/contexts/theme";
 import { AnimatedBackground } from "@/components/animated-background";
-import { PwaUpdatePrompt } from "@/components/pwa/pwa-update-prompt";
 import { api } from "@/lib/api";
-import { LoginPage } from "@/pages/login";
-import { ChangePasswordPage } from "@/pages/change-password";
-import { DashboardPage } from "@/pages/dashboard";
-import { ClientsPage } from "@/pages/clients";
-import { TariffsPage } from "@/pages/tariffs";
-import { TrialsPage } from "@/pages/trials"; // T15 (11.05.2026)
-import { WithdrawalsPage } from "@/pages/withdrawals"; // T6 (11.05.2026)
-import { AutoRenewPage } from "@/pages/auto-renew"; // T-autorenew (12.05.2026)
-import { SettingsPage } from "@/pages/settings";
-import { LandingEditorPage } from "@/pages/landing-editor";
-import { LandingPreviewPage } from "@/pages/landing-preview";
-import { AdminAuditPage } from "@/pages/admin-audit";
-import { AdminWebhookInboxPage } from "@/pages/admin-webhook-inbox";
-import { AdminDiagnosticsPage } from "@/pages/admin-diagnostics";
-import { AdminBusinessAnalyticsPage } from "@/pages/admin-business-analytics";
-import { AdminAntiFraudPage } from "@/pages/admin-anti-fraud";
-import { AdminEmailTemplatesPage } from "@/pages/admin-email-templates";
-import { AdminBotMessagesPage } from "@/pages/admin-bot-messages";
-import { AdminBotConversationsPage } from "@/pages/admin-bot-conversations";
-import { CmdKPalette } from "@/components/cmd-k-palette";
-import { PromoPage } from "@/pages/promo";
-import { PromoCodesPage } from "@/pages/promo-codes";
-import { AnalyticsPage } from "@/pages/analytics";
-import { MarketingPage } from "@/pages/marketing";
-import { AdminsPage } from "@/pages/admins";
-import { SalesReportPage } from "@/pages/sales-report";
-import { BalanceSalesPage } from "@/pages/balance-sales";
-import { VideoInstructionsPage } from "@/pages/video-instructions";
-import { BackupPage } from "@/pages/backup";
-import { ContestsPage } from "@/pages/contests";
-import { AdminTicketsPage } from "@/pages/admin-tickets";
-import { BroadcastPage } from "@/pages/broadcast";
-import { AutoBroadcastPage } from "@/pages/auto-broadcast";
-import { ReferralNetworkPage } from "@/pages/referral-network";
-import { AdminReferralsPage } from "@/pages/admin-referrals";
-import { GramadsPromoPage } from "@/pages/gramads-promo";
-import { TrafficAbusePage } from "@/pages/traffic-abuse";
-import { ApiKeysPage } from "@/pages/api-keys";
-import { AntibotPage } from "@/pages/antibot";
-import { ApiDocsPage } from "@/pages/api-docs";
-import { GeoMapPage } from "@/pages/geo-map";
-import { AdminSecondarySubscriptionsPage } from "@/pages/admin-secondary-subscriptions";
-import { ProxyPage } from "@/pages/proxy";
-import { SingboxPage } from "@/pages/singbox";
-import { WdttPage } from "@/pages/wdtt";
-import LanguagesPage from "@/pages/languages";
-import { TourConstructorPage } from "@/pages/tour-constructor";
-import { MarketplaceLayout } from "@/pages/marketplace/marketplace-layout";
-import { MarketplaceBrowsePage } from "@/pages/marketplace/marketplace-browse";
-import { MarketplaceMyListingsPage } from "@/pages/marketplace/marketplace-my";
-import { MarketplaceEditListingPage } from "@/pages/marketplace/marketplace-edit";
-import { MarketplaceHubInstallationsPage } from "@/pages/marketplace/marketplace-hub-installations";
-import { MarketplaceHubReportsPage } from "@/pages/marketplace/marketplace-hub-reports";
-import { MarketplaceHubCategoriesPage } from "@/pages/marketplace/marketplace-hub-categories";
-import { DashboardLayout } from "@/components/layout/dashboard-layout";
-import { CabinetLayout } from "@/pages/cabinet/cabinet-layout";
-import { ClientLoginPage } from "@/pages/cabinet/client-login";
-import { ClientRegisterPage } from "@/pages/cabinet/client-register";
-import { ClientOnboardingPage } from "@/pages/cabinet/client-onboarding";
-import { ClientVerifyEmailPage } from "@/pages/cabinet/client-verify-email";
-import { ClientVerifyLinkEmailPage } from "@/pages/cabinet/client-verify-link-email";
-import { ClientDashboardPage } from "@/pages/cabinet/client-dashboard";
-import { ClientTariffsPage } from "@/pages/cabinet/client-tariffs";
-import { ClientProfilePage } from "@/pages/cabinet/client-profile";
-import { ClientReferralPage } from "@/pages/cabinet/client-referral";
-import { ClientSubscribePage } from "@/pages/cabinet/client-subscribe";
-import { ClientYooMoneyPayPage } from "@/pages/cabinet/client-yoomoney-pay";
-import { ClientExtraOptionsPage } from "@/pages/cabinet/client-extra-options";
-import { ClientProxyPage } from "@/pages/cabinet/client-proxy";
-import { ClientSingboxPage } from "@/pages/cabinet/client-singbox";
-import { ClientWdttPage } from "@/pages/cabinet/client-wdtt";
-import { ClientTicketsPage } from "@/pages/cabinet/client-tickets";
-import { ClientCustomBuildPage } from "@/pages/cabinet/client-custom-build";
-import { ClientGiftsPage } from "@/pages/cabinet/client-gifts";
-import { GiftActivatePage } from "@/pages/gift-activate";
-import { LandingPage } from "@/pages/landing";
 import type { PublicConfig } from "@/lib/api";
+
+const LoginPage = lazy(() => import("@/pages/login").then((m) => ({ default: m.LoginPage })));
+const ChangePasswordPage = lazy(() => import("@/pages/change-password").then((m) => ({ default: m.ChangePasswordPage })));
+const DashboardPage = lazy(() => import("@/pages/dashboard").then((m) => ({ default: m.DashboardPage })));
+const ClientsPage = lazy(() => import("@/pages/clients").then((m) => ({ default: m.ClientsPage })));
+const TariffsPage = lazy(() => import("@/pages/tariffs").then((m) => ({ default: m.TariffsPage })));
+const TrialsPage = lazy(() => import("@/pages/trials").then((m) => ({ default: m.TrialsPage })));
+const WithdrawalsPage = lazy(() => import("@/pages/withdrawals").then((m) => ({ default: m.WithdrawalsPage })));
+const AutoRenewPage = lazy(() => import("@/pages/auto-renew").then((m) => ({ default: m.AutoRenewPage })));
+const SettingsPage = lazy(() => import("@/pages/settings").then((m) => ({ default: m.SettingsPage })));
+const LandingEditorPage = lazy(() => import("@/pages/landing-editor").then((m) => ({ default: m.LandingEditorPage })));
+const LandingPreviewPage = lazy(() => import("@/pages/landing-preview").then((m) => ({ default: m.LandingPreviewPage })));
+const AdminAuditPage = lazy(() => import("@/pages/admin-audit").then((m) => ({ default: m.AdminAuditPage })));
+const AdminWebhookInboxPage = lazy(() => import("@/pages/admin-webhook-inbox").then((m) => ({ default: m.AdminWebhookInboxPage })));
+const AdminDiagnosticsPage = lazy(() => import("@/pages/admin-diagnostics").then((m) => ({ default: m.AdminDiagnosticsPage })));
+const AdminBusinessAnalyticsPage = lazy(() => import("@/pages/admin-business-analytics").then((m) => ({ default: m.AdminBusinessAnalyticsPage })));
+const AdminAntiFraudPage = lazy(() => import("@/pages/admin-anti-fraud").then((m) => ({ default: m.AdminAntiFraudPage })));
+const AdminEmailTemplatesPage = lazy(() => import("@/pages/admin-email-templates").then((m) => ({ default: m.AdminEmailTemplatesPage })));
+const AdminBotMessagesPage = lazy(() => import("@/pages/admin-bot-messages").then((m) => ({ default: m.AdminBotMessagesPage })));
+const AdminBotConversationsPage = lazy(() => import("@/pages/admin-bot-conversations").then((m) => ({ default: m.AdminBotConversationsPage })));
+const CmdKPalette = lazy(() => import("@/components/cmd-k-palette").then((m) => ({ default: m.CmdKPalette })));
+const PromoPage = lazy(() => import("@/pages/promo").then((m) => ({ default: m.PromoPage })));
+const PromoCodesPage = lazy(() => import("@/pages/promo-codes").then((m) => ({ default: m.PromoCodesPage })));
+const AnalyticsPage = lazy(() => import("@/pages/analytics").then((m) => ({ default: m.AnalyticsPage })));
+const MarketingPage = lazy(() => import("@/pages/marketing").then((m) => ({ default: m.MarketingPage })));
+const AdminsPage = lazy(() => import("@/pages/admins").then((m) => ({ default: m.AdminsPage })));
+const SalesReportPage = lazy(() => import("@/pages/sales-report").then((m) => ({ default: m.SalesReportPage })));
+const BalanceSalesPage = lazy(() => import("@/pages/balance-sales").then((m) => ({ default: m.BalanceSalesPage })));
+const VideoInstructionsPage = lazy(() => import("@/pages/video-instructions").then((m) => ({ default: m.VideoInstructionsPage })));
+const BackupPage = lazy(() => import("@/pages/backup").then((m) => ({ default: m.BackupPage })));
+const ContestsPage = lazy(() => import("@/pages/contests").then((m) => ({ default: m.ContestsPage })));
+const AdminTicketsPage = lazy(() => import("@/pages/admin-tickets").then((m) => ({ default: m.AdminTicketsPage })));
+const BroadcastPage = lazy(() => import("@/pages/broadcast").then((m) => ({ default: m.BroadcastPage })));
+const AutoBroadcastPage = lazy(() => import("@/pages/auto-broadcast").then((m) => ({ default: m.AutoBroadcastPage })));
+const ReferralNetworkPage = lazy(() => import("@/pages/referral-network").then((m) => ({ default: m.ReferralNetworkPage })));
+const AdminReferralsPage = lazy(() => import("@/pages/admin-referrals").then((m) => ({ default: m.AdminReferralsPage })));
+const GramadsPromoPage = lazy(() => import("@/pages/gramads-promo").then((m) => ({ default: m.GramadsPromoPage })));
+const TrafficAbusePage = lazy(() => import("@/pages/traffic-abuse").then((m) => ({ default: m.TrafficAbusePage })));
+const ApiKeysPage = lazy(() => import("@/pages/api-keys").then((m) => ({ default: m.ApiKeysPage })));
+const AntibotPage = lazy(() => import("@/pages/antibot").then((m) => ({ default: m.AntibotPage })));
+const ApiDocsPage = lazy(() => import("@/pages/api-docs").then((m) => ({ default: m.ApiDocsPage })));
+const GeoMapPage = lazy(() => import("@/pages/geo-map").then((m) => ({ default: m.GeoMapPage })));
+const AdminSecondarySubscriptionsPage = lazy(() => import("@/pages/admin-secondary-subscriptions").then((m) => ({ default: m.AdminSecondarySubscriptionsPage })));
+const ProxyPage = lazy(() => import("@/pages/proxy").then((m) => ({ default: m.ProxyPage })));
+const SingboxPage = lazy(() => import("@/pages/singbox").then((m) => ({ default: m.SingboxPage })));
+const WdttPage = lazy(() => import("@/pages/wdtt").then((m) => ({ default: m.WdttPage })));
+const LanguagesPage = lazy(() => import("@/pages/languages"));
+const TourConstructorPage = lazy(() => import("@/pages/tour-constructor").then((m) => ({ default: m.TourConstructorPage })));
+const MarketplaceLayout = lazy(() => import("@/pages/marketplace/marketplace-layout").then((m) => ({ default: m.MarketplaceLayout })));
+const MarketplaceBrowsePage = lazy(() => import("@/pages/marketplace/marketplace-browse").then((m) => ({ default: m.MarketplaceBrowsePage })));
+const MarketplaceMyListingsPage = lazy(() => import("@/pages/marketplace/marketplace-my").then((m) => ({ default: m.MarketplaceMyListingsPage })));
+const MarketplaceEditListingPage = lazy(() => import("@/pages/marketplace/marketplace-edit").then((m) => ({ default: m.MarketplaceEditListingPage })));
+const MarketplaceHubInstallationsPage = lazy(() => import("@/pages/marketplace/marketplace-hub-installations").then((m) => ({ default: m.MarketplaceHubInstallationsPage })));
+const MarketplaceHubReportsPage = lazy(() => import("@/pages/marketplace/marketplace-hub-reports").then((m) => ({ default: m.MarketplaceHubReportsPage })));
+const MarketplaceHubCategoriesPage = lazy(() => import("@/pages/marketplace/marketplace-hub-categories").then((m) => ({ default: m.MarketplaceHubCategoriesPage })));
+const DashboardLayout = lazy(() => import("@/components/layout/dashboard-layout").then((m) => ({ default: m.DashboardLayout })));
+const CabinetLayout = lazy(() => import("@/pages/cabinet/cabinet-layout").then((m) => ({ default: m.CabinetLayout })));
+const ClientLoginPage = lazy(() => import("@/pages/cabinet/client-login").then((m) => ({ default: m.ClientLoginPage })));
+const ClientRegisterPage = lazy(() => import("@/pages/cabinet/client-register").then((m) => ({ default: m.ClientRegisterPage })));
+const ClientOnboardingPage = lazy(() => import("@/pages/cabinet/client-onboarding").then((m) => ({ default: m.ClientOnboardingPage })));
+const ClientVerifyEmailPage = lazy(() => import("@/pages/cabinet/client-verify-email").then((m) => ({ default: m.ClientVerifyEmailPage })));
+const ClientVerifyLinkEmailPage = lazy(() => import("@/pages/cabinet/client-verify-link-email").then((m) => ({ default: m.ClientVerifyLinkEmailPage })));
+const ClientDashboardPage = lazy(() => import("@/pages/cabinet/client-dashboard").then((m) => ({ default: m.ClientDashboardPage })));
+const ClientTariffsPage = lazy(() => import("@/pages/cabinet/client-tariffs").then((m) => ({ default: m.ClientTariffsPage })));
+const ClientProfilePage = lazy(() => import("@/pages/cabinet/client-profile").then((m) => ({ default: m.ClientProfilePage })));
+const ClientReferralPage = lazy(() => import("@/pages/cabinet/client-referral").then((m) => ({ default: m.ClientReferralPage })));
+const ClientSubscribePage = lazy(() => import("@/pages/cabinet/client-subscribe").then((m) => ({ default: m.ClientSubscribePage })));
+const ClientYooMoneyPayPage = lazy(() => import("@/pages/cabinet/client-yoomoney-pay").then((m) => ({ default: m.ClientYooMoneyPayPage })));
+const ClientExtraOptionsPage = lazy(() => import("@/pages/cabinet/client-extra-options").then((m) => ({ default: m.ClientExtraOptionsPage })));
+const ClientProxyPage = lazy(() => import("@/pages/cabinet/client-proxy").then((m) => ({ default: m.ClientProxyPage })));
+const ClientSingboxPage = lazy(() => import("@/pages/cabinet/client-singbox").then((m) => ({ default: m.ClientSingboxPage })));
+const ClientWdttPage = lazy(() => import("@/pages/cabinet/client-wdtt").then((m) => ({ default: m.ClientWdttPage })));
+const ClientTicketsPage = lazy(() => import("@/pages/cabinet/client-tickets").then((m) => ({ default: m.ClientTicketsPage })));
+const ClientCustomBuildPage = lazy(() => import("@/pages/cabinet/client-custom-build").then((m) => ({ default: m.ClientCustomBuildPage })));
+const ClientGiftsPage = lazy(() => import("@/pages/cabinet/client-gifts").then((m) => ({ default: m.ClientGiftsPage })));
+const GiftActivatePage = lazy(() => import("@/pages/gift-activate").then((m) => ({ default: m.GiftActivatePage })));
+const LandingPage = lazy(() => import("@/pages/landing").then((m) => ({ default: m.LandingPage })));
+const PwaUpdatePrompt = lazy(() => import("@/components/pwa/pwa-update-prompt").then((m) => ({ default: m.PwaUpdatePrompt })));
+
+function LoadingScreen({ label = "Загрузка…" }: { label?: string }) {
+  return (
+    <div className="min-h-svh flex flex-col items-center justify-center gap-4 bg-gradient-to-b from-background to-muted/20">
+      <div className="h-10 w-10 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      <p className="text-muted-foreground">{label}</p>
+    </div>
+  );
+}
+
+function AdminShell() {
+  return (
+    <RequireAuth>
+      <>
+        <CmdKPalette />
+        <DashboardLayout />
+      </>
+    </RequireAuth>
+  );
+}
+
+function ClientGuestRoute({ children }: { children: React.ReactNode }) {
+  return <ClientAuthProvider>{children}</ClientAuthProvider>;
+}
+
+function ClientCabinetShell() {
+  return (
+    <ClientAuthProvider>
+      <CabinetLayout />
+    </ClientAuthProvider>
+  );
+}
+
+function IdlePwaUpdatePrompt() {
+  const [enabled, setEnabled] = useState(false);
+  const location = useLocation();
+  const isGuestRoute =
+    location.pathname === "/" ||
+    location.pathname === "/admin/login" ||
+    location.pathname === "/cabinet" ||
+    location.pathname === "/cabinet/login" ||
+    location.pathname === "/cabinet/register" ||
+    location.pathname.startsWith("/cabinet/verify") ||
+    location.pathname.startsWith("/gift/");
+
+  useEffect(() => {
+    if (isGuestRoute) {
+      setEnabled(false);
+      return;
+    }
+    const win = window as Window & {
+      requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const enable = () => setEnabled(true);
+    if (win.requestIdleCallback) {
+      const id = win.requestIdleCallback(enable, { timeout: 3000 });
+      return () => win.cancelIdleCallback?.(id);
+    }
+    const id = window.setTimeout(enable, 2500);
+    return () => window.clearTimeout(id);
+  }, [isGuestRoute]);
+
+  if (!enabled || isGuestRoute) return null;
+  return (
+    <Suspense fallback={null}>
+      <PwaUpdatePrompt />
+    </Suspense>
+  );
+}
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { state } = useAuth();
@@ -169,12 +240,7 @@ function RootRoute() {
   }, []);
 
   if (loading) {
-    return (
-      <div className="min-h-svh flex flex-col items-center justify-center gap-4 bg-gradient-to-b from-background to-muted/20">
-        <div className="h-10 w-10 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-        <p className="text-muted-foreground">Загрузка…</p>
-      </div>
-    );
+    return <LoadingScreen />;
   }
 
   if (config?.landingEnabled) {
@@ -194,7 +260,8 @@ function AppRoutes() {
   }, []);
 
   return (
-    <Routes>
+    <Suspense fallback={<LoadingScreen />}>
+      <Routes>
       {/* Главная: лендинг (если включён в настройках) или редирект в кабинет */}
       <Route path="/" element={<RootRoute />} />
 
@@ -210,14 +277,7 @@ function AppRoutes() {
       />
       <Route
         path="/admin"
-        element={
-          <RequireAuth>
-            <>
-              <CmdKPalette />
-              <DashboardLayout />
-            </>
-          </RequireAuth>
-        }
+        element={<AdminShell />}
       >
         <Route
           index
@@ -301,25 +361,29 @@ function AppRoutes() {
       <Route
         path="/gift/:code"
         element={
-          <ClientAuthProvider>
+          <ClientGuestRoute>
             <GiftActivatePage />
-          </ClientAuthProvider>
+          </ClientGuestRoute>
         }
       />
 
       <Route
         path="/cabinet"
         element={
-          <ClientAuthProvider>
-            <CabinetLayout />
-          </ClientAuthProvider>
+          <ClientGuestRoute>
+            <CabinetIndexRedirect />
+          </ClientGuestRoute>
         }
+      />
+      <Route path="/cabinet/login" element={<ClientGuestRoute><ClientLoginPage /></ClientGuestRoute>} />
+      <Route path="/cabinet/register" element={<ClientGuestRoute><ClientRegisterPage /></ClientGuestRoute>} />
+      <Route path="/cabinet/verify-email" element={<ClientGuestRoute><ClientVerifyEmailPage /></ClientGuestRoute>} />
+      <Route path="/cabinet/verify-link-email" element={<ClientGuestRoute><ClientVerifyLinkEmailPage /></ClientGuestRoute>} />
+
+      <Route
+        path="/cabinet"
+        element={<ClientCabinetShell />}
       >
-        <Route index element={<CabinetIndexRedirect />} />
-        <Route path="login" element={<ClientLoginPage />} />
-        <Route path="register" element={<ClientRegisterPage />} />
-        <Route path="verify-email" element={<ClientVerifyEmailPage />} />
-        <Route path="verify-link-email" element={<ClientVerifyLinkEmailPage />} />
         <Route
           path="dashboard"
           element={
@@ -427,7 +491,8 @@ function AppRoutes() {
       </Route>
       {/* Всё неизвестное тоже ведём в кабинет */}
       <Route path="*" element={<Navigate to="/cabinet" replace />} />
-    </Routes>
+      </Routes>
+    </Suspense>
   );
 }
 
@@ -438,7 +503,7 @@ function TitleAndThemeSync() {
   // Подтягиваем конфиг при смене маршрута (в т.ч. после сохранения настроек), чтобы favicon обновился
   useEffect(() => {
     api
-      .getPublicConfig()
+      .getPublicConfig(true)
       .then((cfg) => {
         setConfig({
           serviceName: cfg.serviceName ?? "",
@@ -547,7 +612,7 @@ export default function App() {
           <AnimatedBackground />
           <TitleAndThemeSync  />
           <AppRoutes />
-          <PwaUpdatePrompt />
+          <IdlePwaUpdatePrompt />
         </BrowserRouter>
       </AuthProvider>
     </ThemeProvider>

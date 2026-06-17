@@ -20,6 +20,26 @@ const ORBS: OrbConfig[] = [
   { x: 0.45, y: 0.40, r: 240, dx: 70,  dy: -60, dur: 30 },
 ];
 
+const LOW_POWER_ORBS = ORBS.slice(0, 3).map((orb) => ({
+  ...orb,
+  r: Math.round(orb.r * 0.75),
+  dx: Math.round(orb.dx * 0.55),
+  dy: Math.round(orb.dy * 0.55),
+  dur: Math.round(orb.dur * 1.4),
+}));
+
+function isGuestPath(pathname: string) {
+  return (
+    pathname === "/" ||
+    pathname === "/admin/login" ||
+    pathname === "/cabinet" ||
+    pathname === "/cabinet/login" ||
+    pathname === "/cabinet/register" ||
+    pathname.startsWith("/cabinet/verify") ||
+    pathname.startsWith("/gift/")
+  );
+}
+
 function hexToRgb(hex: string) {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
   return result ? {
@@ -33,16 +53,21 @@ export function AnimatedBackground({ variant = "fixed", intensity = "normal" }: 
   const { config, resolvedMode } = useTheme();
   const location = useLocation();
   if (location.pathname === "/admin" && variant === "fixed") return null;
+  const lowPower = variant === "fixed" && isGuestPath(location.pathname);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef<number>(0);
   const startRef = useRef<number>(0);
+  const lastDrawRef = useRef<number>(0);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    const activeOrbs = lowPower ? LOW_POWER_ORBS : ORBS;
+    const minFrameMs = lowPower ? 1000 / 18 : 1000 / 60;
 
     const resize = () => {
       if (variant === "fixed") {
@@ -68,7 +93,7 @@ export function AnimatedBackground({ variant = "fixed", intensity = "normal" }: 
     const bgColor = variant === "fixed" ? (isDark ? "#0a0a10" : "#f8fafc") : "transparent";
     
     // В светлой теме цвета более пастельные и прозрачные
-    const orbColors = ORBS.map((_, i) => {
+    const orbColors = activeOrbs.map((_, i) => {
       // Немного варьируем цвета орбов вокруг базового акцента
       const r = Math.min(255, Math.max(0, rgb.r + (i % 3 === 0 ? 30 : -20)));
       const g = Math.min(255, Math.max(0, rgb.g + (i % 2 === 0 ? 20 : -30)));
@@ -84,8 +109,18 @@ export function AnimatedBackground({ variant = "fixed", intensity = "normal" }: 
     });
 
     const draw = (ts: number) => {
+      if (document.hidden) {
+        frameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+      if (ts - lastDrawRef.current < minFrameMs) {
+        frameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+      lastDrawRef.current = ts;
+
       if (!startRef.current) startRef.current = ts;
-      const t = (ts - startRef.current) / 1000;
+      const t = reducedMotion ? 0 : (ts - startRef.current) / 1000;
       const W = canvas.width;
       const H = canvas.height;
 
@@ -96,8 +131,8 @@ export function AnimatedBackground({ variant = "fixed", intensity = "normal" }: 
       ctx.fillStyle = bgColor;
       ctx.fillRect(0, 0, W, H);
 
-      for (let i = 0; i < ORBS.length; i++) {
-        const o = ORBS[i];
+      for (let i = 0; i < activeOrbs.length; i++) {
+        const o = activeOrbs[i];
         const colors = orbColors[i];
         
         const phase = (t / o.dur) * Math.PI * 2;
@@ -125,7 +160,7 @@ export function AnimatedBackground({ variant = "fixed", intensity = "normal" }: 
       cancelAnimationFrame(frameRef.current);
       window.removeEventListener("resize", resize);
     };
-  }, [config.accent, resolvedMode]);
+  }, [config.accent, resolvedMode, lowPower, variant]);
 
   return (
     <div className={`${variant === "fixed" ? "fixed" : "absolute"} inset-0 ${variant === "fixed" ? "-z-50" : "z-0"} overflow-hidden ${intensity === "weak" ? "opacity-30" : ""}`} aria-hidden>

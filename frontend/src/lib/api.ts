@@ -6,6 +6,9 @@ export function setTokenRefreshFn(fn: (() => Promise<string | null>) | null) {
   tokenRefreshFn = fn;
 }
 
+let publicConfigCache: PublicConfig | null = null;
+let publicConfigPromise: Promise<PublicConfig> | null = null;
+
 // отчёт по массовой операции над клиентом.
 export interface BulkOpItem {
   subscriptionId: string;
@@ -1885,8 +1888,20 @@ export const api = {
     return request("/client/singbox-slots", { token });
   },
 
-  async getPublicConfig(): Promise<PublicConfig> {
-    return request("/public/config");
+  async getPublicConfig(forceRefresh = false): Promise<PublicConfig> {
+    if (!forceRefresh && publicConfigCache) return publicConfigCache;
+    if (forceRefresh) publicConfigPromise = null;
+    if (!publicConfigPromise) {
+      publicConfigPromise = request<PublicConfig>("/public/config")
+        .then((config) => {
+          publicConfigCache = config;
+          return config;
+        })
+        .finally(() => {
+          publicConfigPromise = null;
+        });
+    }
+    return publicConfigPromise;
   },
 
   /** Конфиг страницы подписки (приложения по платформам) для /cabinet/subscribe */

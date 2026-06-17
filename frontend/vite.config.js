@@ -98,9 +98,19 @@ export default defineConfig(({ mode }) => {
         }),
     ],
     build: {
+        modulePreload: {
+            resolveDependencies(_filename, deps) {
+                const lazyHeavyChunks = ["recharts-", "leaflet-", "force-graph-", "framer-", "cabinet-layout-"];
+                return deps.filter((dep) => !lazyHeavyChunks.some((chunk) => dep.includes(chunk)));
+            },
+        },
         rollupOptions: {
             output: {
                 manualChunks(id) {
+                    if (/src[/\\]lib[/\\](api|utils)\.ts$/.test(id)) return "app-core";
+                    if (/src[/\\]contexts[/\\](auth|client-auth|theme)\.tsx$/.test(id)) return "auth-core";
+                    if (/node_modules[/\\](react|react-dom|scheduler|use-sync-external-store)[/\\]/.test(id)) return "react-vendor";
+                    if (/node_modules[/\\](react-router|react-router-dom)[/\\]/.test(id)) return "router-vendor";
                     if (id.includes("node_modules/leaflet") || id.includes("node_modules/react-leaflet") || id.includes("node_modules/@react-leaflet")) return "leaflet";
                     if (id.includes("node_modules/recharts") || id.includes("node_modules/d3-")) return "recharts";
                     if (id.includes("node_modules/react-force-graph")) return "force-graph";

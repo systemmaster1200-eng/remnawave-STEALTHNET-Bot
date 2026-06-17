@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { motion } from "framer-motion";
 import { Shield, KeyRound, Loader2 } from "lucide-react";
 import { useAuth } from "@/contexts/auth";
 import { api } from "@/lib/api";
@@ -71,12 +70,7 @@ export function LoginPage() {
 
   return (
     <div className="min-h-svh flex items-center justify-center p-4">
-      <motion.div
-        initial={{ opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3 }}
-        className="w-full max-w-md relative z-10"
-      >
+      <div className="w-full max-w-md relative z-10 animate-in fade-in slide-in-from-bottom-3 duration-300">
         <Card className="border-border/50 shadow-2xl">
           <CardHeader className="space-y-1 text-center">
             <div className="flex justify-center mb-2">
@@ -161,7 +155,7 @@ export function LoginPage() {
             )}
           </CardContent>
         </Card>
-      </motion.div>
+      </div>
     </div>
   );
 }
