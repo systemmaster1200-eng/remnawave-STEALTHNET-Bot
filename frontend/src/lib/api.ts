@@ -10,7 +10,7 @@ export function setTokenRefreshFn(fn: (() => Promise<string | null>) | null) {
 
 let publicConfigCache: PublicConfig | null = null;
 let publicConfigPromise: Promise<PublicConfig> | null = null;
-const inFlightAdminGetRequests = new Map<string, Promise<unknown>>();
+const inFlightGetRequests = new Map<string, Promise<unknown>>();
 let adminSettingsCache: { token: string; value: AdminSettings; expiresAt: number } | null = null;
 let adminSettingsPromise: { token: string; promise: Promise<AdminSettings> } | null = null;
 const ADMIN_SETTINGS_CACHE_TTL_MS = 15_000;
@@ -318,12 +318,16 @@ async function request<T>(
 ): Promise<T> {
   const { token, _retry, ...init } = options;
   const method = (init.method ?? "GET").toUpperCase();
+  const isDedupeableGet =
+    method === "GET" &&
+    !init.body &&
+    (path.startsWith("/admin/") || path.startsWith("/client/") || path.startsWith("/public/"));
   const dedupeKey =
-    token && method === "GET" && !init.body && path.startsWith("/admin/")
-      ? `${token}:${path}`
+    isDedupeableGet
+      ? `${token ?? "public"}:${path}`
       : null;
   if (dedupeKey) {
-    const pending = inFlightAdminGetRequests.get(dedupeKey);
+    const pending = inFlightGetRequests.get(dedupeKey);
     if (pending) return pending as Promise<T>;
   }
 
@@ -365,12 +369,12 @@ async function request<T>(
   })();
 
   if (dedupeKey) {
-    inFlightAdminGetRequests.set(dedupeKey, run);
+    inFlightGetRequests.set(dedupeKey, run);
     try {
       return await run;
     } finally {
-      if (inFlightAdminGetRequests.get(dedupeKey) === run) {
-        inFlightAdminGetRequests.delete(dedupeKey);
+      if (inFlightGetRequests.get(dedupeKey) === run) {
+        inFlightGetRequests.delete(dedupeKey);
       }
     }
   }

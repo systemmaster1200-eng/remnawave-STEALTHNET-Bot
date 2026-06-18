@@ -605,13 +605,13 @@ function SupportTab({ headerProps, onRefreshUnread }: { headerProps: any, onRefr
   );
 }
 
-export function FloatingChat() {
+export function FloatingChat({ initialOpen = false }: { initialOpen?: boolean }) {
   const { state } = useClientAuth();
   const config = useCabinetConfig();
   const token = state.token ?? null;
   const serviceName = config?.serviceName?.trim() || "Сервис";
   const aiChatEnabled = config?.aiChatEnabled !== false;
-  const [isOpen, setIsOpen] = useState(false);
+  const [isOpen, setIsOpen] = useState(initialOpen);
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeChat, setActiveChat] = useState<ChatType>(() => (config?.aiChatEnabled !== false ? "ai" : "support"));
   const [hasOpenDialog, setHasOpenDialog] = useState(false);

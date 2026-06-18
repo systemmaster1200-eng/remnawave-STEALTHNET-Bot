@@ -1,9 +1,7 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { motion } from "framer-motion";
 import { useCabinetDesign } from "@/lib/use-cabinet-design";
-import { StealthDashboard } from "@/pages/cabinet/stealth/stealth-dashboard";
 import {
   
   Package,
@@ -40,6 +38,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 
+const StealthDashboard = lazy(() => import("@/pages/cabinet/stealth/stealth-dashboard").then((m) => ({ default: m.StealthDashboard })));
 
 function formatDate(s: string | null) {
   if (!s) return "—";
@@ -119,7 +118,13 @@ function parseSubscription(sub: unknown): {
  */
 export function ClientDashboardPage() {
   const design = useCabinetDesign();
-  if (design === "stealth") return <StealthDashboard />;
+  if (design === "stealth") {
+    return (
+      <Suspense fallback={null}>
+        <StealthDashboard />
+      </Suspense>
+    );
+  }
   return <ClassicDashboardPage />;
 }
 
@@ -726,11 +731,8 @@ function ClassicDashboardPage() {
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-6xl mx-auto">
       {/* Hero + CTA */}
-      <motion.section
-        initial={{ opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-        className="relative overflow-hidden rounded-3xl bg-card/40 backdrop-blur-2xl border border-border/50 p-8 sm:p-10 shadow-xl"
+      <section
+        className="relative overflow-hidden rounded-3xl bg-card/40 backdrop-blur-2xl border border-border/50 p-8 sm:p-10 shadow-xl animate-in fade-in slide-in-from-bottom-3 duration-500"
       >
         {/* Декоративное свечение */}
         <div className="absolute top-0 right-0 -mr-20 -mt-20 w-64 h-64 rounded-full bg-primary/20 blur-[80px] pointer-events-none" />
@@ -795,7 +797,7 @@ function ClassicDashboardPage() {
             </Button>
           </div>
         </div>
-      </motion.section>
+      </section>
 
       {config?.botInfoBlock?.trim() && (
         <div className="rounded-2xl border border-primary/30 bg-primary/5 backdrop-blur-md px-5 py-4 text-sm whitespace-pre-line shadow-sm">
@@ -1058,11 +1060,8 @@ function ClassicDashboardPage() {
       </div>
 
       {secondarySubscriptions.length > 0 && (
-        <motion.section
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4 }}
-          className="space-y-4 pt-4"
+        <section
+          className="space-y-4 pt-4 animate-in fade-in slide-in-from-bottom-3 duration-500"
         >
           <h2 className="flex items-center gap-2 text-xl font-bold tracking-tight text-foreground ml-1">
             <Package className="h-6 w-6 text-indigo-400" />
@@ -1181,7 +1180,7 @@ function ClassicDashboardPage() {
               );
             })}
           </div>
-        </motion.section>
+        </section>
       )}
     </div>
   );

@@ -125,6 +125,7 @@ function ClientCabinetShell() {
 function IdlePwaUpdatePrompt() {
   const [enabled, setEnabled] = useState(false);
   const location = useLocation();
+  const isDev = import.meta.env.DEV;
   const isGuestRoute =
     location.pathname === "/" ||
     location.pathname === "/admin/login" ||
@@ -135,24 +136,15 @@ function IdlePwaUpdatePrompt() {
     location.pathname.startsWith("/gift/");
 
   useEffect(() => {
-    if (isGuestRoute) {
+    if (isDev || isGuestRoute) {
       setEnabled(false);
       return;
     }
-    const win = window as Window & {
-      requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
-      cancelIdleCallback?: (handle: number) => void;
-    };
-    const enable = () => setEnabled(true);
-    if (win.requestIdleCallback) {
-      const id = win.requestIdleCallback(enable, { timeout: 3000 });
-      return () => win.cancelIdleCallback?.(id);
-    }
-    const id = window.setTimeout(enable, 2500);
+    const id = window.setTimeout(() => setEnabled(true), 10000);
     return () => window.clearTimeout(id);
-  }, [isGuestRoute]);
+  }, [isDev, isGuestRoute]);
 
-  if (!enabled || isGuestRoute) return null;
+  if (isDev || !enabled || isGuestRoute) return null;
   return (
     <Suspense fallback={null}>
       <PwaUpdatePrompt />

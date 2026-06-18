@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useClientAuth } from "@/contexts/client-auth";
@@ -12,11 +12,12 @@ import { GlassSelect } from "@/components/ui/glass-select";
 import { LayoutDashboard, Package, User, LogOut, Shield, Users, Sun, Moon, PlusCircle, Globe, KeyRound, MessageSquare, Palette, Monitor, Check, Loader2, Settings, Layers, MoreHorizontal, ChevronDown, Wallet, Gift, Wifi } from "lucide-react";
 import { useTheme, ACCENT_PALETTES, type ThemeMode, type ThemeAccent } from "@/contexts/theme";
 import { cn } from "@/lib/utils";
-import { FloatingChat } from "@/components/floating-chat";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { DashboardTour } from "@/components/tour/dashboard-tour";
 import { useCabinetDesign } from "@/lib/use-cabinet-design";
-import { StealthLayout } from "@/pages/cabinet/stealth/stealth-layout";
+
+const StealthLayout = lazy(() => import("@/pages/cabinet/stealth/stealth-layout").then((m) => ({ default: m.StealthLayout })));
+const FloatingChat = lazy(() => import("@/components/floating-chat").then((m) => ({ default: m.FloatingChat })));
+const DashboardTour = lazy(() => import("@/components/tour/dashboard-tour").then((m) => ({ default: m.DashboardTour })));
 
 function formatMoney(amount: number, currency: string) {
   return new Intl.NumberFormat("ru-RU", {
@@ -56,6 +57,74 @@ function AnalyticsScripts() {
     }).catch(() => { });
   }, []);
   return null;
+}
+
+function IdleFloatingChat({ force = false }: { force?: boolean }) {
+  const config = useCabinetConfig();
+  const [enabled, setEnabled] = useState(force);
+  const [loadChat, setLoadChat] = useState(force);
+  const [openOnLoad, setOpenOnLoad] = useState(false);
+
+  useEffect(() => {
+    if (force) {
+      setEnabled(true);
+      setLoadChat(true);
+      return;
+    }
+    if (!config?.aiChatEnabled) {
+      setEnabled(false);
+      setLoadChat(false);
+      return;
+    }
+
+    const id = window.setTimeout(() => setEnabled(true), 1200);
+    return () => window.clearTimeout(id);
+  }, [config?.aiChatEnabled, force]);
+
+  useEffect(() => {
+    const openChat = () => {
+      setEnabled(true);
+      setOpenOnLoad(true);
+      setLoadChat(true);
+    };
+    window.addEventListener("tour:open-chat", openChat);
+    return () => window.removeEventListener("tour:open-chat", openChat);
+  }, []);
+
+  if (!enabled || !config?.aiChatEnabled) return null;
+  if (!loadChat) {
+    return (
+      <button
+        type="button"
+        data-tour="floating-chat"
+        onClick={() => {
+          setOpenOnLoad(true);
+          setLoadChat(true);
+        }}
+        className="fixed bottom-24 right-4 sm:bottom-6 sm:right-6 z-[100] flex h-14 w-14 items-center justify-center rounded-full border border-white/15 bg-primary text-primary-foreground shadow-2xl shadow-primary/25 transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+        aria-label="Открыть чат"
+        title="Открыть чат"
+      >
+        <MessageSquare className="h-6 w-6" />
+      </button>
+    );
+  }
+  return (
+    <Suspense fallback={null}>
+      <FloatingChat initialOpen={openOnLoad} />
+    </Suspense>
+  );
+}
+
+function CabinetPageLoader() {
+  return (
+    <div className="flex min-h-[55vh] w-full items-center justify-center px-4">
+      <div className="flex flex-col items-center gap-3 rounded-2xl border border-border/50 bg-card/40 px-6 py-5 text-muted-foreground shadow-xl backdrop-blur-xl">
+        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+        <span className="text-sm font-medium">Загрузка раздела...</span>
+      </div>
+    </div>
+  );
 }
 
 const IsMiniappContext = createContext(false);
@@ -198,7 +267,7 @@ function ThemePopover() {
       <Button
         variant="ghost"
         size="sm"
-        className="h-8 w-8 p-0 bg-background/20 hover:bg-background/40 transition-all duration-300"
+        className="h-8 w-8 cursor-pointer p-0 bg-background/20 hover:bg-background/40 transition-all duration-300"
         onClick={() => setMode(resolvedMode === "dark" ? "light" : "dark")}
       >
         <span className="relative h-4 w-4">
@@ -211,7 +280,7 @@ function ThemePopover() {
 
   return (
     <div className="relative" ref={popoverRef}>
-      <Button variant="ghost" size="sm" className="h-8 w-8 p-0 bg-background/20 hover:bg-background/40" onClick={() => setShow(!show)}>
+      <Button variant="ghost" size="sm" className="h-8 w-8 cursor-pointer p-0 bg-background/20 hover:bg-background/40" onClick={() => setShow(!show)}>
         <Palette className="h-3.5 w-3.5" />
       </Button>
       <div
@@ -232,7 +301,7 @@ function ThemePopover() {
                   key={opt.value}
                   onClick={() => setMode(opt.value)}
                   className={cn(
-                    "flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-xs font-medium transition-all duration-300",
+                    "flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-lg py-2 text-xs font-medium transition-all duration-300",
                     isActive
                       ? "bg-background text-foreground shadow-sm ring-1 ring-border/50"
                       : "text-muted-foreground hover:bg-background/50 hover:text-foreground"
@@ -257,7 +326,7 @@ function ThemePopover() {
                     key={key}
                     onClick={() => setAccent(key)}
                     className={cn(
-                      "group flex flex-col items-center gap-2 rounded-xl p-2 transition-all duration-300",
+                      "group flex cursor-pointer flex-col items-center gap-2 rounded-xl p-2 transition-all duration-300",
                       isActive ? "bg-primary/10" : "hover:bg-muted/60"
                     )}
                   >
@@ -343,7 +412,7 @@ function SettingsPopover() {
 
   return (
     <div className="relative" ref={popoverRef} data-tour="language-currency">
-      <Button variant="ghost" size="sm" className="gap-1.5 text-xs h-8 px-2 bg-background/20 hover:bg-background/40" onClick={() => setShow(!show)}>
+      <Button variant="ghost" size="sm" className="gap-1.5 text-xs h-8 cursor-pointer px-2 bg-background/20 hover:bg-background/40" onClick={() => setShow(!show)}>
         <Settings className="h-3.5 w-3.5" />
       </Button>
       <div
@@ -381,7 +450,7 @@ function SettingsPopover() {
           </div>
         </div>
 
-        <Button onClick={handleSave} disabled={saving} className="w-full h-10 rounded-xl shadow-md bg-primary hover:bg-primary/90 text-primary-foreground text-sm font-semibold transition-all hover:scale-[1.02] active:scale-95">
+        <Button onClick={handleSave} disabled={saving} className="w-full h-10 cursor-pointer rounded-xl shadow-md bg-primary hover:bg-primary/90 text-primary-foreground text-sm font-semibold transition-all hover:scale-[1.02] active:scale-95">
           {saving ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Check className="w-4 h-4 mr-2" />}
           {t("cabinet.layout.save")}
         </Button>
@@ -450,11 +519,11 @@ function MobileCabinetShell() {
 
   return (
     <div className="min-h-svh flex flex-col bg-transparent min-w-0 overflow-x-hidden pb-36 relative">
-      <FloatingChat />
+      <IdleFloatingChat />
       <header className="sticky top-0 z-50 border-b border-border shrink-0 transition-all duration-300" style={{ paddingTop: "env(safe-area-inset-top)" }}>
         <div className="absolute inset-0 bg-card/40 backdrop-blur-xl -z-10 pointer-events-none" />
         <div className="relative flex h-14 items-center justify-between gap-3 px-4 min-w-0 w-full max-w-7xl mx-auto">
-          <Link to="/cabinet/dashboard" className="flex items-center gap-2.5 font-semibold text-base tracking-tight shrink-0 min-w-0">
+          <Link to="/cabinet/dashboard" className="flex cursor-pointer items-center gap-2.5 font-semibold text-base tracking-tight shrink-0 min-w-0">
             {logo ? (
               <span className="flex items-center justify-center h-8 px-1.5 rounded-lg shrink-0">
                 <img src={logo} alt="" className="h-6 max-w-[100px] object-contain" onError={() => setLogoError(true)} />
@@ -471,7 +540,7 @@ function MobileCabinetShell() {
             <SettingsPopover />
             {!isMiniapp && (
               <Button variant="ghost" size="icon" className="shrink-0 bg-background/20 hover:bg-background/40 text-muted-foreground hover:text-foreground" asChild>
-                <Link to="/cabinet/login" onClick={() => logout()} title={t("cabinet.nav.logout")}>
+                <Link to="/cabinet/login" onClick={() => logout()} title={t("cabinet.nav.logout")} className="cursor-pointer">
                   <LogOut className="h-5 w-5" />
                 </Link>
               </Button>
@@ -481,7 +550,9 @@ function MobileCabinetShell() {
       </header>
 
       <main className="flex-1 w-full min-w-0 px-4 py-6 max-w-7xl mx-auto transition-all duration-300">
-        <Outlet />
+        <Suspense fallback={<CabinetPageLoader />}>
+          <Outlet />
+        </Suspense>
       </main>
 
       <nav className="fixed bottom-0 left-0 right-0 z-50 border-t border-border bg-card/60 backdrop-blur-xl pb-[env(safe-area-inset-bottom)] transition-all duration-300">
@@ -494,7 +565,7 @@ function MobileCabinetShell() {
                 to={to}
                 data-tour={ROUTE_TOUR_MAP[to]}
                 className={cn(
-                  "flex flex-col items-center justify-center gap-0.5 py-1 px-1 h-14 flex-1 min-w-0 max-w-[5rem] rounded-xl transition-all duration-300",
+                  "flex cursor-pointer flex-col items-center justify-center gap-0.5 py-1 px-1 h-14 flex-1 min-w-0 max-w-[5rem] rounded-xl transition-all duration-300",
                   active ? "bg-primary/20 text-primary shadow-sm scale-105" : "text-muted-foreground hover:bg-foreground/5 hover:text-foreground hover:scale-105"
                 )}
               >
@@ -508,7 +579,7 @@ function MobileCabinetShell() {
               type="button"
               onClick={() => setMoreMenuOpen(true)}
               className={cn(
-                "flex flex-col items-center justify-center gap-0.5 py-1 px-1 h-14 flex-1 min-w-0 max-w-[5rem] rounded-xl transition-all duration-300",
+                "flex cursor-pointer flex-col items-center justify-center gap-0.5 py-1 px-1 h-14 flex-1 min-w-0 max-w-[5rem] rounded-xl transition-all duration-300",
                 "text-muted-foreground hover:bg-foreground/5 hover:text-foreground hover:scale-105"
               )}
               aria-label={t("cabinet.nav.more")}
@@ -535,7 +606,7 @@ function MobileCabinetShell() {
                   data-tour={ROUTE_TOUR_MAP[to]}
                   onClick={() => setMoreMenuOpen(false)}
                   className={cn(
-                    "flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-colors",
+                    "flex cursor-pointer items-center gap-3 rounded-xl px-4 py-3 text-left transition-colors",
                     active ? "bg-primary/20 text-primary" : "hover:bg-muted/60"
                   )}
                 >
@@ -606,11 +677,11 @@ function CabinetShell() {
 
   return (
     <div className="min-h-svh flex flex-col bg-transparent">
-      <FloatingChat />
+      <IdleFloatingChat />
       <header className="sticky top-0 z-50 border-b border-border shadow-sm transition-all duration-300">
         <div className="absolute inset-0 bg-card/40 backdrop-blur-xl -z-10 pointer-events-none" />
         <div className="relative w-full max-w-7xl mx-auto flex h-16 items-center justify-between gap-4 px-4">
-          <Link to="/cabinet/dashboard" className="flex items-center gap-2.5 font-semibold text-lg tracking-tight shrink-0 hover:opacity-80 transition-opacity">
+          <Link to="/cabinet/dashboard" className="flex cursor-pointer items-center gap-2.5 font-semibold text-lg tracking-tight shrink-0 hover:opacity-80 transition-opacity">
             {logo ? (
               <span className="flex items-center justify-center h-9 px-2 rounded-lg shrink-0">
                 <img src={logo} alt="" className="h-6 max-w-[110px] object-contain" onError={() => setLogoError(true)} />
@@ -629,12 +700,12 @@ function CabinetShell() {
               const tourAttr = dataTourMap[to];
 
               return (
-                <Link key={to} to={to} data-tour={tourAttr}>
+                <Link key={to} to={to} data-tour={tourAttr} className="cursor-pointer">
                   <Button
                     variant={active ? "secondary" : "ghost"}
                     size="sm"
                     className={cn(
-                      "inline-flex items-center gap-2 whitespace-nowrap transition-all duration-300",
+                      "inline-flex cursor-pointer items-center gap-2 whitespace-nowrap transition-all duration-300",
                       active ? "bg-primary/20 hover:bg-primary/30 text-primary shadow-sm scale-105" : "hover:scale-105 hover:bg-background/40"
                     )}
                   >
@@ -650,7 +721,7 @@ function CabinetShell() {
                   variant="ghost"
                   size="sm"
                   className={cn(
-                    "inline-flex items-center gap-2 whitespace-nowrap transition-all duration-300 hover:scale-105 hover:bg-background/40",
+                    "inline-flex cursor-pointer items-center gap-2 whitespace-nowrap transition-all duration-300 hover:scale-105 hover:bg-background/40",
                     moreNav.some((i) => location.pathname === i.to) ? "bg-primary/20 text-primary" : ""
                   )}
                   onClick={() => setMoreOpen(!moreOpen)}
@@ -669,7 +740,7 @@ function CabinetShell() {
                           data-tour={ROUTE_TOUR_MAP[to]}
                           onClick={() => setMoreOpen(false)}
                           className={cn(
-                            "flex items-center gap-2 px-4 py-2.5 text-sm transition-colors",
+                            "flex cursor-pointer items-center gap-2 px-4 py-2.5 text-sm transition-colors",
                             active ? "bg-primary/20 text-primary" : "hover:bg-muted/60"
                           )}
                         >
@@ -701,7 +772,7 @@ function CabinetShell() {
               className="group h-9 rounded-full border-border/60 bg-background/35 p-0 shadow-sm backdrop-blur-xl transition-all duration-300 hover:bg-destructive/10 hover:border-destructive/30 hover:text-destructive"
               asChild
             >
-              <Link to="/cabinet/login" onClick={() => logout()} className="flex h-full items-center">
+              <Link to="/cabinet/login" onClick={() => logout()} className="flex h-full cursor-pointer items-center">
                 <div className="flex h-full w-9 shrink-0 items-center justify-center">
                   <LogOut className="h-[18px] w-[18px]" />
                 </div>
@@ -716,7 +787,9 @@ function CabinetShell() {
         </div>
       </header>
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 py-6 transition-all duration-300">
-        <Outlet />
+        <Suspense fallback={<CabinetPageLoader />}>
+          <Outlet />
+        </Suspense>
       </main>
     </div>
   );
@@ -740,7 +813,11 @@ export function CabinetLayout() {
   // ВАЖНО: для auth/2fa-страниц используем classic — их Stealth-дизайн пока
   // не оформлен (Phase 2/3).
   if (design === "stealth" && isLoggedIn && !needs2FA && !isAuthPage) {
-    return <StealthLayout />;
+    return (
+      <Suspense fallback={null}>
+        <StealthLayout />
+      </Suspense>
+    );
   }
 
   return (
@@ -768,19 +845,24 @@ function CabinetShellWithMiniapp() {
   useEffect(() => {
     if (!state.token) return;
     if (!localStorage.getItem("stealthnet_tour_completed")) {
-      setTimeout(() => setRunTour(true), 500);
+      const id = window.setTimeout(() => setRunTour(true), 9000);
+      return () => window.clearTimeout(id);
     }
   }, [state.token]);
 
   return (
     <IsMiniappContext.Provider value={isMiniapp || isMobile}>
-      <DashboardTour
-        run={runTour}
-        onComplete={() => {
-          setRunTour(false);
-          localStorage.setItem("stealthnet_tour_completed", "true");
-        }}
-      />
+      {runTour && (
+        <Suspense fallback={null}>
+          <DashboardTour
+            run={runTour}
+            onComplete={() => {
+              setRunTour(false);
+              localStorage.setItem("stealthnet_tour_completed", "true");
+            }}
+          />
+        </Suspense>
+      )}
       <CabinetShell />
     </IsMiniappContext.Provider>
   );
