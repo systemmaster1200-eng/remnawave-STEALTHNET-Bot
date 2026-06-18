@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { lazy, Suspense, useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
 import {
   Shield,
@@ -27,18 +27,10 @@ import type { DashboardStats, RemnaNode, RemnaNodesResponse, ServerStats, GiftAn
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/contexts/auth";
 import { cn } from "@/lib/utils";
-import {
-  AreaChart,
-  Area,
-  ComposedChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-} from "recharts";
+
+const DashboardRevenueChart = lazy(() =>
+  import("@/pages/dashboard-revenue-chart").then((m) => ({ default: m.DashboardRevenueChart }))
+);
 
 /* ── Animation variants ── */
 
@@ -146,44 +138,6 @@ function CountUpNumber({ value, className }: { value: number; className?: string
   return <span className={className}>{animated.toLocaleString()}</span>;
 }
 
-/* ── Sparkline ── */
-
-function Sparkline({
-  data,
-  color,
-  height = 40,
-  width = 100,
-}: {
-  data: { v: number }[];
-  color: string;
-  height?: number;
-  width?: number;
-}) {
-  const gradientId = `spark-${color.replace("#", "")}`;
-  return (
-    <ResponsiveContainer width={width} height={height}>
-      <AreaChart data={data} margin={{ top: 2, right: 2, bottom: 2, left: 2 }}>
-        <defs>
-          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity={0.4} />
-            <stop offset="100%" stopColor={color} stopOpacity={0} />
-          </linearGradient>
-        </defs>
-        <Area
-          type="monotone"
-          dataKey="v"
-          stroke={color}
-          strokeWidth={2}
-          fill={`url(#${gradientId})`}
-          dot={false}
-          isAnimationActive
-          animationDuration={1000}
-        />
-      </AreaChart>
-    </ResponsiveContainer>
-  );
-}
-
 /* ── Section Header (glass) ── */
 
 function SectionHeader({
@@ -232,7 +186,6 @@ function StatCard({
   title,
   value,
   subtitle,
-  sparkData,
   accentColor = "primary",
 }: {
   index: number;
@@ -240,7 +193,6 @@ function StatCard({
   title: string;
   value: React.ReactNode;
   subtitle: string;
-  sparkData?: { v: number }[];
   accentColor?: keyof typeof ACCENT_MAP;
 }) {
   const accent = ACCENT_MAP[accentColor];
@@ -279,11 +231,6 @@ function StatCard({
             <Icon className={cn("h-5 w-5", accent.iconText)} />
           </div>
         </div>
-        {sparkData && sparkData.length > 0 && (
-          <div className="relative mt-3 -mx-1 opacity-80 group-hover:opacity-100 transition-opacity">
-            <Sparkline data={sparkData} color={accent.spark} height={36} width={120} />
-          </div>
-        )}
       </Card>
     </motion.div>
   );
@@ -849,62 +796,9 @@ export function DashboardPage() {
             </div>
 
             <div className="mt-4 h-[320px] w-full rounded-2xl border border-white/5 bg-foreground/[0.03] dark:bg-white/[0.02] p-4 backdrop-blur-md">
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="dashRevenue" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.4} />
-                      <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" className="stroke-white/10" />
-                  <XAxis dataKey="date" tick={{ fontSize: 11 }} className="text-muted-foreground" />
-                  <YAxis
-                    yAxisId="left"
-                    tick={{ fontSize: 11 }}
-                    className="text-muted-foreground"
-                    tickFormatter={(value) => formatMoney(Number(value ?? 0), defaultCurrency)}
-                  />
-                  <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} className="text-muted-foreground" allowDecimals={false} />
-                  <Tooltip
-                    contentStyle={{
-                      background: "rgba(10,10,20,0.85)",
-                      border: "1px solid rgba(255,255,255,0.15)",
-                      borderRadius: "12px",
-                      color: "white",
-                      fontSize: "12px",
-                    }}
-                    formatter={(value, name) => {
-                      if (name === "Доход") return [formatMoney(Number(value ?? 0), defaultCurrency), "Доход"];
-                      return [Number(value ?? 0).toLocaleString(), "Новые"];
-                    }}
-                  />
-                  <Legend wrapperStyle={{ fontSize: "11px", color: "rgba(148,163,184,0.9)" }} />
-                  <Area
-                    yAxisId="left"
-                    type="monotone"
-                    dataKey="revenue"
-                    name="Доход"
-                    stroke="hsl(var(--primary))"
-                    strokeWidth={2}
-                    fill="url(#dashRevenue)"
-                    dot={false}
-                    isAnimationActive
-                    animationDuration={1000}
-                  />
-                  <Line
-                    yAxisId="right"
-                    type="monotone"
-                    dataKey="users"
-                    name="Новые"
-                    stroke="#10b981"
-                    strokeWidth={2}
-                    dot={false}
-                    isAnimationActive
-                    animationDuration={1000}
-                  />
-                </ComposedChart>
-              </ResponsiveContainer>
+              <Suspense fallback={<div className="h-full w-full animate-pulse rounded-xl bg-foreground/[0.04]" />}>
+                <DashboardRevenueChart data={chartData} defaultCurrency={defaultCurrency} />
+              </Suspense>
             </div>
           </Card>
         </motion.div>

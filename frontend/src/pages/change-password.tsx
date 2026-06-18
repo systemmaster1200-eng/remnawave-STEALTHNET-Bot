@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { motion } from "framer-motion";
 import { useAuth } from "@/contexts/auth";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -47,11 +46,7 @@ export function ChangePasswordPage() {
 
   return (
     <div className="min-h-svh flex items-center justify-center bg-muted/30 p-4">
-      <motion.div
-        initial={{ opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="w-full max-w-md"
-      >
+      <div className="w-full max-w-md animate-in fade-in slide-in-from-bottom-3 duration-300">
         <Card>
           <CardHeader>
             <CardTitle>Смена пароля</CardTitle>
@@ -107,7 +102,7 @@ export function ChangePasswordPage() {
             </form>
           </CardContent>
         </Card>
-      </motion.div>
+      </div>
     </div>
   );
 }

@@ -2,12 +2,50 @@ const API_BASE = "/api";
 
 /** Вызывается при 401: возвращает новый access token или null. Устанавливается из AuthProvider. */
 let tokenRefreshFn: (() => Promise<string | null>) | null = null;
+let tokenRefreshPromise: Promise<string | null> | null = null;
 export function setTokenRefreshFn(fn: (() => Promise<string | null>) | null) {
   tokenRefreshFn = fn;
+  tokenRefreshPromise = null;
 }
 
 let publicConfigCache: PublicConfig | null = null;
 let publicConfigPromise: Promise<PublicConfig> | null = null;
+const inFlightAdminGetRequests = new Map<string, Promise<unknown>>();
+let adminSettingsCache: { token: string; value: AdminSettings; expiresAt: number } | null = null;
+let adminSettingsPromise: { token: string; promise: Promise<AdminSettings> } | null = null;
+const ADMIN_SETTINGS_CACHE_TTL_MS = 15_000;
+
+function clearAdminSettingsCache() {
+  adminSettingsCache = null;
+  adminSettingsPromise = null;
+}
+
+function getCachedAdminSettings(token: string, forceRefresh = false): Promise<AdminSettings> {
+  const now = Date.now();
+  if (!forceRefresh && adminSettingsCache?.token === token && adminSettingsCache.expiresAt > now) {
+    return Promise.resolve(adminSettingsCache.value);
+  }
+  if (!forceRefresh && adminSettingsPromise?.token === token) {
+    return adminSettingsPromise.promise;
+  }
+
+  const promise = request<AdminSettings>("/admin/settings", { token })
+    .then((settings) => {
+      adminSettingsCache = {
+        token,
+        value: settings,
+        expiresAt: Date.now() + ADMIN_SETTINGS_CACHE_TTL_MS,
+      };
+      return settings;
+    })
+    .finally(() => {
+      if (adminSettingsPromise?.promise === promise) {
+        adminSettingsPromise = null;
+      }
+    });
+  adminSettingsPromise = { token, promise };
+  return promise;
+}
 
 // отчёт по массовой операции над клиентом.
 export interface BulkOpItem {
@@ -279,6 +317,16 @@ async function request<T>(
   options: RequestInit & { token?: string; _retry?: boolean } = {}
 ): Promise<T> {
   const { token, _retry, ...init } = options;
+  const method = (init.method ?? "GET").toUpperCase();
+  const dedupeKey =
+    token && method === "GET" && !init.body && path.startsWith("/admin/")
+      ? `${token}:${path}`
+      : null;
+  if (dedupeKey) {
+    const pending = inFlightAdminGetRequests.get(dedupeKey);
+    if (pending) return pending as Promise<T>;
+  }
+
   const headers = new Headers(init.headers);
   // Для FormData Content-Type НЕ выставляем: браузер сам добавит boundary.
   const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
@@ -287,27 +335,47 @@ async function request<T>(
   }
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
-  const text = await res.text();
-  let data: unknown;
-  try {
-    data = text ? JSON.parse(text) : undefined;
-  } catch {
-    throw new Error(res.statusText || "Request failed");
-  }
+  const run = (async () => {
+    const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+    const text = await res.text();
+    let data: unknown;
+    try {
+      data = text ? JSON.parse(text) : undefined;
+    } catch {
+      throw new Error(res.statusText || "Request failed");
+    }
 
-  if (res.status === 401 && token && !_retry && tokenRefreshFn && !path.startsWith("/auth/")) {
-    const newToken = await tokenRefreshFn();
-    if (newToken) {
-      return request<T>(path, { ...options, token: newToken, _retry: true });
+    if (res.status === 401 && token && !_retry && tokenRefreshFn && !path.startsWith("/auth/")) {
+      if (!tokenRefreshPromise) {
+        tokenRefreshPromise = tokenRefreshFn().finally(() => {
+          tokenRefreshPromise = null;
+        });
+      }
+      const newToken = await tokenRefreshPromise;
+      if (newToken) {
+        return request<T>(path, { ...options, token: newToken, _retry: true });
+      }
+    }
+
+    if (!res.ok) {
+      const message = (data as { message?: string })?.message ?? res.statusText;
+      throw new Error(message);
+    }
+    return data as T;
+  })();
+
+  if (dedupeKey) {
+    inFlightAdminGetRequests.set(dedupeKey, run);
+    try {
+      return await run;
+    } finally {
+      if (inFlightAdminGetRequests.get(dedupeKey) === run) {
+        inFlightAdminGetRequests.delete(dedupeKey);
+      }
     }
   }
 
-  if (!res.ok) {
-    const message = (data as { message?: string })?.message ?? res.statusText;
-    throw new Error(message);
-  }
-  return data as T;
+  return run;
 }
 
 export const api = {
@@ -932,8 +1000,8 @@ export const api = {
     return request(`/admin/subscriptions/${subId}/remna/devices/delete`, { method: "POST", body: JSON.stringify({ hwid }), token });
   },
 
-  async getSettings(token: string): Promise<AdminSettings> {
-    return request("/admin/settings", { token });
+  async getSettings(token: string, forceRefresh = false): Promise<AdminSettings> {
+    return getCachedAdminSettings(token, forceRefresh);
   },
 
   async getReferralNetwork(token: string): Promise<{
@@ -1209,7 +1277,14 @@ export const api = {
   },
 
   async updateSettings(token: string, data: UpdateSettingsPayload): Promise<AdminSettings> {
-    return request("/admin/settings", { method: "PATCH", body: JSON.stringify(data), token });
+    clearAdminSettingsCache();
+    const settings = await request<AdminSettings>("/admin/settings", { method: "PATCH", body: JSON.stringify(data), token });
+    adminSettingsCache = {
+      token,
+      value: settings,
+      expiresAt: Date.now() + ADMIN_SETTINGS_CACHE_TTL_MS,
+    };
+    return settings;
   },
 
   /** Админ: сброс текстов лендинга на исходные (из кода). Возвращает обновлённые настройки. */
@@ -1890,7 +1965,8 @@ export const api = {
 
   async getPublicConfig(forceRefresh = false): Promise<PublicConfig> {
     if (!forceRefresh && publicConfigCache) return publicConfigCache;
-    if (forceRefresh) publicConfigPromise = null;
+    if (forceRefresh && publicConfigPromise) return publicConfigPromise;
+    if (forceRefresh) publicConfigCache = null;
     if (!publicConfigPromise) {
       publicConfigPromise = request<PublicConfig>("/public/config")
         .then((config) => {

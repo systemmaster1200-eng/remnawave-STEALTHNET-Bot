@@ -187,9 +187,20 @@ export interface NotificationCounter {
   severity: "info" | "warn" | "error";
 }
 
+let notificationCountersPromise: { token: string; promise: Promise<{ counters: NotificationCounter[]; total: number }> } | null = null;
+
 export const notificationsApi = {
-  counters: (token: string) =>
-    req<{ counters: NotificationCounter[]; total: number }>(token, `/notifications/counters`),
+  counters: (token: string) => {
+    if (notificationCountersPromise?.token === token) return notificationCountersPromise.promise;
+    const promise = req<{ counters: NotificationCounter[]; total: number }>(token, `/notifications/counters`)
+      .finally(() => {
+        if (notificationCountersPromise?.promise === promise) {
+          notificationCountersPromise = null;
+        }
+      });
+    notificationCountersPromise = { token, promise };
+    return promise;
+  },
 };
 
 // ─── Payment actions (refund / mark-failed / retry-activation) ───────────
