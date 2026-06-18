@@ -1,5 +1,4 @@
 import { lazy, Suspense, useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { motion } from "framer-motion";
 import {
   Shield,
   Users,
@@ -27,6 +26,7 @@ import type { DashboardStats, RemnaNode, RemnaNodesResponse, ServerStats, GiftAn
 import { useTranslation } from "react-i18next";
 import { useAuth } from "@/contexts/auth";
 import { cn } from "@/lib/utils";
+import { motion } from "@/lib/motion-shim";
 
 const DashboardRevenueChart = lazy(() =>
   import("@/pages/dashboard-revenue-chart").then((m) => ({ default: m.DashboardRevenueChart }))
@@ -522,6 +522,7 @@ export function DashboardPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nodeActionUuid, setNodeActionUuid] = useState<string | null>(null);
+  const [showRevenueChart, setShowRevenueChart] = useState(false);
 
   const refetchNodes = useCallback(async () => {
     if (!token || !hasRemnaNodesAccess) return;
@@ -595,6 +596,11 @@ export function DashboardPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, hasRemnaNodesAccess]);
+
+  useEffect(() => {
+    const id = window.setTimeout(() => setShowRevenueChart(true), 2500);
+    return () => window.clearTimeout(id);
+  }, []);
 
   const chartData = useMemo(() => {
     const revenueSeries = analyticsData?.revenueSeries ?? [];
@@ -796,9 +802,13 @@ export function DashboardPage() {
             </div>
 
             <div className="mt-4 h-[320px] w-full rounded-2xl border border-white/5 bg-foreground/[0.03] dark:bg-white/[0.02] p-4 backdrop-blur-md">
-              <Suspense fallback={<div className="h-full w-full animate-pulse rounded-xl bg-foreground/[0.04]" />}>
-                <DashboardRevenueChart data={chartData} defaultCurrency={defaultCurrency} />
-              </Suspense>
+              {showRevenueChart ? (
+                <Suspense fallback={<div className="h-full w-full animate-pulse rounded-xl bg-foreground/[0.04]" />}>
+                  <DashboardRevenueChart data={chartData} defaultCurrency={defaultCurrency} />
+                </Suspense>
+              ) : (
+                <div className="h-full w-full animate-pulse rounded-xl bg-foreground/[0.04]" />
+              )}
             </div>
           </Card>
         </motion.div>

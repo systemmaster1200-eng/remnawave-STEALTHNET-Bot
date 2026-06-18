@@ -53,7 +53,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import { cn } from "@/lib/utils";
 
 const BYTES_PER_GB = 1024 * 1024 * 1024;

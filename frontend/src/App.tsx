@@ -99,11 +99,36 @@ function LoadingScreen({ label = "Загрузка…" }: { label?: string }) {
   );
 }
 
+function AdminCommandPalette() {
+  const [enabled, setEnabled] = useState(false);
+
+  useEffect(() => {
+    if (enabled) return;
+    function onKey(e: KeyboardEvent) {
+      const isMac = /Mac|iPhone|iPod|iPad/.test(navigator.platform);
+      const ctrl = isMac ? e.metaKey : e.ctrlKey;
+      if (ctrl && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setEnabled(true);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [enabled]);
+
+  if (!enabled) return null;
+  return (
+    <Suspense fallback={null}>
+      <CmdKPalette initialOpen />
+    </Suspense>
+  );
+}
+
 function AdminShell() {
   return (
     <RequireAuth>
       <>
-        <CmdKPalette />
+        <AdminCommandPalette />
         <DashboardLayout />
       </>
     </RequireAuth>

@@ -18,12 +18,12 @@ const GROUP_META: Record<string, { label: string; icon: typeof Users; cls: strin
   promo_codes: { label: "Промокоды", icon: Ticket, cls: "text-cyan-600 dark:text-cyan-400" },
 };
 
-export function CmdKPalette() {
+export function CmdKPalette({ initialOpen = false }: { initialOpen?: boolean }) {
   const { state } = useAuth();
   const token = state.accessToken;
   const navigate = useNavigate();
 
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initialOpen);
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<QuickSearchResult[]>([]);
   const [loading, setLoading] = useState(false);

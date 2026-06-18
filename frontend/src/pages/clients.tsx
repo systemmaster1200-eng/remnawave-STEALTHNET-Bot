@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import { clientsBulkApi, type BulkClientAction } from "@/lib/admin-extras-api";
 
 function formatTrafficBytes(bytes: number | null | undefined): string {

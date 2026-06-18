@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { BookOpen, Check, Copy, Key, Loader2, Plus, Power, Trash2, AlertTriangle } from "lucide-react";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import { useAuth } from "@/contexts/auth";
 import { api, type ApiKeyListItem } from "@/lib/api";
 import { Card } from "@/components/ui/card";

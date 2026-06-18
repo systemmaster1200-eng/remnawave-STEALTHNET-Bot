@@ -8,7 +8,7 @@ import { api, type TrafficAbuseResponse, type TrafficAbuser } from "@/lib/api";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import { cn } from "@/lib/utils";
 
 function formatBytes(bytes: number): string {

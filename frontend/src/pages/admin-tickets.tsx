@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import {
   MessageSquare, Loader2, Send, ArrowLeft, Lock, Unlock,
   CircleDot, CircleCheck, RefreshCw, MessagesSquare, Paperclip, X as XIcon,

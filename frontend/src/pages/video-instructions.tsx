@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import {
   Video, Plus, Trash2, Save, RefreshCw, ArrowUp, ArrowDown,
   Pencil, X, Check, Info, Loader2,

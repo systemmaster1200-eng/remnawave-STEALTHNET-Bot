@@ -16,7 +16,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Trophy, Plus, Pencil, Trash2, Loader2, Users, Shuffle, Send, Clock, X, MousePointerClick, Sparkles, Award } from "lucide-react";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import { cn } from "@/lib/utils";
 
 const PRIZE_TYPES: { value: ContestPrizeType; label: string }[] = [

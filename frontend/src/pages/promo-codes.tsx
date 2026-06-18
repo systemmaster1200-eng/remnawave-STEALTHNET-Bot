@@ -36,7 +36,7 @@ import {
   Percent,
   Wand2,
 } from "lucide-react";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import { cn } from "@/lib/utils";
 import { MassPromoDialog } from "@/components/mass-promo-dialog";
 

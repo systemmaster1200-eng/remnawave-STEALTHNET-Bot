@@ -1,8 +1,8 @@
-import { useEffect, useState, Fragment } from "react";
+import { useEffect, useRef, useState, Fragment, type ReactNode } from "react";
 import { useAuth } from "@/contexts/auth";
 import { api } from "@/lib/api";
 import { Card } from "@/components/ui/card";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import {
   Loader2,
   TrendingUp,
@@ -35,7 +35,6 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  ResponsiveContainer,
   Legend,
   Line,
   ComposedChart,
@@ -68,6 +67,45 @@ function fmt(n: number) {
 }
 function fmtDec(n: number) {
   return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(n);
+}
+
+function MeasuredChart({ children }: { children: (size: { width: number; height: number }) => ReactNode }) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
+
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el) return;
+
+    const updateSize = () => {
+      const rect = el.getBoundingClientRect();
+      const width = Math.floor(rect.width);
+      const height = Math.floor(rect.height);
+      setSize(width > 0 && height > 0 ? { width, height } : null);
+    };
+
+    const frame = window.requestAnimationFrame(updateSize);
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateSize);
+      return () => {
+        window.cancelAnimationFrame(frame);
+        window.removeEventListener("resize", updateSize);
+      };
+    }
+
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(el);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, []);
+
+  return (
+    <div ref={hostRef} className="h-full w-full min-w-0">
+      {size ? children(size) : <div className="h-full w-full animate-pulse rounded-xl bg-foreground/[0.04]" />}
+    </div>
+  );
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -246,8 +284,9 @@ export function AnalyticsPage() {
       {/* Графики */}
       <div className="grid gap-4 lg:grid-cols-2">
         <ChartCard index={16} title="Доход по неделям (90 дн.)" icon={TrendingUp}>
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={revenueWeekly}>
+          <MeasuredChart>
+            {({ width, height }) => (
+            <AreaChart width={width} height={height} data={revenueWeekly}>
               <defs>
                 <linearGradient id="revGrad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.4} />
@@ -260,36 +299,42 @@ export function AnalyticsPage() {
               <Tooltip content={<CustomTooltip />} formatter={(v) => [fmt(Number(v ?? 0)), "Доход"]} />
               <Area type="monotone" dataKey="value" stroke="hsl(var(--primary))" strokeWidth={2} fillOpacity={1} fill="url(#revGrad)" />
             </AreaChart>
-          </ResponsiveContainer>
+            )}
+          </MeasuredChart>
         </ChartCard>
 
         <ChartCard index={17} title="Новые пользователи (90 дн.)" icon={UserPlus}>
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={clientsWeekly}>
+          <MeasuredChart>
+            {({ width, height }) => (
+            <BarChart width={width} height={height} data={clientsWeekly}>
               <CartesianGrid strokeDasharray="3 3" className="stroke-foreground/10" />
               <XAxis dataKey="label" tick={{ fontSize: 11 }} className="text-muted-foreground" />
               <YAxis tick={{ fontSize: 11 }} className="text-muted-foreground" allowDecimals={false} />
               <Tooltip content={<CustomTooltip />} formatter={(v) => [Number(v ?? 0), "Пользователей"]} />
               <Bar dataKey="value" fill="#10b981" radius={[4, 4, 0, 0]} />
             </BarChart>
-          </ResponsiveContainer>
+            )}
+          </MeasuredChart>
         </ChartCard>
 
         <ChartCard index={18} title="Триалы по неделям (90 дн.)" icon={Zap}>
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={trialsWeekly}>
+          <MeasuredChart>
+            {({ width, height }) => (
+            <BarChart width={width} height={height} data={trialsWeekly}>
               <CartesianGrid strokeDasharray="3 3" className="stroke-foreground/10" />
               <XAxis dataKey="label" tick={{ fontSize: 11 }} className="text-muted-foreground" />
               <YAxis tick={{ fontSize: 11 }} className="text-muted-foreground" allowDecimals={false} />
               <Tooltip content={<CustomTooltip />} formatter={(v) => [Number(v ?? 0), "Триалов"]} />
               <Bar dataKey="value" fill="#f59e0b" radius={[4, 4, 0, 0]} />
             </BarChart>
-          </ResponsiveContainer>
+            )}
+          </MeasuredChart>
         </ChartCard>
 
         <ChartCard index={19} title="Реферальные выплаты (90 дн.)" icon={Award}>
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={refCreditsWeekly}>
+          <MeasuredChart>
+            {({ width, height }) => (
+            <AreaChart width={width} height={height} data={refCreditsWeekly}>
               <defs>
                 <linearGradient id="refGrad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#ec4899" stopOpacity={0.4} />
@@ -302,12 +347,14 @@ export function AnalyticsPage() {
               <Tooltip content={<CustomTooltip />} formatter={(v) => [fmtDec(Number(v ?? 0)), "Выплаты"]} />
               <Area type="monotone" dataKey="value" stroke="#ec4899" strokeWidth={2} fillOpacity={1} fill="url(#refGrad)" />
             </AreaChart>
-          </ResponsiveContainer>
+            )}
+          </MeasuredChart>
         </ChartCard>
 
         <ChartCard index={20} title="Промо активации (90 дн.)" icon={Gift}>
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={promoWeekly}>
+          <MeasuredChart>
+            {({ width, height }) => (
+            <ComposedChart width={width} height={height} data={promoWeekly}>
               <CartesianGrid strokeDasharray="3 3" className="stroke-foreground/10" />
               <XAxis dataKey="label" tick={{ fontSize: 11 }} className="text-muted-foreground" />
               <YAxis tick={{ fontSize: 11 }} className="text-muted-foreground" allowDecimals={false} />
@@ -316,12 +363,14 @@ export function AnalyticsPage() {
               <Line type="monotone" dataKey="v2" name="Промокоды" stroke="#06b6d4" strokeWidth={2} dot={false} />
               <Legend wrapperStyle={{ fontSize: "11px" }} />
             </ComposedChart>
-          </ResponsiveContainer>
+            )}
+          </MeasuredChart>
         </ChartCard>
 
         <ChartCard index={21} title="Источники клиентов" icon={Users}>
-          <ResponsiveContainer width="100%" height="100%">
-            <PieChart>
+          <MeasuredChart>
+            {({ width, height }) => (
+            <PieChart width={width} height={height}>
               <Pie
                 data={[
                   { name: "Только бот", value: s.botClients },
@@ -344,15 +393,17 @@ export function AnalyticsPage() {
               <Tooltip content={<CustomTooltip />} formatter={(v) => [Number(v ?? 0), "Клиентов"]} />
               <Legend wrapperStyle={{ fontSize: "11px" }} />
             </PieChart>
-          </ResponsiveContainer>
+            )}
+          </MeasuredChart>
         </ChartCard>
 
         <ChartCard index={22} title="Доход по способам оплаты (90 дн.)" icon={Tag}>
           {data.providerSeries.length === 0 ? (
             <NoData />
           ) : (
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
+            <MeasuredChart>
+              {({ width, height }) => (
+              <PieChart width={width} height={height}>
                 <Pie
                   data={data.providerSeries}
                   dataKey="amount"
@@ -371,7 +422,8 @@ export function AnalyticsPage() {
                 <Tooltip content={<CustomTooltip />} formatter={(v) => [fmt(Number(v ?? 0)), "Сумма"]} />
                 <Legend wrapperStyle={{ fontSize: "11px" }} />
               </PieChart>
-            </ResponsiveContainer>
+              )}
+            </MeasuredChart>
           )}
         </ChartCard>
 
@@ -379,15 +431,17 @@ export function AnalyticsPage() {
           {data.topTariffs.length === 0 ? (
             <NoData />
           ) : (
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data.topTariffs} layout="vertical" margin={{ top: 0, right: 0, left: 10, bottom: 0 }}>
+            <MeasuredChart>
+              {({ width, height }) => (
+              <BarChart width={width} height={height} data={data.topTariffs} layout="vertical" margin={{ top: 0, right: 0, left: 10, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" className="stroke-foreground/10" />
                 <XAxis type="number" tick={{ fontSize: 11 }} className="text-muted-foreground" />
                 <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={110} className="text-muted-foreground" />
                 <Tooltip content={<CustomTooltip />} formatter={(v) => [fmt(Number(v ?? 0)), "Доход"]} />
                 <Bar dataKey="revenue" fill="hsl(var(--primary))" name="Доход" radius={[0, 4, 4, 0]} />
               </BarChart>
-            </ResponsiveContainer>
+              )}
+            </MeasuredChart>
           )}
         </ChartCard>
       </div>
@@ -648,14 +702,14 @@ function MetricCard({
 function ChartCard({ title, icon: Icon, children, index = 0 }: { title: string; icon: React.ElementType; children: React.ReactNode; index?: number }) {
   return (
     <motion.div custom={index} variants={cardVariants} initial="hidden" animate="visible" className="h-full">
-      <Card className="relative overflow-hidden bg-background/60 backdrop-blur-3xl border-white/10 rounded-[2rem] shadow-xl flex flex-col h-full">
+      <Card className="relative min-w-0 overflow-hidden bg-background/60 backdrop-blur-3xl border-white/10 rounded-[2rem] shadow-xl flex flex-col h-full">
         <div className="px-5 pt-5 pb-3 flex items-center gap-3 border-b border-white/5">
           <div className="h-9 w-9 rounded-2xl bg-gradient-to-br from-primary/15 to-primary/5 border border-white/10 flex items-center justify-center shadow-inner shrink-0">
             <Icon className="h-4 w-4 text-primary" />
           </div>
           <h3 className="text-sm font-bold tracking-tight">{title}</h3>
         </div>
-        <div className="px-5 py-4 flex-1 min-h-[280px] h-72">
+        <div className="px-5 py-4 flex-1 min-h-[280px] h-72 w-full min-w-0">
           {children}
         </div>
       </Card>

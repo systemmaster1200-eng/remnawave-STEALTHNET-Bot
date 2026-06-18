@@ -52,7 +52,7 @@ function hexToRgb(hex: string) {
 export function AnimatedBackground({ variant = "fixed", intensity = "normal" }: { variant?: "fixed" | "absolute", intensity?: "normal" | "weak" }) {
   const { config, resolvedMode } = useTheme();
   const location = useLocation();
-  if (location.pathname === "/admin" && variant === "fixed") return null;
+  const disabled = location.pathname === "/admin" && variant === "fixed";
   const lowPower = variant === "fixed" && isGuestPath(location.pathname);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -62,7 +62,7 @@ export function AnimatedBackground({ variant = "fixed", intensity = "normal" }: 
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (disabled || !canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
@@ -160,7 +160,9 @@ export function AnimatedBackground({ variant = "fixed", intensity = "normal" }: 
       cancelAnimationFrame(frameRef.current);
       window.removeEventListener("resize", resize);
     };
-  }, [config.accent, resolvedMode, lowPower, variant]);
+  }, [config.accent, disabled, resolvedMode, lowPower, variant]);
+
+  if (disabled) return null;
 
   return (
     <div className={`${variant === "fixed" ? "fixed" : "absolute"} inset-0 ${variant === "fixed" ? "-z-50" : "z-0"} overflow-hidden ${intensity === "weak" ? "opacity-30" : ""}`} aria-hidden>

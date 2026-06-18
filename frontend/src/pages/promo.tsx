@@ -34,7 +34,7 @@ import {
   ToggleLeft,
   ToggleRight,
 } from "lucide-react";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import { cn } from "@/lib/utils";
 
 interface Squad {

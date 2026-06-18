@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
 import {
   Shield, LayoutDashboard, Users, CreditCard, Settings, LogOut, KeyRound,
   Megaphone, Tag, BarChart3, FileText, ExternalLink, Sun, Moon, Monitor,
@@ -165,6 +164,17 @@ function NavItems({ onClick }: { onClick?: () => void }) {
   );
 }
 
+function AdminPageLoader() {
+  return (
+    <div className="flex min-h-[55vh] w-full items-center justify-center px-4">
+      <div className="flex flex-col items-center gap-3 rounded-2xl border border-white/10 bg-white/10 px-6 py-5 text-muted-foreground shadow-xl backdrop-blur-xl">
+        <RefreshCw className="h-6 w-6 animate-spin text-primary" />
+        <span className="text-sm font-medium">Загрузка раздела...</span>
+      </div>
+    </div>
+  );
+}
+
 export function DashboardLayout() {
   const { t } = useTranslation();
   useAdminLanguageSync();
@@ -300,16 +310,13 @@ export function DashboardLayout() {
       </aside>
 
       {/* ═══ Mobile sidebar overlay ═══ */}
-      <AnimatePresence>
-        {mobileMenuOpen && (
-          <>
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              className="fixed inset-0 z-[69] bg-background/50 backdrop-blur-sm md:hidden" onClick={() => setMobileMenuOpen(false)} />
-            <motion.aside
-              initial={{ x: -290 }} animate={{ x: 0 }} exit={{ x: -290 }}
-              transition={{ type: "spring", damping: 25, stiffness: 300 }}
-              className="fixed left-0 top-0 bottom-0 z-[70] w-[290px] flex flex-col md:hidden bg-primary/20 dark:bg-primary/30 backdrop-blur-xl border-r border-white/30 dark:border-primary/40 shadow-[20px_0_40px_-10px_rgba(0,0,0,0.5)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),inset_0_0_40px_hsl(var(--primary)/0.2),0_0_40px_hsl(var(--primary)/0.2)] overflow-hidden"
-            >
+      {mobileMenuOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-[69] bg-background/50 backdrop-blur-sm md:hidden animate-in fade-in duration-200"
+            onClick={() => setMobileMenuOpen(false)}
+          />
+          <aside className="fixed left-0 top-0 bottom-0 z-[70] w-[290px] flex flex-col md:hidden bg-primary/20 dark:bg-primary/30 backdrop-blur-xl border-r border-white/30 dark:border-primary/40 shadow-[20px_0_40px_-10px_rgba(0,0,0,0.5)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),inset_0_0_40px_hsl(var(--primary)/0.2),0_0_40px_hsl(var(--primary)/0.2)] overflow-hidden animate-in slide-in-from-left duration-300">
               <div className="flex h-16 items-center justify-center px-4 relative z-10">
                 <div className="absolute bottom-0 left-6 right-6 h-[1px] bg-gradient-to-r from-transparent via-white/20 dark:via-white/10 to-transparent"></div>
                 <div className="flex items-center gap-3 min-w-0">
@@ -348,10 +355,9 @@ export function DashboardLayout() {
                   {t("admin.header.logout")}
                 </Button>
               </div>
-            </motion.aside>
-          </>
-        )}
-      </AnimatePresence>
+          </aside>
+        </>
+      )}
 
       {/* ═══ Main content ═══ */}
       <main className="flex-1 min-w-0 flex flex-col md:pl-[290px] w-full relative z-10">
@@ -487,7 +493,9 @@ export function DashboardLayout() {
           </div>
         </header>
         <div className="flex-1 px-4 md:px-6 pt-6 pb-6 animate-in fade-in duration-300 relative z-10">
-          <Outlet />
+          <Suspense fallback={<AdminPageLoader />}>
+            <Outlet />
+          </Suspense>
         </div>
       </main>
 

@@ -10,7 +10,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import { Server, Plus, Copy, Check, Loader2, Pencil, Trash2, FileJson, Layers, Tag, Boxes } from "lucide-react";
 import {
   Dialog,

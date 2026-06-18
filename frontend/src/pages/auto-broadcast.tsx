@@ -18,7 +18,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import {
   CalendarClock,
   Plus,

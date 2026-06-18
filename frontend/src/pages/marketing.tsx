@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { motion } from "framer-motion";
+import { motion } from "@/lib/motion-shim";
 import {
   Megaphone, Link2, BarChart3, Target, Copy, Check, ExternalLink,
   Info, TrendingUp, Loader2,
