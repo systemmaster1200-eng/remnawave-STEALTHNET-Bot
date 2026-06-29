@@ -338,6 +338,24 @@ export async function notifyTariffActivated(clientId: string, paymentId: string)
       }
     }
     const cfg = await getSystemConfig();
+    // Настройки сообщения «после оформления подписки» (админка → Подписка):
+    //   purchase_message_enabled  — "0" отключает отправку этого сообщения клиенту;
+    //   purchase_message_text     — кастомный текст (плейсхолдеры {{TARIFF}}, {{SUBSCRIPTION_URL}});
+    //   purchase_message_buttons  — JSON-конструктор кнопок ([{text, action}, …]).
+    let purchaseMsgEnabled = true;
+    let purchaseMsgText: string | null = null;
+    let purchaseMsgButtons: string | null = null;
+    try {
+      const rowsCfg = await prisma.systemSetting.findMany({
+        where: { key: { in: ["purchase_message_enabled", "purchase_message_text", "purchase_message_buttons"] } },
+        select: { key: true, value: true },
+      });
+      for (const r of rowsCfg) {
+        if (r.key === "purchase_message_enabled") purchaseMsgEnabled = r.value !== "0";
+        else if (r.key === "purchase_message_text") purchaseMsgText = r.value;
+        else if (r.key === "purchase_message_buttons") purchaseMsgButtons = r.value;
+      }
+    } catch { /* настройки недоступны → дефолтное поведение */ }
     // подсказка «если инструкция не открылась»
     // (платная/админская подписка). Текст из настроек (Тексты бота) или дефолт.
     const instrFallback = ((cfg as { botInstructionFallbackText?: string | null }).botInstructionFallbackText ?? "").trim()
@@ -356,16 +374,54 @@ export async function notifyTariffActivated(clientId: string, paymentId: string)
     const textClient = `${headline}.${noteBlock}${linkBlock}`;
     const hasLocations = !!(payment?.tariff?.locations?.trim());
     type Row = ({ text: string; callback_data: string } | { text: string; url: string })[];
-    const rows: Row[] = [];
-    if (subscriptionUrl) rows.push([{ text: "📲 Инструкции по установке", url: subscriptionUrl }]);
-    if (hasLocations && payment?.tariffId) {
-      rows.push([{ text: "🌐 Локации", callback_data: `menu:locations:${payment.tariffId}` }]);
+
+    // Отключение отправки (только для обычной покупки; админская выдача всегда уведомляет).
+    if (!purchaseMsgEnabled && !isAdminGrant) {
+      // Клиенту ничего не шлём — переходим к админ-уведомлению ниже.
+    } else {
+      // Текст: кастомный из настроек (с плейсхолдерами) или дефолтный.
+      let finalText = textClient;
+      if (purchaseMsgText && purchaseMsgText.trim()) {
+        finalText = purchaseMsgText
+          .split("{{TARIFF}}").join(escapeHtml(tariffName))
+          .split("{{SUBSCRIPTION_URL}}").join(subscriptionUrl ?? "");
+      }
+      // Кнопки: кастомный конструктор из настроек, иначе дефолтный набор.
+      let rows: Row[] = [];
+      let usedCustomButtons = false;
+      if (purchaseMsgButtons != null) {
+        try {
+          const parsed = JSON.parse(purchaseMsgButtons) as Array<{ text?: string; action?: string }>;
+          if (Array.isArray(parsed)) {
+            const base = (cfg.publicAppUrl || "").replace(/\/+$/, "");
+            for (const b of parsed) {
+              const text = (b?.text ?? "").trim();
+              let action = (b?.action ?? "").trim();
+              if (!text || !action) continue;
+              if (action.includes("{{SUBSCRIPTION_URL}}")) {
+                if (!subscriptionUrl) continue;
+                action = action.split("{{SUBSCRIPTION_URL}}").join(subscriptionUrl);
+              }
+              if (action.startsWith("menu:")) rows.push([{ text, callback_data: action }]);
+              else if (action.startsWith("webapp:")) rows.push([{ text, url: `${base}${action.slice("webapp:".length)}` }]);
+              else rows.push([{ text, url: action }]);
+            }
+            usedCustomButtons = true;
+          }
+        } catch { /* битый JSON → дефолтные кнопки */ }
+      }
+      if (!usedCustomButtons) {
+        if (subscriptionUrl) rows.push([{ text: "📲 Инструкции по установке", url: subscriptionUrl }]);
+        if (hasLocations && payment?.tariffId) {
+          rows.push([{ text: "🌐 Локации", callback_data: `menu:locations:${payment.tariffId}` }]);
+        }
+        rows.push([{ text: "📋 Мои подписки", callback_data: "menu:my_subs" }]);
+        rows.push([{ text: cfg.botBackLabel ?? "🏠 Главное меню", callback_data: "menu:main" }]);
+      }
+      await sendTelegramToUser(client.telegramId, finalText, null, rows.length > 0 ? { inline_keyboard: rows } : undefined, {
+        clientIdForBotToken: clientId,
+      });
     }
-    rows.push([{ text: "📋 Мои подписки", callback_data: "menu:my_subs" }]);
-    rows.push([{ text: cfg.botBackLabel ?? "🏠 Главное меню", callback_data: "menu:main" }]);
-    await sendTelegramToUser(client.telegramId, textClient, null, { inline_keyboard: rows }, {
-      clientIdForBotToken: clientId,
-    });
   }
   const clientLabel = formatClientLabel(client);
   const lines = [

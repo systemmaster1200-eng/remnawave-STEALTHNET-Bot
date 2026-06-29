@@ -143,6 +143,13 @@ export function StealthSubscribe() {
     [subsList, selectedSubId],
   );
 
+  // Если пришли с дашборда по «Подключить» (?sub=<id>) и эта подписка существует —
+  // подписка зафиксирована: селектор «какую подписку настроить» не показываем.
+  const lockedSub = useMemo(() => {
+    const requested = searchParams.get("sub");
+    return Boolean(requested && subsList.some((s) => s.id === requested));
+  }, [searchParams, subsList]);
+
   const isMiniapp = useMemo(() => {
     if (typeof window === "undefined") return false;
     const tg = (window as unknown as { Telegram?: { WebApp?: unknown } }).Telegram?.WebApp;
@@ -270,8 +277,9 @@ export function StealthSubscribe() {
             <p className="text-sm text-zinc-400">3 шага для завершения настройки</p>
           </div>
 
-          {/* выбор подписки (если их несколько) — какую настраиваем */}
-          {subsList.length > 1 && (
+          {/* выбор подписки (если их несколько) — какую настраиваем.
+              Скрыт, если подписка зафиксирована переходом с дашборда (?sub=). */}
+          {subsList.length > 1 && !lockedSub && (
             <div className="space-y-2.5">
               <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 text-center">Какую подписку настроить</p>
               <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
@@ -285,7 +293,7 @@ export function StealthSubscribe() {
                       className={cn(
                         "shrink-0 rounded-2xl border px-3.5 py-2 text-xs font-bold transition-all inline-flex items-center gap-2",
                         active
-                          ? "border-rose-500 bg-rose-500/[0.1] text-white shadow-[0_0_20px_-6px_rgba(255,35,87,0.5)]"
+                          ? "border-blue-500 bg-blue-500/[0.1] text-white shadow-[0_0_20px_-6px_rgba(47,107,255,0.5)]"
                           : "border-white/[0.08] bg-zinc-900/60 text-zinc-400 hover:border-white/20",
                       )}
                     >
@@ -327,7 +335,7 @@ export function StealthSubscribe() {
                       className={cn(
                         "relative rounded-2xl border-2 bg-white/[0.03] backdrop-blur-xl p-3.5 text-left transition-colors duration-300",
                         // Активный (не featured) → ярко-розовый акцент
-                        active && !isFeatured && "border-rose-500 bg-rose-500/[0.08] shadow-[0_0_32px_-4px_rgba(255,35,87,0.5),inset_0_1px_0_rgba(255,255,255,0.08)]",
+                        active && !isFeatured && "border-blue-500 bg-blue-500/[0.08] shadow-[0_0_32px_-4px_rgba(47,107,255,0.5),inset_0_1px_0_rgba(255,255,255,0.08)]",
                         // Активный + featured → фиолетовый акцент
                         active && isFeatured && "border-violet-500 bg-violet-500/[0.1] shadow-[0_0_32px_-4px_rgba(167,139,250,0.55),inset_0_1px_0_rgba(255,255,255,0.08)]",
                         // Не активный
@@ -345,7 +353,7 @@ export function StealthSubscribe() {
                       {active && (
                         <span className={cn(
                           "absolute top-2 right-2 h-5 w-5 rounded-full flex items-center justify-center shadow-[0_2px_8px_rgba(0,0,0,0.4)]",
-                          isFeatured ? "bg-violet-500" : "bg-rose-500",
+                          isFeatured ? "bg-violet-500" : "bg-blue-500",
                         )}>
                           <Check className="h-3 w-3 text-white" strokeWidth={3} />
                         </span>
@@ -355,7 +363,7 @@ export function StealthSubscribe() {
                         <div className={cn(
                           "h-9 w-9 rounded-lg border flex items-center justify-center font-bold text-sm transition-colors",
                           active && isFeatured && "bg-violet-500/25 border-violet-500/50 text-violet-200",
-                          active && !isFeatured && "bg-rose-500/25 border-rose-500/50 text-rose-200",
+                          active && !isFeatured && "bg-blue-500/25 border-blue-500/50 text-blue-200",
                           !active && isFeatured && "bg-violet-500/10 border-violet-500/25 text-violet-300/70",
                           !active && !isFeatured && "bg-zinc-800/80 border-white/10 text-zinc-400",
                         )}>
@@ -372,7 +380,7 @@ export function StealthSubscribe() {
                           <div className={cn(
                             "text-[10px] truncate transition-colors",
                             active && isFeatured && "text-violet-300/90",
-                            active && !isFeatured && "text-rose-300/90",
+                            active && !isFeatured && "text-blue-300/90",
                             !active && "text-zinc-500",
                           )}>
                             {active ? "Выбрано" : isFeatured ? "VPN Client" : "Альтернативный клиент"}
@@ -518,7 +526,7 @@ export function StealthSubscribe() {
           </div>
 
           <div className="relative rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-xl p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] overflow-hidden">
-            <div className="absolute -top-10 -right-10 h-24 w-24 rounded-full bg-rose-500/10 blur-2xl pointer-events-none" />
+            <div className="absolute -top-10 -right-10 h-24 w-24 rounded-full bg-blue-500/10 blur-2xl pointer-events-none" />
             <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-2">Subscription URL</p>
             <p className="relative font-mono text-xs text-zinc-200 break-all">{subUrl ?? "—"}</p>
           </div>

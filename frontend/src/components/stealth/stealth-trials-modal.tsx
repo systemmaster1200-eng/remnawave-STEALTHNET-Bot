@@ -2,7 +2,7 @@
  * StealthTrialsModal — выбор и активация пробного периода в Stealth-дизайне.
  *
  * Аналог TrialsPickerDialog из классик-кабинета, но в стилистике стелс:
- * zinc-900 карточки, rose-акценты, rounded-2xl. Активация — сразу по клику
+ * zinc-900 карточки, blue-акценты, rounded-2xl. Активация — сразу по клику
  * на карточку триала (название, длительность, трафик, устройства, описание).
  */
 
@@ -13,6 +13,7 @@ import { useClientAuth } from "@/contexts/client-auth";
 import { api, type ClientTrialOption } from "@/lib/api";
 import { formatRuDays } from "@/lib/i18n";
 import { StealthModal } from "./stealth-modal";
+import { WizardHeader } from "./wizard-header";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -20,6 +21,7 @@ interface Props {
   onClose: () => void;
   /** Колбэк после успешной активации — родитель обновляет дашборд (reloadKey). */
   onActivated?: () => void;
+  asPage?: boolean;
 }
 
 function formatTrafficLabel(bytesStr: string | null): string {
@@ -34,7 +36,7 @@ function formatTrafficLabel(bytesStr: string | null): string {
   return `${(bytes / 1024).toFixed(0)} КБ`;
 }
 
-export function StealthTrialsModal({ open, onClose, onActivated }: Props) {
+export function StealthTrialsModal({ open, onClose, onActivated, asPage = false }: Props) {
   const { state, refreshProfile } = useClientAuth();
   const [items, setItems] = useState<ClientTrialOption[]>([]);
   const [loading, setLoading] = useState(false);
@@ -42,7 +44,7 @@ export function StealthTrialsModal({ open, onClose, onActivated }: Props) {
   const [activatingId, setActivatingId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!open || !state.token) return;
+    if ((!open && !asPage) || !state.token) return;
     let alive = true;
     setLoading(true);
     setError(null);
@@ -52,7 +54,7 @@ export function StealthTrialsModal({ open, onClose, onActivated }: Props) {
       .catch((e) => { if (alive) setError(e instanceof Error ? e.message : "Не удалось загрузить пробники"); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [open, state.token]);
+  }, [open, asPage, state.token]);
 
   async function activate(trial: ClientTrialOption) {
     if (!state.token || activatingId) return;
@@ -70,8 +72,7 @@ export function StealthTrialsModal({ open, onClose, onActivated }: Props) {
     }
   }
 
-  return (
-    <StealthModal open={open} onClose={onClose} title="🎁 Пробный период">
+  const inner = (
       <div className="space-y-3">
         <p className="text-xs text-zinc-500 -mt-2">
           Каждый пробник можно взять только один раз. Нажми на карточку, чтобы активировать.
@@ -84,9 +85,9 @@ export function StealthTrialsModal({ open, onClose, onActivated }: Props) {
         )}
 
         {!loading && error && (
-          <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 flex items-start gap-2 text-xs">
-            <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-            <span className="text-rose-200">{error}</span>
+          <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 p-3 flex items-start gap-2 text-xs">
+            <AlertCircle className="h-4 w-4 text-blue-400 shrink-0 mt-0.5" />
+            <span className="text-blue-200">{error}</span>
           </div>
         )}
 
@@ -119,16 +120,16 @@ export function StealthTrialsModal({ open, onClose, onActivated }: Props) {
                     disabled={isDisabled || isActivating}
                     className={cn(
                       "w-full text-left rounded-2xl border bg-white/[0.03] border-white/[0.07] p-4 transition",
-                      "hover:border-rose-500/40 hover:bg-rose-500/[0.06] active:scale-[0.99]",
+                      "hover:border-blue-500/40 hover:bg-blue-500/[0.06] active:scale-[0.99]",
                       isDisabled && "opacity-50 pointer-events-none",
-                      isActivating && "border-rose-500/40 bg-rose-500/[0.06]",
+                      isActivating && "border-blue-500/40 bg-blue-500/[0.06]",
                     )}
                   >
                     <div className="flex items-start gap-3">
-                      <span className="shrink-0 inline-flex h-10 w-10 items-center justify-center rounded-xl bg-rose-500/15 border border-rose-500/30">
+                      <span className="shrink-0 inline-flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/15 border border-blue-500/30">
                         {isActivating
-                          ? <Loader2 className="h-5 w-5 text-rose-400 animate-spin" />
-                          : <Gift className="h-5 w-5 text-rose-400" />}
+                          ? <Loader2 className="h-5 w-5 text-blue-400 animate-spin" />
+                          : <Gift className="h-5 w-5 text-blue-400" />}
                       </span>
                       <div className="flex-1 min-w-0">
                         <h4 className="text-sm font-bold tracking-tight leading-tight">
@@ -146,18 +147,18 @@ export function StealthTrialsModal({ open, onClose, onActivated }: Props) {
                         )}
                         <div className="flex flex-wrap gap-1.5 mt-2.5">
                           <span className="inline-flex items-center gap-1 rounded-full bg-white/[0.04] border border-white/[0.06] px-2.5 py-1 text-[11px] text-zinc-200">
-                            <Clock className="h-3 w-3 text-rose-400/80" />
+                            <Clock className="h-3 w-3 text-blue-400/80" />
                             {formatRuDays(trial.durationDays)}
                           </span>
                           <span className="inline-flex items-center gap-1 rounded-full bg-white/[0.04] border border-white/[0.06] px-2.5 py-1 text-[11px] text-zinc-200">
                             {trial.trafficLimitBytes === null
-                              ? <InfinityIcon className="h-3 w-3 text-rose-400/80" />
-                              : <Wifi className="h-3 w-3 text-rose-400/80" />}
+                              ? <InfinityIcon className="h-3 w-3 text-blue-400/80" />
+                              : <Wifi className="h-3 w-3 text-blue-400/80" />}
                             {traffic}
                           </span>
                           {devices !== null && (
                             <span className="inline-flex items-center gap-1 rounded-full bg-white/[0.04] border border-white/[0.06] px-2.5 py-1 text-[11px] text-zinc-200">
-                              <Smartphone className="h-3 w-3 text-rose-400/80" />
+                              <Smartphone className="h-3 w-3 text-blue-400/80" />
                               {devices === 1 ? "1 устройство" : `${devices} устройств${devices >= 5 ? "" : "а"}`}
                             </span>
                           )}
@@ -171,6 +172,21 @@ export function StealthTrialsModal({ open, onClose, onActivated }: Props) {
           </div>
         )}
       </div>
+  );
+
+  if (asPage) {
+    return (
+      <div className="px-4 pt-2 space-y-5 pb-4">
+        <WizardHeader step={1} totalSteps={1} onClose={onClose} />
+        <h1 className="text-2xl font-extrabold text-zinc-100 px-1">🎁 Пробный период</h1>
+        {inner}
+      </div>
+    );
+  }
+
+  return (
+    <StealthModal open={open} onClose={onClose} title="🎁 Пробный период">
+      {inner}
     </StealthModal>
   );
 }

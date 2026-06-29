@@ -23,23 +23,39 @@ const MAX_ATTACHMENT_MB = 50;
 
 const BUTTON_ACTIONS = [
   { value: "", label: "Без кнопки" },
-  { value: "menu:my_subs", label: "📋 Мои подписки" },
-  { value: "menu:tariffs", label: "📦 Тарифы" },
-  { value: "menu:topup", label: "💳 Пополнить баланс" },
-  { value: "menu:profile", label: "👤 Профиль" },
-  { value: "menu:trial", label: "🎁 Бесплатный триал" },
-  { value: "menu:referral", label: "🔗 Реферальная программа" },
-  { value: "menu:promocode", label: "🎟️ Промокод" },
-  { value: "menu:support", label: "🆘 Поддержка" },
-  { value: "menu:vpn", label: "📋 VPN подключение" },
-  { value: "menu:devices", label: "📱 Устройства" },
-  { value: "menu:extra_options", label: "➕ Доп. опции" },
-  { value: "menu:main", label: "📋 Главное меню" },
-  { value: "webapp:/cabinet", label: "🌐 Web кабинет" },
-  { value: "webapp:/cabinet/subscribe", label: "🌐 Страница подключения" },
-  { value: "webapp:/cabinet/tickets", label: "🌐 Тикеты" },
+  // ── Разделы бота (callback) ──
+  { value: "menu:my_subs", label: "💬 Бот · Мои подписки" },
+  { value: "menu:tariffs", label: "💬 Бот · Тарифы" },
+  { value: "menu:topup", label: "💬 Бот · Пополнить баланс" },
+  { value: "menu:profile", label: "💬 Бот · Профиль" },
+  { value: "menu:trial", label: "💬 Бот · Бесплатный триал" },
+  { value: "menu:referral", label: "💬 Бот · Рефералка" },
+  { value: "menu:promocode", label: "💬 Бот · Промокод" },
+  { value: "menu:support", label: "💬 Бот · Поддержка" },
+  { value: "menu:vpn", label: "💬 Бот · VPN подключение" },
+  { value: "menu:devices", label: "💬 Бот · Устройства" },
+  { value: "menu:extra_options", label: "💬 Бот · Доп. опции" },
+  { value: "menu:main", label: "💬 Бот · Главное меню" },
+  // ── Страницы мини-аппа (web_app) ──
+  { value: "webapp:/cabinet/topup", label: "🌐 Миниапп · Пополнить баланс" },
+  { value: "webapp:/cabinet/tariffs", label: "🌐 Миниапп · Тарифы" },
+  { value: "webapp:/cabinet/subscribe", label: "🌐 Миниапп · Подключение к VPN" },
+  { value: "webapp:/cabinet/devices", label: "🌐 Миниапп · Мои устройства" },
+  { value: "webapp:/cabinet/promocode", label: "🌐 Миниапп · Промокод" },
+  { value: "webapp:/cabinet/trial", label: "🌐 Миниапп · Триал" },
+  { value: "webapp:/cabinet/referral", label: "🌐 Миниапп · Рефералка" },
+  { value: "webapp:/cabinet/profile", label: "🌐 Миниапп · Профиль" },
+  { value: "webapp:/cabinet", label: "🌐 Миниапп · Главная кабинета" },
+  { value: "webapp:/cabinet/tickets", label: "🌐 Миниапп · Тикеты" },
+  // ── Произвольная ссылка ──
   { value: "__custom_url__", label: "🔗 Своя ссылка (URL)" },
 ];
+
+// Кнопка конструктора: текст + действие (с раскрытием custom URL).
+type EditorButton = { text: string; action: string; customUrl: string };
+// Действия без пустого «Без кнопки» (он только для single/list-режимов).
+const CONSTRUCTOR_ACTIONS = BUTTON_ACTIONS.filter((a) => a.value !== "");
+
 
 type ChannelKey = "telegram" | "email" | "both";
 
@@ -83,9 +99,8 @@ export function BroadcastPage() {
   const [broadcastSubject, setBroadcastSubject] = useState("");
   const [broadcastMessage, setBroadcastMessage] = useState("");
   const [broadcastAttachment, setBroadcastAttachment] = useState<File | null>(null);
-  const [broadcastButtonText, setBroadcastButtonText] = useState("");
-  const [broadcastButtonAction, setBroadcastButtonAction] = useState("");
-  const [broadcastButtonCustomUrl, setBroadcastButtonCustomUrl] = useState("");
+  // Новый конструктор кнопок (произвольное число) для основной рассылки.
+  const [broadcastButtons, setBroadcastButtons] = useState<EditorButton[]>([]);
   const [broadcastLoading, setBroadcastLoading] = useState(false);
   const [broadcastResult, setBroadcastResult] = useState<BroadcastResult | null>(null);
   const [broadcastProgress, setBroadcastProgress] = useState<BroadcastProgress | null>(null);
@@ -115,9 +130,8 @@ export function BroadcastPage() {
   const [singleAttachment, setSingleAttachment] = useState<File | null>(null);
   const [singleDragOver, setSingleDragOver] = useState(false);
   const singleFileRef = useRef<HTMLInputElement>(null);
-  const [singleBtnAction, setSingleBtnAction] = useState("");
-  const [singleBtnText, setSingleBtnText] = useState("");
-  const [singleBtnCustomUrl, setSingleBtnCustomUrl] = useState("");
+  // Конструктор кнопок (2–5 шт.) для режима «Личное» (один/список) — как в массовой рассылке.
+  const [singleButtons, setSingleButtons] = useState<EditorButton[]>([]);
   // T-email-direct: канал (telegram/email) + поля email-режима.
   const [singleChannel, setSingleChannel] = useState<"telegram" | "email">("telegram");
   const [singleEmail, setSingleEmail] = useState("");
@@ -151,8 +165,7 @@ export function BroadcastPage() {
         telegramId: recipient,
         subject: singleSubject,
         message: text,
-        buttonText: singleBtnText,
-        buttonUrl: resolvedSingleBtnUrl,
+        buttons: builtSingleButtons.length > 0 ? builtSingleButtons : undefined,
       }, singleAttachment);
       setSingleResult({ ok: true });
       setSingleMsg("");
@@ -214,7 +227,7 @@ export function BroadcastPage() {
     setListSending(true);
     setListJob(null);
     try {
-      const { jobId } = await api.startSendToList(token, { channel: singleChannel, telegramIds: parsedListRecipients, subject: singleSubject, message: text, buttonText: singleBtnText, buttonUrl: resolvedSingleBtnUrl }, singleAttachment);
+      const { jobId } = await api.startSendToList(token, { channel: singleChannel, telegramIds: parsedListRecipients, subject: singleSubject, message: text, buttons: builtSingleButtons.length > 0 ? builtSingleButtons : undefined }, singleAttachment);
       listPollRef.current = true;
       const poll = async () => {
         if (!listPollRef.current) return;
@@ -274,15 +287,18 @@ export function BroadcastPage() {
     setBroadcastJobId(null);
     setBroadcastCancelRequested(false);
     try {
-      const resolvedAction = broadcastButtonAction === "__custom_url__" ? broadcastButtonCustomUrl.trim() : broadcastButtonAction;
+      // Конструктор кнопок → массив {text, action}. Custom URL раскрывается.
+      const builtButtons = broadcastButtons
+        .map((b) => ({ text: b.text.trim(), action: b.action === "__custom_url__" ? b.customUrl.trim() : b.action }))
+        .filter((b) => b.text && b.action);
       const { jobId } = await api.broadcast(
         token,
         {
           channel: broadcastChannel,
           subject: broadcastSubject.trim() || undefined,
           message: text,
-          buttonText: broadcastButtonText.trim() || undefined,
-          buttonUrl: resolvedAction || undefined,
+          // Новый конструктор приоритетен; старые одиночные поля не шлём.
+          buttons: builtButtons.length > 0 ? builtButtons : undefined,
           targetGroup: broadcastTargetGroup === "all" ? undefined : broadcastTargetGroup,
         },
         broadcastAttachment ?? undefined
@@ -294,9 +310,7 @@ export function BroadcastPage() {
         setBroadcastMessage("");
         setBroadcastSubject("");
         setBroadcastAttachment(null);
-        setBroadcastButtonText("");
-        setBroadcastButtonAction("");
-        setBroadcastButtonCustomUrl("");
+        setBroadcastButtons([]);
         api.broadcastRecipientsCount(token).then(setBroadcastRecipients).catch(() => {});
       }
     } catch (err) {
@@ -369,7 +383,10 @@ export function BroadcastPage() {
   }
 
   // T-direct-send: итоговый URL/действие кнопки (для __custom_url__ берём введённую ссылку).
-  const resolvedSingleBtnUrl = singleBtnAction === "__custom_url__" ? singleBtnCustomUrl.trim() : singleBtnAction;
+  // Конструктор кнопок «Личное» → массив {text, action} (custom URL раскрывается).
+  const builtSingleButtons = singleButtons
+    .map((b) => ({ text: b.text.trim(), action: b.action === "__custom_url__" ? b.customUrl.trim() : b.action }))
+    .filter((b) => b.text && b.action);
 
   // T-direct-send: общий блок «вложение + кнопка» для обоих режимов вкладки «Личное».
   const singleRichControls = (
@@ -439,48 +456,60 @@ export function BroadcastPage() {
             <div className="h-8 w-8 rounded-xl bg-sky-500/20 flex items-center justify-center">
               <MousePointerClick className="h-4 w-4 text-sky-500 dark:text-sky-400" />
             </div>
-            <p className="text-sm font-semibold">Кнопка под сообщением <span className="text-[11px] font-normal text-muted-foreground">(необязательно)</span></p>
+            <p className="text-sm font-semibold">Кнопки под сообщением <span className="text-[11px] font-normal text-muted-foreground">(до 5)</span></p>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">Действие</Label>
+
+          {/* Конструктор кнопок: текст + действие (меню/миниапп/URL). До 5 шт. */}
+          {singleButtons.length === 0 && (
+            <p className="text-[12px] text-muted-foreground">Кнопок нет. Добавьте до 5 кнопок.</p>
+          )}
+          {singleButtons.map((b, i) => (
+            <div key={i} className="rounded-xl border border-white/10 bg-background/40 p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-muted-foreground">Кнопка {i + 1}</span>
+                <button
+                  type="button"
+                  onClick={() => setSingleButtons((arr) => arr.filter((_, idx) => idx !== i))}
+                  className="text-[11px] text-rose-400 hover:text-rose-300"
+                >
+                  Удалить
+                </button>
+              </div>
+              <Input
+                value={b.text}
+                onChange={(e) => setSingleButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, text: e.target.value } : x))}
+                placeholder="Текст кнопки (напр. 📦 Тарифы)"
+                maxLength={64}
+                className="h-10 rounded-lg bg-background/60 border-white/10 focus-visible:ring-sky-500/40"
+              />
               <select
-                className="flex h-11 w-full rounded-xl border border-white/10 bg-background/60 px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50"
-                value={singleBtnAction}
-                onChange={(e) => setSingleBtnAction(e.target.value)}
+                className="flex h-10 w-full rounded-lg border border-white/10 bg-background/60 px-3 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50"
+                value={b.action}
+                onChange={(e) => setSingleButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, action: e.target.value } : x))}
               >
-                {BUTTON_ACTIONS.map((a) => (
+                {CONSTRUCTOR_ACTIONS.map((a) => (
                   <option key={a.value} value={a.value}>{a.label}</option>
                 ))}
               </select>
-            </div>
-            {singleBtnAction && (
-              <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">Текст кнопки</Label>
+              {b.action === "__custom_url__" && (
                 <Input
-                  value={singleBtnText}
-                  onChange={(e) => setSingleBtnText(e.target.value)}
-                  placeholder="Открыть тарифы"
-                  maxLength={64}
-                  className="h-11 rounded-xl bg-background/60 border-white/10 focus-visible:ring-sky-500/40"
+                  value={b.customUrl}
+                  onChange={(e) => setSingleButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, customUrl: e.target.value } : x))}
+                  placeholder="https://example.com"
+                  maxLength={500}
+                  className="h-10 rounded-lg bg-background/60 border-white/10 focus-visible:ring-sky-500/40"
                 />
-              </div>
-            )}
-          </div>
-          {singleBtnAction === "__custom_url__" && (
-            <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">Ссылка (URL)</Label>
-              <Input
-                value={singleBtnCustomUrl}
-                onChange={(e) => setSingleBtnCustomUrl(e.target.value)}
-                placeholder="https://example.com/tariffs"
-                maxLength={500}
-                className="h-11 rounded-xl bg-background/60 border-white/10 focus-visible:ring-sky-500/40"
-              />
+              )}
             </div>
-          )}
-          {singleBtnAction && !singleBtnText.trim() && (
-            <p className="text-[11px] text-amber-500">Укажите текст кнопки, иначе она не добавится.</p>
+          ))}
+          {singleButtons.length < 5 && (
+            <button
+              type="button"
+              onClick={() => setSingleButtons((arr) => [...arr, { text: "", action: "menu:my_subs", customUrl: "" }])}
+              className="w-full h-10 rounded-xl border border-dashed border-sky-500/40 text-sm text-sky-400 hover:bg-sky-500/10 transition"
+            >
+              + Добавить кнопку
+            </button>
           )}
         </div>
       </section>
@@ -754,48 +783,69 @@ export function BroadcastPage() {
                           <MousePointerClick className="h-4 w-4 text-sky-500 dark:text-sky-400" />
                         </div>
                         <div>
-                          <p className="text-sm font-semibold">Кнопка под сообщением</p>
+                          <p className="text-sm font-semibold">Кнопки под сообщением</p>
                           <p className="text-[11px] text-muted-foreground">Только для Telegram</p>
                         </div>
                       </div>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div className="space-y-1.5">
-                          <Label className="text-xs text-muted-foreground">Действие</Label>
+
+                      {broadcastButtons.length === 0 && (
+                        <p className="text-[11px] text-muted-foreground">Кнопок нет — сообщение уйдёт без кнопок.</p>
+                      )}
+
+                      {broadcastButtons.map((b, i) => (
+                        <div key={i} className="space-y-2 p-2.5 rounded-xl border border-white/10 bg-background/40">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold text-muted-foreground">Кнопка {i + 1}</span>
+                            <button
+                              type="button"
+                              className="text-xs px-2 py-1 text-rose-400 hover:text-rose-300"
+                              onClick={() => setBroadcastButtons((arr) => arr.filter((_, idx) => idx !== i))}
+                            >
+                              Удалить
+                            </button>
+                          </div>
+                          <Input
+                            value={b.text}
+                            onChange={(e) => setBroadcastButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, text: e.target.value } : x))}
+                            placeholder="Текст кнопки (напр. 📦 Тарифы)"
+                            maxLength={64}
+                            className="h-11 rounded-xl bg-background/60 border-white/10 focus-visible:ring-sky-500/40"
+                          />
                           <select
                             className="flex h-11 w-full rounded-xl border border-white/10 bg-background/60 px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50"
-                            value={broadcastButtonAction}
-                            onChange={(e) => setBroadcastButtonAction(e.target.value)}
+                            value={b.action}
+                            onChange={(e) => setBroadcastButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, action: e.target.value } : x))}
                           >
-                            {BUTTON_ACTIONS.map((a) => (
+                            {CONSTRUCTOR_ACTIONS.map((a) => (
                               <option key={a.value} value={a.value}>{a.label}</option>
                             ))}
                           </select>
-                        </div>
-                        {broadcastButtonAction && (
-                          <div className="space-y-1.5">
-                            <Label className="text-xs text-muted-foreground">Текст кнопки</Label>
+                          {b.action === "__custom_url__" && (
                             <Input
-                              value={broadcastButtonText}
-                              onChange={(e) => setBroadcastButtonText(e.target.value)}
-                              placeholder="Открыть тарифы"
-                              maxLength={64}
+                              value={b.customUrl}
+                              onChange={(e) => setBroadcastButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, customUrl: e.target.value } : x))}
+                              placeholder="https://example.com/tariffs"
+                              maxLength={500}
                               className="h-11 rounded-xl bg-background/60 border-white/10 focus-visible:ring-sky-500/40"
                             />
-                          </div>
-                        )}
-                      </div>
-                      {broadcastButtonAction === "__custom_url__" && (
-                        <div className="space-y-1.5">
-                          <Label className="text-xs text-muted-foreground">Ссылка (URL)</Label>
-                          <Input
-                            value={broadcastButtonCustomUrl}
-                            onChange={(e) => setBroadcastButtonCustomUrl(e.target.value)}
-                            placeholder="https://example.com/tariffs"
-                            maxLength={500}
-                            className="h-11 rounded-xl bg-background/60 border-white/10 focus-visible:ring-sky-500/40"
-                          />
+                          )}
                         </div>
+                      ))}
+
+                      {broadcastButtons.length < 10 && (
+                        <button
+                          type="button"
+                          className="w-full rounded-xl border border-white/10 bg-background/40 py-2 text-sm font-medium hover:bg-background/60 transition"
+                          onClick={() => setBroadcastButtons((arr) => [...arr, { text: "", action: "menu:my_subs", customUrl: "" }])}
+                        >
+                          + Добавить кнопку
+                        </button>
                       )}
+
+                      <p className="text-[11px] text-muted-foreground leading-snug">
+                        🌐 «Миниапп» открывает страницу внутри Telegram. Кнопки идут отдельными
+                        рядами в порядке добавления.
+                      </p>
                     </div>
                   </motion.section>
                 )}

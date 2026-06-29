@@ -1,6 +1,6 @@
 /**
  * NetworkBg — характерный фон для Stealth-дизайна:
- *   - Чёрный background `#020202`
+ *   - Чёрный background `#03070f`
  *   - Триангулированная SVG-сетка (тонкие красные линии + точки в узлах)
  *   - 3 ambient red blobs (top-right, mid-left, bottom-right) — мягкое свечение
  *
@@ -23,12 +23,12 @@ interface Props {
   flatten?: boolean;
 }
 
-export function NetworkBg({ accent = "#ff2357", opacity = 0.18, flatten = false }: Props) {
+export function NetworkBg({ accent = "#2f6bff", opacity = 0.18, flatten = false }: Props) {
   const patternId = useId();
   return (
     <>
       {/* Базовая заливка */}
-      <div className="fixed inset-0 -z-30 bg-[#020202] pointer-events-none" />
+      <div className="fixed inset-0 -z-30 bg-[#03070f] pointer-events-none" />
 
       {/* SVG-сетка (триангуляция) */}
       <svg

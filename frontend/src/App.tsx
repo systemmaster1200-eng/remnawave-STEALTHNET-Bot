@@ -79,11 +79,19 @@ import { ClientTariffsPage } from "@/pages/cabinet/client-tariffs";
 import { ClientProfilePage } from "@/pages/cabinet/client-profile";
 import { ClientReferralPage } from "@/pages/cabinet/client-referral";
 import { ClientSubscribePage } from "@/pages/cabinet/client-subscribe";
+import { ClientTopupPage } from "@/pages/cabinet/client-topup";
+import { ClientTrialPage } from "@/pages/cabinet/client-trial";
+import { ClientPromocodePage } from "@/pages/cabinet/client-promocode";
+import { ClientDevicesPage } from "@/pages/cabinet/client-devices";
+import { ClientExtendPage } from "@/pages/cabinet/client-extend";
+import { ClientSubscriptionDetailPage } from "@/pages/cabinet/client-subscription-detail";
+import { StealthConnectPage } from "@/pages/cabinet/stealth/stealth-connect";
 import { ClientYooMoneyPayPage } from "@/pages/cabinet/client-yoomoney-pay";
 import { ClientExtraOptionsPage } from "@/pages/cabinet/client-extra-options";
 import { ClientProxyPage } from "@/pages/cabinet/client-proxy";
 import { ClientSingboxPage } from "@/pages/cabinet/client-singbox";
 import { ClientTicketsPage } from "@/pages/cabinet/client-tickets";
+import { ClientNewTicketPage } from "@/pages/cabinet/client-new-ticket";
 import { ClientCustomBuildPage } from "@/pages/cabinet/client-custom-build";
 import { ClientGiftsPage } from "@/pages/cabinet/client-gifts";
 import { GiftActivatePage } from "@/pages/gift-activate";
@@ -111,7 +119,6 @@ function ForceChangePassword({ children }: { children: React.ReactNode }) {
 
 function RequireClientAuth({ children }: { children: React.ReactNode }) {
   const { state } = useClientAuth();
-  const location = useLocation();
   const inTelegram = typeof window !== "undefined" && Boolean((window as { Telegram?: { WebApp?: { initData?: string } } }).Telegram?.WebApp?.initData);
   const showMiniappLoading = state.miniappAuthLoading || (inTelegram && !state.token && !state.miniappAuthAttempted);
   if (showMiniappLoading) {
@@ -125,21 +132,16 @@ function RequireClientAuth({ children }: { children: React.ReactNode }) {
   if (!state.token) {
     return <Navigate to="/cabinet/login" replace />;
   }
-  // Проверяем серверный флаг onboardingCompleted ИЛИ эфемерный isNewTelegramUser
-  const needsOnboarding = state.client?.onboardingCompleted === false || state.isNewTelegramUser;
-  if (needsOnboarding && location.pathname !== "/cabinet/onboarding") {
-    return <Navigate to="/cabinet/onboarding" replace />;
-  }
+  // Онбординг полностью отключён: сразу пускаем в кабинет. Привязка email/Telegram
+  // и 2FA доступны позже в профиле, отдельным экраном на входе их не показываем.
   return <>{children}</>;
 }
 
 function RequireOnboarding({ children }: { children: React.ReactNode }) {
-  const { state } = useClientAuth();
-  const needsOnboarding = state.client?.onboardingCompleted === false || state.isNewTelegramUser;
-  if (!needsOnboarding) {
-    return <Navigate to="/cabinet/dashboard" replace />;
-  }
-  return <>{children}</>;
+  // Онбординг отключён полностью — даже прямой заход на /cabinet/onboarding
+  // уводит на дашборд.
+  void children;
+  return <Navigate to="/cabinet/dashboard" replace />;
 }
 
 function CabinetIndexRedirect() {
@@ -372,10 +374,74 @@ function AppRoutes() {
           }
         />
         <Route
+          path="tickets/new"
+          element={
+            <RequireClientAuth>
+              <ClientNewTicketPage />
+            </RequireClientAuth>
+          }
+        />
+        <Route
           path="subscribe"
           element={
             <RequireClientAuth>
               <ClientSubscribePage />
+            </RequireClientAuth>
+          }
+        />
+        <Route
+          path="topup"
+          element={
+            <RequireClientAuth>
+              <ClientTopupPage />
+            </RequireClientAuth>
+          }
+        />
+        <Route
+          path="trial"
+          element={
+            <RequireClientAuth>
+              <ClientTrialPage />
+            </RequireClientAuth>
+          }
+        />
+        <Route
+          path="connect"
+          element={
+            <RequireClientAuth>
+              <StealthConnectPage />
+            </RequireClientAuth>
+          }
+        />
+        <Route
+          path="promocode"
+          element={
+            <RequireClientAuth>
+              <ClientPromocodePage />
+            </RequireClientAuth>
+          }
+        />
+        <Route
+          path="devices"
+          element={
+            <RequireClientAuth>
+              <ClientDevicesPage />
+            </RequireClientAuth>
+          }
+        />
+        <Route
+          path="extend/:subId"
+          element={
+            <RequireClientAuth>
+              <ClientExtendPage />
+            </RequireClientAuth>
+          }
+        />
+        <Route
+          path="subscription/:subId"
+          element={
+            <RequireClientAuth>
+              <ClientSubscriptionDetailPage />
             </RequireClientAuth>
           }
         />

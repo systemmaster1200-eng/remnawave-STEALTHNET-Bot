@@ -8,7 +8,7 @@ export default defineConfig({
         react(),
         tailwindcss(),
         VitePWA({
-            registerType: "prompt",
+            registerType: "autoUpdate",
             injectRegister: null, // регистрируем вручную в main.tsx (для показа промпта обновления)
             includeAssets: [
                 "favicon.svg",
@@ -58,7 +58,7 @@ export default defineConfig({
                     /^\/assets\/.*\.(png|jpg|jpeg|svg|webp|ico)$/,
                 ],
                 maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-                skipWaiting: false, // ждём подтверждения от пользователя на обновление
+                skipWaiting: true, // сразу активируем новую версию — пользователь всегда на актуальной
                 clientsClaim: true,
                 cleanupOutdatedCaches: true,
                 runtimeCaching: [

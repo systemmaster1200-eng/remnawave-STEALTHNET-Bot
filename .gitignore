@@ -1,0 +1,8 @@
+
+# Секреты и локальные конфиги — НЕ публиковать
+.env
+.env.*
+!.env.example
+nginx/nginx.conf
+*.bak
+*.log

@@ -524,6 +524,10 @@ model AutoBroadcastRule {
   /// Используется для рассылки «подписка истекла» — обычно «🏠 Главное меню» или ссылка на правила.
   button2Text String? @map("button2_text")
   button2Url  String? @map("button2_url")
+  /// Конструктор кнопок: JSON-массив [{ "text": "...", "action": "menu:*|webapp:/path|https://..." }].
+  /// Если задан — используется ВМЕСТО buttonText/button2Text (произвольное число кнопок).
+  /// NULL → fallback на старые button*-поля (обратная совместимость).
+  buttonsConfig String? @map("buttons_config") @db.Text
   enabled     Boolean @default(true) @map("enabled")
 
   /// T-promo (13.05.2026, WolfVPN): если задан — в текст сообщения подставляется код этого промо.
@@ -613,6 +617,10 @@ model BroadcastHistory {
   message         String    @db.Text
   buttonText      String?   @map("button_text")
   buttonUrl       String?   @map("button_url")
+  /// Конструктор кнопок: JSON-массив [{ "text": "...", "action": "menu:*|webapp:/path|https://..." }].
+  /// Если задан — используется ВМЕСТО buttonText (произвольное число кнопок).
+  /// NULL → fallback на старые button*-поля (обратная совместимость).
+  buttonsConfig   String?   @map("buttons_config") @db.Text
   attachmentName  String?   @map("attachment_name")
   /// 25.05.2026, WolfVPN — путь к файлу-вложению на shared volume (для broadcast-worker).
   attachmentPath  String?   @map("attachment_path")
@@ -1480,6 +1488,11 @@ model AutoRenewNotification {
   offsetMinutes Int      @default(15) @map("offset_minutes")
   /// Текст сообщения. Поддерживает HTML telegram (b, i, code) + переменные в фигурных скобках.
   messageText   String   @map("message_text") @db.Text
+  /// JSON-массив inline-кнопок: [{ "text": "...", "action": "menu:my_subs" }, ...].
+  /// action: "menu:*" (callback), "webapp:/path" (web_app) или внешний URL (https://...).
+  /// NULL → используется дефолтный набор кнопок (обратная совместимость со старыми
+  /// шаблонами). Пустой массив "[]" → кнопки НЕ отправляются вовсе.
+  buttonsConfig String?  @map("buttons_config") @db.Text
   /// Включён ли шаблон.
   enabled       Boolean  @default(true)
   /// Порядок (для отображения в админке).

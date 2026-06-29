@@ -1261,7 +1261,7 @@ export const api = {
    */
   async broadcast(
     token: string,
-    body: { channel: "telegram" | "email" | "both"; subject?: string; message: string; buttonText?: string; buttonUrl?: string; targetGroup?: string },
+    body: { channel: "telegram" | "email" | "both"; subject?: string; message: string; buttonText?: string; buttonUrl?: string; buttons?: { text: string; action: string }[] | null; targetGroup?: string },
     attachment?: File | null
   ): Promise<{ jobId: string }> {
     const form = new FormData();
@@ -1270,6 +1270,8 @@ export const api = {
     if (body.subject != null && body.subject !== "") form.append("subject", body.subject);
     if (body.buttonText?.trim()) form.append("buttonText", body.buttonText.trim());
     if (body.buttonUrl?.trim()) form.append("buttonUrl", body.buttonUrl.trim());
+    // Новый конструктор кнопок: массив сериализуем в JSON-строку поля формы.
+    if (body.buttons !== undefined && body.buttons !== null) form.append("buttons", JSON.stringify(body.buttons));
     if (body.targetGroup) form.append("targetGroup", body.targetGroup);
     if (attachment) form.append("attachment", attachment, attachment.name);
     const headers = new Headers();
@@ -1348,7 +1350,7 @@ export const api = {
   // T-direct-send (портировано из WolfVPN): точечная рассылка одному + по списку ID (+ email-канал, вложения).
   async sendBroadcastToUser(
     token: string,
-    body: { channel?: "telegram" | "email"; telegramId: string; subject?: string; message: string; buttonText?: string; buttonUrl?: string },
+    body: { channel?: "telegram" | "email"; telegramId: string; subject?: string; message: string; buttonText?: string; buttonUrl?: string; buttons?: { text: string; action: string }[] | null },
     attachment?: File | null
   ): Promise<{ ok: true }> {
     const form = new FormData();
@@ -1358,6 +1360,7 @@ export const api = {
     if (body.subject?.trim()) form.append("subject", body.subject.trim());
     if (body.buttonText?.trim()) form.append("buttonText", body.buttonText.trim());
     if (body.buttonUrl?.trim()) form.append("buttonUrl", body.buttonUrl.trim());
+    if (body.buttons && body.buttons.length > 0) form.append("buttons", JSON.stringify(body.buttons));
     if (attachment) form.append("attachment", attachment, attachment.name);
     const headers = new Headers();
     headers.set("Authorization", `Bearer ${token}`);
@@ -1375,7 +1378,7 @@ export const api = {
 
   async startSendToList(
     token: string,
-    body: { channel?: "telegram" | "email"; telegramIds: string[]; subject?: string; message: string; buttonText?: string; buttonUrl?: string },
+    body: { channel?: "telegram" | "email"; telegramIds: string[]; subject?: string; message: string; buttonText?: string; buttonUrl?: string; buttons?: { text: string; action: string }[] | null },
     attachment?: File | null
   ): Promise<{ jobId: string; total: number }> {
     const form = new FormData();
@@ -1385,6 +1388,7 @@ export const api = {
     if (body.subject?.trim()) form.append("subject", body.subject.trim());
     if (body.buttonText?.trim()) form.append("buttonText", body.buttonText.trim());
     if (body.buttonUrl?.trim()) form.append("buttonUrl", body.buttonUrl.trim());
+    if (body.buttons && body.buttons.length > 0) form.append("buttons", JSON.stringify(body.buttons));
     if (attachment) form.append("attachment", attachment, attachment.name);
     const headers = new Headers();
     headers.set("Authorization", `Bearer ${token}`);
@@ -1747,6 +1751,14 @@ export const api = {
 
   async clientRegister(data: ClientRegisterPayload): Promise<ClientAuthResponse | ClientAuthRequires2FA | { message: string; requiresVerification: true }> {
     return request("/client/auth/register", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** Подтверждение регистрации 6-значным кодом (веб) */
+  async clientRegisterVerifyCode(data: { email: string; code: string }): Promise<ClientAuthResponse> {
+    return request("/client/auth/register-verify-code", {
       method: "POST",
       body: JSON.stringify(data),
     });
@@ -2274,13 +2286,18 @@ export const api = {
   },
 
   /** Привязать Telegram из Mini App (initData от Telegram WebApp) */
-  async clientLinkTelegram(token: string, data: { initData: string }): Promise<{ client: ClientProfile }> {
+  async clientLinkTelegram(token: string, data: { initData: string }): Promise<{ client: ClientProfile; merged?: boolean; token?: string }> {
     return request("/client/link-telegram", { method: "POST", body: JSON.stringify(data), token });
   },
 
-  /** Запросить привязку email (отправить письмо со ссылкой) */
+  /** Запросить привязку email (отправить 6-значный код на почту) */
   async clientLinkEmailRequest(token: string, data: { email: string }): Promise<{ message: string }> {
     return request("/client/link-email-request", { method: "POST", body: JSON.stringify(data), token });
+  },
+
+  /** Подтвердить привязку email 6-значным кодом */
+  async clientLinkEmailVerifyCode(token: string, data: { code: string }): Promise<{ message: string; email: string | null; merged?: boolean; token?: string; client?: ClientProfile | null }> {
+    return request("/client/link-email-verify-code", { method: "POST", body: JSON.stringify(data), token });
   },
 
   // мгновенная привязка email без верификации.
@@ -2919,6 +2936,8 @@ export interface AutoBroadcastRule {
   /** T-promo (13.05.2026) — вторая кнопка. */
   button2Text: string | null;
   button2Url: string | null;
+  /** Конструктор кнопок (произвольное число). null → fallback на button*. */
+  buttons?: { text: string; action: string }[] | null;
   enabled: boolean;
   /** T-promo (13.05.2026) — индивидуальная скидка / промокод для рассылки. */
   promoCodeId: string | null;
@@ -2945,6 +2964,8 @@ export interface AutoBroadcastRulePayload {
   buttonUrl?: string | null;
   button2Text?: string | null;
   button2Url?: string | null;
+  /** Конструктор кнопок (произвольное число). null → fallback на button*. */
+  buttons?: { text: string; action: string }[] | null;
   enabled?: boolean;
   promoCodeId?: string | null;
   personalDiscountPercent?: number | null;
@@ -3060,6 +3081,9 @@ export type UpdateSettingsPayload = {
   botTariffsFields?: string | null;
   botPaymentText?: string | null;
   subscriptionPageConfig?: string | null;
+  purchaseMessageEnabled?: boolean;
+  purchaseMessageText?: string | null;
+  purchaseMessageButtons?: string | null;
   supportLink?: string | null;
   agreementLink?: string | null;
   offerLink?: string | null;
@@ -3555,6 +3579,9 @@ export interface AdminSettings {
   botPaymentText?: string | null;
   /** JSON конфиг страницы подписки (приложения, тексты) */
   subscriptionPageConfig?: string | null;
+  purchaseMessageEnabled?: boolean;
+  purchaseMessageText?: string | null;
+  purchaseMessageButtons?: string | null;
   /** Ссылки раздела «Поддержка» в боте (если пусто — кнопка не показывается) */
   supportLink?: string | null;
   agreementLink?: string | null;
@@ -4384,12 +4411,16 @@ export interface ClientTrialActivateResponse {
 // ─── Конструктор уведомлений автосписания ───
 export type AutoRenewTriggerType = "UPCOMING" | "SUCCESS" | "FAILED" | "RETRY" | "EXPIRED";
 
+export type AutoRenewNotifButton = { text: string; action: string };
+
 export interface AutoRenewNotificationRecord {
   id: string;
   name: string;
   triggerType: AutoRenewTriggerType;
   offsetMinutes: number;
   messageText: string;
+  /** Кнопки: null → дефолтный набор, [] → без кнопок, иначе — заданные. */
+  buttons: AutoRenewNotifButton[] | null;
   enabled: boolean;
   sortOrder: number;
   createdAt: string;
@@ -4401,6 +4432,8 @@ export type CreateAutoRenewNotificationPayload = {
   triggerType: AutoRenewTriggerType;
   offsetMinutes: number;
   messageText: string;
+  /** null → дефолт, [] → без кнопок, иначе — заданные. */
+  buttons?: AutoRenewNotifButton[] | null;
   enabled?: boolean;
   sortOrder?: number;
 };

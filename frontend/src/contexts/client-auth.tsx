@@ -40,6 +40,7 @@ type ClientAuthValue = {
   state: ClientAuthState;
   login: (email: string, password: string) => Promise<void>;
   register: (data: { email: string; password: string; preferredLang?: string; preferredCurrency?: string; referralCode?: string; utm_source?: string; utm_medium?: string; utm_campaign?: string; utm_content?: string; utm_term?: string }) => Promise<{ requiresVerification: true } | void>;
+  verifyRegisterCode: (email: string, code: string) => Promise<string | void>;
   registerByTelegram: (data: { telegramId: string; telegramUsername?: string; preferredLang?: string; preferredCurrency?: string; referralCode?: string; utm_source?: string; utm_medium?: string; utm_campaign?: string; utm_content?: string; utm_term?: string }) => Promise<void>;
   loginByGoogle: (idToken: string) => Promise<void>;
   loginByApple: (idToken: string) => Promise<void>;
@@ -87,10 +88,45 @@ export function ClientAuthProvider({ children }: { children: React.ReactNode }) 
 
   // Сразу раскрываем Mini App на весь экран (до авторизации)
   useEffect(() => {
-    if (typeof window !== "undefined" && window.Telegram?.WebApp) {
-      window.Telegram.WebApp.ready?.();
-      window.Telegram.WebApp.expand?.();
+    const wa = typeof window !== "undefined" ? window.Telegram?.WebApp : undefined;
+    if (!wa) return;
+    wa.ready?.();
+    wa.expand?.();
+    // Настоящий полноэкранный режим появился в Bot API 8.0. На старых клиентах и на
+    // десктопе/вебе метода нет или он бросает — проверяем версию и оборачиваем в try/catch,
+    // тогда мы просто остаёмся в expand() без ошибки.
+    try {
+      if (wa.isVersionAtLeast?.("8.0") && wa.requestFullscreen) {
+        wa.requestFullscreen();
+        // чтобы случайный свайп вниз не сворачивал/не закрывал апп в фуллскрине
+        wa.disableVerticalSwipes?.();
+      }
+    } catch {
+      /* fullscreen не поддержан этим клиентом — ок, остаёмся в развёрнутом виде */
     }
+
+    // Отключаем масштабирование мини-аппа (pinch-zoom и двойной тап). Viewport
+    // user-scalable=no игнорируется iOS Safari, поэтому глушим жесты вручную.
+    const prevent = (e: Event) => e.preventDefault();
+    document.addEventListener("gesturestart", prevent, { passive: false });
+    document.addEventListener("gesturechange", prevent, { passive: false });
+    document.addEventListener("gestureend", prevent, { passive: false });
+    const onTouchMove = (e: TouchEvent) => { if (e.touches.length > 1) e.preventDefault(); };
+    document.addEventListener("touchmove", onTouchMove, { passive: false });
+    let lastTouchEnd = 0;
+    const onTouchEnd = (e: TouchEvent) => {
+      const now = Date.now();
+      if (now - lastTouchEnd <= 300) e.preventDefault();
+      lastTouchEnd = now;
+    };
+    document.addEventListener("touchend", onTouchEnd, { passive: false });
+    return () => {
+      document.removeEventListener("gesturestart", prevent);
+      document.removeEventListener("gesturechange", prevent);
+      document.removeEventListener("gestureend", prevent);
+      document.removeEventListener("touchmove", onTouchMove);
+      document.removeEventListener("touchend", onTouchEnd);
+    };
   }, []);
 
   // КЛИЕНТСКИЙ refresh: при 401 на /client/* api-слой дёрнет эту функцию —
@@ -157,6 +193,41 @@ export function ClientAuthProvider({ children }: { children: React.ReactNode }) 
     }
   }, [state.token]);
 
+  // Обновляем профиль (в т.ч. баланс) активным опросом раз в 5 секунд, пока вкладка
+  // видима, плюс сразу при возврате фокуса/видимости. В фоне (вкладка скрыта) опрос
+  // останавливается, чтобы не нагружать API и не сажать батарею.
+  useEffect(() => {
+    if (!state.token) return;
+    const POLL_MS = 5000;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const tick = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      refreshProfile().catch(() => {});
+    };
+    const start = () => {
+      if (timer) return;
+      tick(); // мгновенно при старте/возврате
+      timer = setInterval(tick, POLL_MS);
+    };
+    const stop = () => {
+      if (timer) { clearInterval(timer); timer = null; }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    };
+
+    if (typeof document === "undefined" || document.visibilityState === "visible") start();
+    window.addEventListener("focus", start);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      window.removeEventListener("focus", start);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [state.token, refreshProfile]);
+
   const login = useCallback(async (email: string, password: string) => {
     const res = await api.clientLogin(email, password);
     if ("requires2FA" in res && res.requires2FA) {
@@ -193,6 +264,18 @@ export function ClientAuthProvider({ children }: { children: React.ReactNode }) 
       if (isAuthResponse(res)) {
         setState({ token: res.token, client: res.client, miniappAuthLoading: false, miniappAuthAttempted: true, pending2FAToken: null, isNewTelegramUser: true });
         saveState(res.token, res.client);
+      }
+    },
+    []
+  );
+
+  const verifyRegisterCode = useCallback(
+    async (email: string, code: string): Promise<string | void> => {
+      const res = await api.clientRegisterVerifyCode({ email, code });
+      if (isAuthResponse(res)) {
+        setState({ token: res.token, client: res.client, miniappAuthLoading: false, miniappAuthAttempted: true, pending2FAToken: null, isNewTelegramUser: true });
+        saveState(res.token, res.client);
+        return res.token;
       }
     },
     []
@@ -311,6 +394,7 @@ export function ClientAuthProvider({ children }: { children: React.ReactNode }) 
     state,
     login,
     register,
+    verifyRegisterCode,
     registerByTelegram,
     loginByGoogle,
     loginByApple,

@@ -787,6 +787,17 @@ export async function extendSecondarySubscription(
         customPrice: newPriceForDb,
         currentPricePerDay: effectiveDays > 0 ? newPriceForDb / effectiveDays : null,
       } : {}),
+      // После конвертации ТРИАЛА в платную подписку автопродление включается
+      // принудительно — независимо от баланса. Само по себе это лишь булев флаг:
+      // списание выполнит крон в свой срок, а нехватку средств обработают
+      // ретраи/грейс. autoRenewTariffId обязателен — по нему крон знает, каким
+      // тарифом продлевать; priceOptionId фиксирует длительность/цену продления.
+      ...(isTrialConversion && tariff.id ? {
+        autoRenewEnabled: true,
+        autoRenewTariffId: tariff.id,
+        autoRenewRetryCount: 0,
+        ...(selectedOption?.id ? { autoRenewPriceOptionId: selectedOption.id } : {}),
+      } : {}),
     },
   }).catch(() => {});
 
@@ -965,6 +976,9 @@ export async function activateTariffByPaymentId(paymentId: string): Promise<Acti
       // флаг прокидывается в metadata при создании платежа. Удаление произойдёт после
       // успешного extendSecondarySubscription.
       const removeExtrasAfter = shouldRemoveExtrasOnActivate(payment.metadata);
+      // Продление на ДРУГОЙ тариф → конвертация (остаток дней пересчитывается
+      // pro-rata по цене дня и суммируется с новыми). Тот же тариф → обычный стек дней.
+      const convertOnExtend = targetSub?.tariffId != null && targetSub.tariffId !== tariff.id;
       const result = await extendSecondarySubscription(extendsSecondaryId, {
         id: tariff.id,
         durationDays: selectedOption?.durationDays ?? tariff.durationDays,
@@ -977,7 +991,7 @@ export async function activateTariffByPaymentId(paymentId: string): Promise<Acti
         internalSquadUuids: tariff.internalSquadUuids,
         trafficResetMode: tariff.trafficResetMode ?? undefined,
         price: selectedOption?.price ?? tariff.price,
-      }, selectedOption, payment.deviceCount ?? undefined, removeExtrasAfter);
+      }, selectedOption, payment.deviceCount ?? undefined, removeExtrasAfter, convertOnExtend);
       if (result.ok) {
         await prisma.payment.update({ where: { id: payment.id }, data: { subscriptionId: extendsSecondaryId } }).catch(() => {});
         await resetOneTimeDiscount();

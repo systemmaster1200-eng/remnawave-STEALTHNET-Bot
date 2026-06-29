@@ -9,6 +9,7 @@ import { useClientAuth } from "@/contexts/client-auth";
 import { api } from "@/lib/api";
 import { StealthModal } from "./stealth-modal";
 import { StadiumButton } from "./stadium-button";
+import { WizardHeader } from "./wizard-header";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -16,9 +17,11 @@ interface Props {
   onClose: () => void;
   /** Колбэк после успешной активации — для обновления UI родителя. */
   onActivated?: () => void;
+  /** Рендер отдельной полноэкранной страницей (WizardHeader) вместо модалки. */
+  asPage?: boolean;
 }
 
-export function StealthPromocodeModal({ open, onClose, onActivated }: Props) {
+export function StealthPromocodeModal({ open, onClose, onActivated, asPage = false }: Props) {
   const { state, refreshProfile } = useClientAuth();
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
@@ -51,38 +54,52 @@ export function StealthPromocodeModal({ open, onClose, onActivated }: Props) {
     }
   }
 
+  const inner = (
+    <div className="space-y-3">
+      <input
+        value={code}
+        onChange={(e) => { setCode(e.target.value); setResult(null); }}
+        onKeyDown={(e) => { if (e.key === "Enter" && code.trim() && !busy) activate(); }}
+        placeholder="Введите промокод"
+        className="w-full rounded-2xl bg-zinc-950/60 border border-white/[0.08] px-4 py-3.5 text-sm placeholder-zinc-500 outline-none focus:border-blue-500/40 transition"
+        autoFocus
+      />
+
+      {result && (
+        <div className={cn(
+          "rounded-xl border p-3 flex items-start gap-2 text-xs",
+          result.ok ? "bg-emerald-500/10 border-emerald-500/30" : "bg-blue-500/10 border-blue-500/30",
+        )}>
+          {result.ok ? <Check className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" /> : <AlertCircle className="h-4 w-4 text-blue-400 shrink-0 mt-0.5" />}
+          <span className={result.ok ? "text-emerald-200" : "text-blue-200"}>{result.message}</span>
+        </div>
+      )}
+
+      <StadiumButton
+        variant="primary"
+        size="md"
+        iconLeft={busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+        onClick={activate}
+        disabled={busy || !code.trim()}
+      >
+        {busy ? "Активация…" : "Активировать"}
+      </StadiumButton>
+    </div>
+  );
+
+  if (asPage) {
+    return (
+      <div className="px-4 pt-2 space-y-5 pb-4">
+        <WizardHeader step={1} totalSteps={1} onClose={() => { reset(); onClose(); }} />
+        <h1 className="text-2xl font-extrabold text-zinc-100 px-1">Промокоды</h1>
+        {inner}
+      </div>
+    );
+  }
+
   return (
     <StealthModal open={open} onClose={() => { reset(); onClose(); }} title="Промокоды">
-      <div className="space-y-3">
-        <input
-          value={code}
-          onChange={(e) => { setCode(e.target.value); setResult(null); }}
-          onKeyDown={(e) => { if (e.key === "Enter" && code.trim() && !busy) activate(); }}
-          placeholder="Введите промокод"
-          className="w-full rounded-2xl bg-zinc-950/60 border border-white/[0.08] px-4 py-3.5 text-sm placeholder-zinc-500 outline-none focus:border-rose-500/40 transition"
-          autoFocus
-        />
-
-        {result && (
-          <div className={cn(
-            "rounded-xl border p-3 flex items-start gap-2 text-xs",
-            result.ok ? "bg-emerald-500/10 border-emerald-500/30" : "bg-rose-500/10 border-rose-500/30",
-          )}>
-            {result.ok ? <Check className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" /> : <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />}
-            <span className={result.ok ? "text-emerald-200" : "text-rose-200"}>{result.message}</span>
-          </div>
-        )}
-
-        <StadiumButton
-          variant="primary"
-          size="md"
-          iconLeft={busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-          onClick={activate}
-          disabled={busy || !code.trim()}
-        >
-          {busy ? "Активация…" : "Активировать"}
-        </StadiumButton>
-      </div>
+      {inner}
     </StealthModal>
   );
 }

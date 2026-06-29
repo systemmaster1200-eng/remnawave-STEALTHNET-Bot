@@ -37,6 +37,12 @@ export type AutoRenewNotifContext = {
   expireAt?: Date | null;
   /** Индекс подписки (root=0, secondary=N). */
   subIndex?: number;
+  /**
+   * ID подписки — для deep-link кнопок с плейсхолдером {{SUBSCRIPTION_ID}}
+   * (например «Продлить» → /cabinet/extend/{{SUBSCRIPTION_ID}}). Если не задан,
+   * кнопки с плейсхолдером пропускаются (нечего подставить).
+   */
+  subscriptionId?: string;
   /** Текущий баланс клиента. */
   balance?: number;
   /**
@@ -85,6 +91,89 @@ function renderTemplate(template: string, ctx: AutoRenewNotifContext): string {
 }
 
 /**
+// ─── Inline-кнопки уведомлений (конструктор как в авторассылках) ───
+
+/** Одна кнопка из конструктора: текст + action (menu:* / webapp:/path / URL). */
+export type AutoRenewButton = { text: string; action: string };
+
+type InlineKeyboardButton =
+  | { text: string; callback_data: string }
+  | { text: string; web_app: { url: string } }
+  | { text: string; url: string };
+
+/** Дефолтный набор кнопок — используется, когда buttonsConfig === null (старые шаблоны). */
+function defaultButtons(backLabel: string): AutoRenewButton[] {
+  return [
+    { text: "📋 Мои подписки", action: "menu:my_subs" },
+    { text: backLabel, action: "menu:main" },
+  ];
+}
+
+/** action → конкретная inline-кнопка Telegram (callback / web_app / url). */
+function makeInlineButton(text: string, action: string, publicAppUrl?: string | null): InlineKeyboardButton {
+  if (action.startsWith("menu:")) {
+    return { text, callback_data: action };
+  }
+  if (action.startsWith("webapp:")) {
+    const path = action.slice("webapp:".length);
+    const base = (publicAppUrl || "").replace(/\/+$/, "");
+    return { text, web_app: { url: `${base}${path}` } };
+  }
+  return { text, url: action };
+}
+
+/** Подставляет {{SUBSCRIPTION_ID}} в action. Возвращает null, если плейсхолдер есть, а id — нет. */
+function resolveActionPlaceholders(action: string, subscriptionId?: string): string | null {
+  if (!action.includes("{{SUBSCRIPTION_ID}}")) return action;
+  if (!subscriptionId) return null; // нечего подставить → кнопку не показываем
+  return action.split("{{SUBSCRIPTION_ID}}").join(subscriptionId);
+}
+
+/** Парсит buttonsConfig (JSON) в массив кнопок; невалидный/пустой JSON → []. */
+function parseButtonsConfig(raw: string | null | undefined): AutoRenewButton[] | null {
+  if (raw == null) return null; // NULL → дефолт (решается выше)
+  if (!raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((b) => {
+        const obj = (b && typeof b === "object") ? (b as Record<string, unknown>) : {};
+        const text = typeof obj.text === "string" ? obj.text.trim() : "";
+        const action = typeof obj.action === "string" ? obj.action.trim() : "";
+        return { text, action };
+      })
+      .filter((b) => b.text && b.action);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Строит reply_markup для шаблона.
+ *   • buttonsConfig === null  → дефолтный набор (обратная совместимость).
+ *   • buttonsConfig === "[]"  → undefined (кнопок нет вовсе).
+ *   • иначе                   → кнопки из конфига, каждая отдельным рядом.
+ */
+function buildReplyMarkupForTemplate(
+  buttonsConfigRaw: string | null | undefined,
+  backLabel: string,
+  publicAppUrl?: string | null,
+  subscriptionId?: string,
+): { inline_keyboard: InlineKeyboardButton[][] } | undefined {
+  const parsed = parseButtonsConfig(buttonsConfigRaw);
+  const buttons = parsed === null ? defaultButtons(backLabel) : parsed;
+  const rows: InlineKeyboardButton[][] = [];
+  for (const b of buttons) {
+    const action = resolveActionPlaceholders(b.action, subscriptionId);
+    if (action === null) continue; // плейсхолдер без id — пропускаем кнопку
+    rows.push([makeInlineButton(b.text, action, publicAppUrl)]);
+  }
+  if (rows.length === 0) return undefined;
+  return { inline_keyboard: rows };
+}
+
+/**
  * Главная функция dispatch. Отправляет все подходящие active-шаблоны клиенту.
  * Возвращает количество отправленных уведомлений (для логов).
  */
@@ -124,6 +213,7 @@ export async function dispatchAutoRenewNotification(
 
   const cfg = await getSystemConfig();
   const backLabel = (cfg.botBackLabel ?? "🏠 Главное меню").trim() || "🏠 Главное меню";
+  const publicAppUrl = (cfg as { publicAppUrl?: string | null }).publicAppUrl ?? null;
 
   let sentCount = 0;
   for (const t of matched) {
@@ -156,12 +246,13 @@ export async function dispatchAutoRenewNotification(
     }
 
     const text = renderTemplate(t.messageText, context);
-    const replyMarkup = {
-      inline_keyboard: [
-        [{ text: "📋 Мои подписки", callback_data: "menu:my_subs" }],
-        [{ text: backLabel, callback_data: "menu:main" }],
-      ],
-    };
+    // Кнопки из конструктора шаблона: null → дефолт, "[]" → без кнопок, иначе — заданные.
+    const replyMarkup = buildReplyMarkupForTemplate(
+      (t as { buttonsConfig?: string | null }).buttonsConfig ?? null,
+      backLabel,
+      publicAppUrl,
+      context.subscriptionId,
+    );
     await sendTelegramToUser(client.telegramId, text, null, replyMarkup, { clientIdForBotToken: client.id })
       .catch((e) => console.error(`[arn-notif] sendTelegramToUser failed for client ${clientId}, template ${t.id}:`, e));
     sentCount += 1;

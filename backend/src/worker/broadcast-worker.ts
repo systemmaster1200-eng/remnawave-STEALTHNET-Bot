@@ -49,6 +49,7 @@ async function claimNextJob() {
     message: string;
     button_text: string | null;
     button_url: string | null;
+    buttons_config: string | null;
     attachment_name: string | null;
     attachment_path: string | null;
     attachment_mime: string | null;
@@ -63,7 +64,7 @@ async function claimNextJob() {
         LIMIT 1
         FOR UPDATE SKIP LOCKED
      )
-    RETURNING id, channel, subject, message, button_text, button_url,
+    RETURNING id, channel, subject, message, button_text, button_url, buttons_config,
               attachment_name, attachment_path, attachment_mime, target_group;
   `;
   return rows[0] ?? null;
@@ -120,6 +121,7 @@ async function processOne(job: NonNullable<Awaited<ReturnType<typeof claimNextJo
       attachment,
       buttonText: job.button_text ?? undefined,
       buttonUrl: job.button_url ?? undefined,
+      buttonsConfig: job.buttons_config ?? undefined,
       targetGroup: (job.target_group ?? undefined) as BroadcastTargetGroup | undefined,
       broadcastId: job.id,
       isCancelled: () => cancelRequested || shuttingDown,

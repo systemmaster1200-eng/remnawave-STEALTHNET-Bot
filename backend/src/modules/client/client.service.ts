@@ -134,6 +134,7 @@ const SYSTEM_CONFIG_KEYS = [
   "bot_emojis", // JSON: { "TRIAL": { "unicode": "🎁", "tgEmojiId": "..." }, "PACKAGE": ... } — эмодзи кнопок/текста, TG ID для премиум
   "category_emojis", // JSON: { "ordinary": "📦", "premium": "⭐" } — эмодзи категорий по коду
   "subscription_page_config",
+  "purchase_message_enabled", "purchase_message_text", "purchase_message_buttons", // Сообщение «после оформления подписки»: вкл/выкл, текст, конструктор кнопок
   "support_link", "agreement_link", "offer_link", "instructions_link", // Поддержка: тех поддержка, соглашения, оферта, инструкции
   "referral_instructions_url", // ссылка на инструкцию по рефералке (кнопка «📖 Инструкции»)
   // T11+T13+T14 (11.05.2026): редактируемые тексты бота + URL'ы для документов и Telegram-прокси.
@@ -720,6 +721,10 @@ async function loadSystemConfigFromDb() {
     botPaymentText: parseBotPaymentText(map.bot_payment_text),
     categoryEmojis: parseCategoryEmojis(map.category_emojis),
     subscriptionPageConfig: map.subscription_page_config ?? null,
+    // Сообщение «после оформления подписки»: enabled (по умолчанию вкл), текст, кнопки (JSON).
+    purchaseMessageEnabled: map.purchase_message_enabled == null ? true : map.purchase_message_enabled !== "0",
+    purchaseMessageText: map.purchase_message_text ?? null,
+    purchaseMessageButtons: map.purchase_message_buttons ?? null,
     defaultAutoRenewEnabled: map.default_auto_renew_enabled === "true" || map.default_auto_renew_enabled === "1",
     autoRenewDaysBeforeExpiry: parseInt(map.auto_renew_days_before_expiry ?? "1", 10) || 1,
     autoRenewNotifyDaysBefore: parseInt(map.auto_renew_notify_days_before ?? "3", 10) || 3,

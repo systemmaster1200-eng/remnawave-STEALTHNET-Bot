@@ -75,7 +75,11 @@ function writeCache(c: DesignCache): void {
 export function useCabinetDesign(): CabinetDesign {
   const inMiniapp = isInsideTelegramMiniApp();
   const cache = readCache();
-  const initial: CabinetDesign = inMiniapp || cache.applyInBrowser ? cache.design : "classic";
+  // По требованию: веб-версия должна работать ТОЧНО как мини-апп. Поэтому дизайн,
+  // выбранный в админке, применяется и в браузере (флаг applyInBrowser игнорируется,
+  // считаем его всегда true). inMiniapp оставлен для совместимости.
+  void inMiniapp;
+  const initial: CabinetDesign = cache.design;
   const [design, setDesign] = useState<CabinetDesign>(initial);
 
   useEffect(() => {
@@ -86,8 +90,8 @@ export function useCabinetDesign(): CabinetDesign {
         const adminDesign = (cfg as { cabinetDesign?: CabinetDesign }).cabinetDesign === "stealth" ? "stealth" : "classic";
         const applyInBrowser = Boolean((cfg as { cabinetDesignApplyInBrowser?: boolean }).cabinetDesignApplyInBrowser);
         writeCache({ design: adminDesign, applyInBrowser });
-        const next: CabinetDesign = inMiniapp || applyInBrowser ? adminDesign : "classic";
-        setDesign(next);
+        // Всегда применяем дизайн админки (и в вебе, и в мини-аппе).
+        setDesign(adminDesign);
       })
       .catch(() => { /* ignore — keep cached */ });
     return () => { alive = false; };

@@ -27,7 +27,7 @@ export function StealthReferral() {
   const [stats, setStats] = useState<ClientReferralStats | null>(null);
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [loading, setLoading] = useState(true);
-  const [copied, setCopied] = useState(false);
+  const [copiedKind, setCopiedKind] = useState<"bot" | "site" | null>(null);
   const [rulesOpen, setRulesOpen] = useState(false);
 
   useEffect(() => {
@@ -45,24 +45,32 @@ export function StealthReferral() {
     return () => { alive = false; };
   }, [state.token]);
 
-  const link = useMemo(() => {
-    if (!stats?.referralCode) return null;
-    if (config?.telegramBotUsername) {
-      return `https://t.me/${config.telegramBotUsername.replace(/^@/, "")}?start=ref_${stats.referralCode}`;
-    }
-    if (typeof window !== "undefined") {
-      return `${window.location.origin}/cabinet/register?ref=${encodeURIComponent(stats.referralCode)}`;
-    }
-    return null;
+  // Реф-ссылка для Telegram-бота (если бот настроен).
+  const botLink = useMemo(() => {
+    if (!stats?.referralCode || !config?.telegramBotUsername) return null;
+    return `https://t.me/${config.telegramBotUsername.replace(/^@/, "")}?start=ref_${stats.referralCode}`;
   }, [stats, config]);
+
+  // Реф-ссылка на веб-сайт (регистрация в кабинете). Доступна всегда.
+  const siteLink = useMemo(() => {
+    if (!stats?.referralCode) return null;
+    const origin = (config as { publicAppUrl?: string | null })?.publicAppUrl?.replace(/\/+$/, "")
+      || (typeof window !== "undefined" ? window.location.origin : "");
+    if (!origin) return null;
+    return `${origin}/cabinet/register?ref=${encodeURIComponent(stats.referralCode)}`;
+  }, [stats, config]);
+
+  // Основная ссылка для «Поделиться» — бот в приоритете, иначе сайт.
+  const link = botLink ?? siteLink;
+
 
   const currency = state.client?.preferredCurrency ?? "rub";
 
-  function copy() {
-    if (!link) return;
-    navigator.clipboard.writeText(link);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  function copyLink(value: string | null, kind: "bot" | "site") {
+    if (!value) return;
+    navigator.clipboard.writeText(value);
+    setCopiedKind(kind);
+    setTimeout(() => setCopiedKind(null), 2000);
   }
 
   function share() {
@@ -70,7 +78,7 @@ export function StealthReferral() {
     if (typeof navigator !== "undefined" && "share" in navigator) {
       navigator.share({ url: link, title: "Присоединяйся!" }).catch(() => {});
     } else {
-      copy();
+      copyLink(link, botLink ? "bot" : "site");
     }
   }
 
@@ -78,8 +86,8 @@ export function StealthReferral() {
     <div className="px-4 pt-2 space-y-4 pb-2">
       {/* Header card */}
       <div className="flex items-center gap-3 px-1">
-        <div className="h-10 w-10 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center">
-          <Gift className="h-5 w-5 text-rose-400" />
+        <div className="h-10 w-10 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center">
+          <Gift className="h-5 w-5 text-blue-400" />
         </div>
         <div>
           <h2 className="text-lg font-bold tracking-tight">Реферальная система</h2>
@@ -88,10 +96,10 @@ export function StealthReferral() {
       </div>
 
       {/* KPI card with red border */}
-      <div className="relative overflow-hidden rounded-3xl border border-rose-500/40 bg-zinc-900/40 p-5">
+      <div className="relative overflow-hidden rounded-3xl border border-blue-500/40 bg-zinc-900/40 p-5">
         {/* Decorative watermark */}
         <div
-          className="absolute -right-6 -top-6 text-rose-500/[0.06] font-bold text-[140px] leading-none pointer-events-none select-none"
+          className="absolute -right-6 -top-6 text-blue-500/[0.06] font-bold text-[140px] leading-none pointer-events-none select-none"
           style={{ fontFamily: '"Syncopate", sans-serif' }}
         >
           V
@@ -99,7 +107,7 @@ export function StealthReferral() {
 
         <div className="relative grid grid-cols-2 gap-4">
           <div>
-            <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-rose-400/80">Накоплено</p>
+            <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-blue-400/80">Накоплено</p>
             <div className="mt-1.5 flex items-baseline gap-1.5">
               <span className="text-4xl font-bold tabular-nums">{stats ? fmtMoney(stats.totalEarnings, currency) : (loading ? "…" : "0")}</span>
             </div>
@@ -113,18 +121,34 @@ export function StealthReferral() {
         <p className="relative text-xs text-zinc-400 mt-3">Приглашай друзей — получай бонусы за каждого</p>
       </div>
 
-      {/* Your link */}
-      <div className="rounded-2xl border border-white/[0.08] bg-zinc-900/40 p-4 space-y-3">
-        <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-zinc-500">Твоя ссылка</p>
-        <div className="rounded-xl border border-white/[0.06] bg-zinc-950/60 p-3">
-          <p className="font-mono text-xs text-zinc-200 break-all">{link ?? "Ссылка появится после привязки"}</p>
-        </div>
-        <div className="grid grid-cols-2 gap-2.5">
-          <StadiumButton variant="ghost" size="md" iconLeft={copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />} onClick={copy} disabled={!link}>
-            {copied ? "Скопировано" : "Скопировать"}
-          </StadiumButton>
-          <StadiumButton variant="primary" size="md" iconLeft={<Send className="h-4 w-4" />} onClick={share} disabled={!link}>
-            Поделиться
+      {/* Your links — Telegram + сайт */}
+      <div className="space-y-3">
+        {/* Telegram-ссылка (если бот настроен) */}
+        {botLink && (
+          <div className="rounded-2xl border border-white/[0.08] bg-zinc-900/40 p-4 space-y-3">
+            <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-zinc-500">Ссылка для Telegram</p>
+            <div className="rounded-xl border border-white/[0.06] bg-zinc-950/60 p-3">
+              <p className="font-mono text-xs text-zinc-200 break-all">{botLink}</p>
+            </div>
+            <div className="grid grid-cols-2 gap-2.5">
+              <StadiumButton variant="ghost" size="md" iconLeft={copiedKind === "bot" ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />} onClick={() => copyLink(botLink, "bot")}>
+                {copiedKind === "bot" ? "Скопировано" : "Скопировать"}
+              </StadiumButton>
+              <StadiumButton variant="primary" size="md" iconLeft={<Send className="h-4 w-4" />} onClick={share}>
+                Поделиться
+              </StadiumButton>
+            </div>
+          </div>
+        )}
+
+        {/* Ссылка на веб-сайт */}
+        <div className="rounded-2xl border border-white/[0.08] bg-zinc-900/40 p-4 space-y-3">
+          <p className="text-[10px] font-bold tracking-[0.18em] uppercase text-zinc-500">Ссылка на сайт</p>
+          <div className="rounded-xl border border-white/[0.06] bg-zinc-950/60 p-3">
+            <p className="font-mono text-xs text-zinc-200 break-all">{siteLink ?? "Ссылка появится после привязки"}</p>
+          </div>
+          <StadiumButton variant="ghost" size="md" iconLeft={copiedKind === "site" ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />} onClick={() => copyLink(siteLink, "site")} disabled={!siteLink}>
+            {copiedKind === "site" ? "Скопировано" : "Скопировать"}
           </StadiumButton>
         </div>
       </div>
@@ -134,8 +158,8 @@ export function StealthReferral() {
         type="button"
         className="w-full rounded-2xl border border-white/[0.08] bg-zinc-900/40 p-3 flex items-center gap-3 text-left hover:border-white/15 transition"
       >
-        <div className="h-10 w-10 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center shrink-0">
-          <Users className="h-5 w-5 text-rose-400" />
+        <div className="h-10 w-10 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center shrink-0">
+          <Users className="h-5 w-5 text-blue-400" />
         </div>
         <div className="flex-1 min-w-0">
           <h4 className="font-semibold text-sm">Твои друзья</h4>

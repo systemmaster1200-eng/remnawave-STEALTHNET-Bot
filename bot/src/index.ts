@@ -1646,6 +1646,25 @@ composer.command("start", async (ctx) => {
     return;
   }
 
+  // Deep-link привязки Telegram к аккаунту сайта: /start link_<code>
+  // Открывается прямой ссылкой из кабинета (кнопка «Привязать Telegram»).
+  if (/^link_/i.test(payload)) {
+    const linkLang = getUserLang(from.id);
+    const code = payload.replace(/^link_/i, "").trim();
+    if (!code) {
+      await ctx.reply(_t("link.prompt", linkLang));
+      return;
+    }
+    try {
+      await api.linkTelegramFromBot(code, from.id, from.username ?? undefined);
+      await ctx.reply(_t("link.success", linkLang));
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : _t("error_generic", linkLang);
+      await ctx.reply(`❌ ${msg}`);
+    }
+    return;
+  }
+
   // Определяем тип deeplink
   const isPromo = /^promo_/i.test(payload);
   const promoCode = isPromo ? payload.replace(/^promo_/i, "") : undefined;
@@ -1752,9 +1771,11 @@ composer.command("start", async (ctx) => {
     // если в админке настроены trials → используем их (скрываем
     // кнопку когда юзер всё взял); иначе fallback на legacy single-trial.
     const trialAvail = await api.getAvailableTrials(auth.token).catch(() => ({ items: [], hasAnyEnabled: false }));
-    const showTrial = trialAvail.hasAnyEnabled
+    // Скрываем кнопку бесплатного теста, если есть хотя бы одна активная подписка.
+    const hasActiveSub = (allSubsRes.items ?? []).some((it) => !parseSubInfo(it).isExpired);
+    const showTrial = !hasActiveSub && (trialAvail.hasAnyEnabled
       ? trialAvail.items.length > 0
-      : Boolean(config?.trialEnabled && !client?.trialUsed);
+      : Boolean(config?.trialEnabled && !client?.trialUsed));
     const showProxy = proxyRes.items?.some((c: { tariffs: unknown[] }) => c.tariffs?.length > 0) ?? false;
     const showSingbox = singboxRes.items?.some((c: { tariffs: unknown[] }) => c.tariffs?.length > 0) ?? false;
     const appUrl = config?.publicAppUrl?.replace(/\/$/, "") ?? null;
@@ -2300,9 +2321,11 @@ composer.on("callback_query:data", async (ctx) => {
       const vpnUrl = getSubscriptionUrl(subRes.subscription);
       // T15: новый/legacy flow.
       const trialAvail = await api.getAvailableTrials(token).catch(() => ({ items: [], hasAnyEnabled: false }));
-      const showTrial = trialAvail.hasAnyEnabled
+      // Скрываем кнопку бесплатного теста, если есть хотя бы одна активная подписка.
+      const hasActiveSub = (allSubsRes.items ?? []).some((it) => !parseSubInfo(it).isExpired);
+      const showTrial = !hasActiveSub && (trialAvail.hasAnyEnabled
         ? trialAvail.items.length > 0
-        : Boolean(config?.trialEnabled && !me.trialUsed);
+        : Boolean(config?.trialEnabled && !me.trialUsed));
       const showProxy = proxyRes.items?.some((c: { tariffs: unknown[] }) => c.tariffs?.length > 0) ?? false;
       const showSingbox = singboxRes.items?.some((c: { tariffs: unknown[] }) => c.tariffs?.length > 0) ?? false;
       const appUrl = config?.publicAppUrl?.replace(/\/$/, "") ?? null;
@@ -2941,9 +2964,11 @@ composer.on("callback_query:data", async (ctx) => {
       // если в админке настроены trials → используем их (скрываем
       // кнопку когда юзер всё взял); иначе fallback на legacy single-trial.
       const trialAvail = await api.getAvailableTrials(token).catch(() => ({ items: [], hasAnyEnabled: false }));
-      const showTrial = trialAvail.hasAnyEnabled
+      // Скрываем кнопку бесплатного теста, если есть хотя бы одна активная подписка.
+      const hasActiveSub = (allSubsRes.items ?? []).some((it) => !parseSubInfo(it).isExpired);
+      const showTrial = !hasActiveSub && (trialAvail.hasAnyEnabled
         ? trialAvail.items.length > 0
-        : Boolean(config?.trialEnabled && !client?.trialUsed);
+        : Boolean(config?.trialEnabled && !client?.trialUsed));
       const showProxy = proxyRes.items?.some((c: { tariffs: unknown[] }) => c.tariffs?.length > 0) ?? false;
       const showSingbox = singboxRes.items?.some((c: { tariffs: unknown[] }) => c.tariffs?.length > 0) ?? false;
       const name = config?.serviceName?.trim() || "Кабинет";
@@ -7867,95 +7892,12 @@ composer.on("message:text", async (ctx) => {
     return;
   }
 
-  const num = Number(ctx.message.text.replace(/,/, "."));
-  if (!Number.isFinite(num) || num < 1 || num > 1000000) {
-    // Юзер прислал произвольный текст, который не команда / не активный ввод / не сумма пополнения.
-    // Если включён auto-delete — удаляем чтобы чат оставался чистым.
-    await tryAutoDeleteUnknown(ctx);
-    return;
-  }
-
-  try {
-    const config = publicConfig ?? await api.getPublicConfig();
-    const methods = config?.plategaMethods ?? [];
-    const yooEnabled = !!config?.yoomoneyEnabled;
-    const yookassaEnabledMsg = !!config?.yookassaEnabled;
-    const cryptopayEnabledMsg = !!config?.cryptopayEnabled;
-    const heleketEnabledMsg = !!config?.heleketEnabled;
-    const lavaEnabledMsg = !!config?.lavaEnabled;
-    const lavatopEnabledMsg = !!config?.lavatopEnabled;
-    if (!methods.length && !yooEnabled && !yookassaEnabledMsg && !cryptopayEnabledMsg && !heleketEnabledMsg && !lavaEnabledMsg && !lavatopEnabledMsg) {
-      await ctx.reply("Пополнение временно недоступно.");
-      return;
-    }
-    const client = await api.getMe(token);
-    const rawStyles = config?.botInnerButtonStyles;
-    const backStyle = rawStyles?.back !== undefined ? rawStyles.back : "danger";
-    const botEmojis = config?.botEmojis;
-    const msgEmojiIds: InnerEmojiIds | undefined = botEmojis
-      ? {
-          back: botEmojis.BACK?.tgEmojiId,
-          card: botEmojis.CARD?.tgEmojiId,
-          tariff: botEmojis.PACKAGE?.tgEmojiId || botEmojis.TARIFFS?.tgEmojiId,
-          trial: botEmojis.TRIAL?.tgEmojiId,
-          profile: botEmojis.PROFILE?.tgEmojiId || botEmojis.PUZZLE?.tgEmojiId,
-          connect: botEmojis.SERVERS?.tgEmojiId || botEmojis.CONNECT?.tgEmojiId,
-        }
-      : undefined;
-    const enabledOnlineMsg = [yooEnabled, yookassaEnabledMsg, cryptopayEnabledMsg, heleketEnabledMsg, lavaEnabledMsg, lavatopEnabledMsg].filter(Boolean).length;
-    const anyOnlineMsg = enabledOnlineMsg > 0;
-    if (methods.length > 1 || (methods.length >= 1 && anyOnlineMsg) || (methods.length === 0 && enabledOnlineMsg >= 2)) {
-      const topupMsg1 = titleWithEmoji("CARD", `Пополнение на ${formatMoney(num, client.preferredCurrency)}\n\nВыберите способ оплаты:`, config?.botEmojis);
-      await ctx.reply(topupMsg1.text, {
-        entities: topupMsg1.entities.length ? topupMsg1.entities : undefined,
-        reply_markup: topupPaymentMethodButtons(String(num), methods, config?.botBackLabel ?? null, backStyle, msgEmojiIds, yooEnabled, yookassaEnabledMsg, cryptopayEnabledMsg, heleketEnabledMsg, lavaEnabledMsg, lavatopEnabledMsg),
-      });
-      return;
-    }
-    // Если только ЮMoney (нет platega, нет ЮKassa) — сразу создаём
-    if (methods.length === 0 && yooEnabled) {
-      const payment = await api.createYoomoneyPayment(token, { amount: num, paymentType: "AC" });
-      const topupMsgYoo = titleWithEmoji("CARD", `Пополнение на ${formatMoney(num, client.preferredCurrency)}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
-      await ctx.reply(topupMsgYoo.text, {
-        entities: topupMsgYoo.entities.length ? topupMsgYoo.entities : undefined,
-        reply_markup: payUrlMarkup(payment.paymentUrl, config?.botBackLabel ?? null, backStyle, msgEmojiIds),
-      });
-      return;
-    }
-    // Если только ЮKassa
-    if (methods.length === 0 && yookassaEnabledMsg) {
-      const payment = await api.createYookassaPayment(token, { amount: num, currency: "RUB" });
-      const topupMsgYoo = titleWithEmoji("CARD", `Пополнение на ${formatMoney(num, "RUB")}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
-      await ctx.reply(topupMsgYoo.text, {
-        entities: topupMsgYoo.entities.length ? topupMsgYoo.entities : undefined,
-        reply_markup: payUrlMarkup(payment.confirmationUrl, config?.botBackLabel ?? null, backStyle, msgEmojiIds),
-      });
-      return;
-    }
-    // Если только Crypto Pay
-    if (methods.length === 0 && cryptopayEnabledMsg) {
-      const payment = await api.createCryptopayPayment(token, { amount: num, currency: client.preferredCurrency });
-      const topupMsgCp = titleWithEmoji("CARD", `Пополнение на ${formatMoney(num, client.preferredCurrency)}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
-      await ctx.reply(topupMsgCp.text, {
-        entities: topupMsgCp.entities.length ? topupMsgCp.entities : undefined,
-        reply_markup: payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, backStyle, msgEmojiIds),
-      });
-      return;
-    }
-    const payment = await api.createPlategaPayment(token, {
-      amount: num,
-      currency: client.preferredCurrency,
-      paymentMethod: methods[0].id,
-      description: "Пополнение баланса",
-    });
-    const topupMsg2 = titleWithEmoji("CARD", `Пополнение на ${formatMoney(num, client.preferredCurrency)}\n\nНажмите кнопку ниже для оплаты:`, config?.botEmojis);
-    await ctx.reply(topupMsg2.text, {
-      entities: topupMsg2.entities.length ? topupMsg2.entities : undefined,
-      reply_markup: payUrlMarkup(payment.paymentUrl, config?.botBackLabel ?? null, backStyle, msgEmojiIds),
-    });
-  } catch {
-    // не число или ошибка — игнорируем
-  }
+  // Любое прочее текстовое сообщение (в т.ч. просто число) — это НЕ команда и НЕ
+  // активный ввод (легитимное пополнение обрабатывается выше через awaitingCustomTopup).
+  // Раньше «голое» число 1..1000000 запускало пополнение баланса, из-за чего случайные
+  // цифры создавали платёж. Теперь такие сообщения считаются нераспознанными и
+  // удаляются (если включён auto-delete) — точно так же, как текст из букв.
+  await tryAutoDeleteUnknown(ctx);
 });
 
 // Fallback для НЕтекстовых сообщений — стикеры, фото, голосовые, GIF, документы, локации и т.п.

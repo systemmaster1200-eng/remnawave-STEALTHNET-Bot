@@ -11,6 +11,15 @@ declare global {
         ready: () => void;
         expand: () => void;
         close: () => void;
+        /** Версия Bot API клиента и проверка минимальной версии. */
+        version?: string;
+        isVersionAtLeast?: (version: string) => boolean;
+        /** Полноэкранный режим (Bot API 8.0+). На старых клиентах отсутствует. */
+        requestFullscreen?: () => void;
+        exitFullscreen?: () => void;
+        isFullscreen?: boolean;
+        /** Отключить вертикальные свайпы, чтобы апп не сворачивался. */
+        disableVerticalSwipes?: () => void;
         /** Платформа клиента Telegram: ios, android, android_x, macos, web, weba, tdesktop, unigram и др. */
         platform?: string;
         showPopup?: (params: { title?: string; message?: string }) => void;

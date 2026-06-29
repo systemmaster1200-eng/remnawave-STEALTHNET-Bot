@@ -36,23 +36,58 @@ import { cn } from "@/lib/utils";
 
 const BUTTON_ACTIONS = [
   { value: "", label: "Без кнопки" },
-  { value: "menu:my_subs", label: "📋 Мои подписки" },
-  { value: "menu:tariffs", label: "📦 Тарифы" },
-  { value: "menu:topup", label: "💳 Пополнить баланс" },
-  { value: "menu:profile", label: "👤 Профиль" },
-  { value: "menu:trial", label: "🎁 Бесплатный триал" },
-  { value: "menu:referral", label: "🔗 Реферальная программа" },
-  { value: "menu:promocode", label: "🎟️ Промокод" },
-  { value: "menu:support", label: "🆘 Поддержка" },
-  { value: "menu:vpn", label: "📋 VPN подключение" },
-  { value: "menu:devices", label: "📱 Устройства" },
-  { value: "menu:extra_options", label: "➕ Доп. опции" },
-  { value: "menu:main", label: "📋 Главное меню" },
-  { value: "webapp:/cabinet", label: "🌐 Web кабинет" },
-  { value: "webapp:/cabinet/subscribe", label: "🌐 Страница подключения" },
-  { value: "webapp:/cabinet/tickets", label: "🌐 Тикеты" },
+  // ── Разделы бота (callback) ──
+  { value: "menu:my_subs", label: "💬 Бот · Мои подписки" },
+  { value: "menu:tariffs", label: "💬 Бот · Тарифы" },
+  { value: "menu:topup", label: "💬 Бот · Пополнить баланс" },
+  { value: "menu:profile", label: "💬 Бот · Профиль" },
+  { value: "menu:trial", label: "💬 Бот · Бесплатный триал" },
+  { value: "menu:referral", label: "💬 Бот · Рефералка" },
+  { value: "menu:promocode", label: "💬 Бот · Промокод" },
+  { value: "menu:support", label: "💬 Бот · Поддержка" },
+  { value: "menu:vpn", label: "💬 Бот · VPN подключение" },
+  { value: "menu:devices", label: "💬 Бот · Устройства" },
+  { value: "menu:extra_options", label: "💬 Бот · Доп. опции" },
+  { value: "menu:main", label: "💬 Бот · Главное меню" },
+  // ── Страницы мини-аппа (web_app) ──
+  { value: "webapp:/cabinet/extend/{{SUBSCRIPTION_ID}}", label: "🌐 Миниапп · Продлить подписку" },
+  { value: "webapp:/cabinet/topup", label: "🌐 Миниапп · Пополнить баланс" },
+  { value: "webapp:/cabinet/tariffs", label: "🌐 Миниапп · Тарифы" },
+  { value: "webapp:/cabinet/subscribe", label: "🌐 Миниапп · Подключение к VPN" },
+  { value: "webapp:/cabinet/devices", label: "🌐 Миниапп · Мои устройства" },
+  { value: "webapp:/cabinet/promocode", label: "🌐 Миниапп · Промокод" },
+  { value: "webapp:/cabinet/trial", label: "🌐 Миниапп · Триал" },
+  { value: "webapp:/cabinet/referral", label: "🌐 Миниапп · Рефералка" },
+  { value: "webapp:/cabinet/profile", label: "🌐 Миниапп · Профиль" },
+  { value: "webapp:/cabinet", label: "🌐 Миниапп · Главная кабинета" },
+  { value: "webapp:/cabinet/tickets", label: "🌐 Миниапп · Тикеты" },
+  // ── Произвольная ссылка ──
   { value: "__custom_url__", label: "🔗 Своя ссылка (URL)" },
 ];
+
+// Кнопка в конструкторе: текст + action (с раскрытием custom URL).
+type EditorButton = { text: string; action: string; customUrl: string };
+
+/** Действия конструктора (без пустого «Без кнопки» — он только для старого селекта). */
+const CONSTRUCTOR_ACTIONS = BUTTON_ACTIONS.filter((a) => a.value !== "");
+
+/** API-кнопка (text+action) → форма редактора (раскрывает custom URL). */
+function apiButtonToEditor(b: { text: string; action: string }): EditorButton {
+  const known = CONSTRUCTOR_ACTIONS.some((a) => a.value === b.action && a.value !== "__custom_url__");
+  if (known) return { text: b.text, action: b.action, customUrl: "" };
+  return { text: b.text, action: "__custom_url__", customUrl: b.action };
+}
+
+/** Старые поля правила (button-поля) в массив EditorButton (для миграции в конструктор). */
+function legacyButtonsToEditor(rule: {
+  buttonText?: string | null; buttonUrl?: string | null;
+  button2Text?: string | null; button2Url?: string | null;
+}): EditorButton[] {
+  const out: EditorButton[] = [];
+  if (rule.buttonText?.trim() && rule.buttonUrl?.trim()) out.push(apiButtonToEditor({ text: rule.buttonText, action: rule.buttonUrl }));
+  if (rule.button2Text?.trim() && rule.button2Url?.trim()) out.push(apiButtonToEditor({ text: rule.button2Text, action: rule.button2Url }));
+  return out;
+}
 
 const TRIGGER_LABELS: Record<AutoBroadcastTriggerType, string> = {
   after_registration: "После регистрации",
@@ -163,16 +198,8 @@ export function AutoBroadcastPage() {
     }
   }
 
-  const [buttonAction, setButtonAction] = useState("");
-  const [buttonCustomUrl, setButtonCustomUrl] = useState("");
-
-  function resolveActionFromUrl(url: string | null): { action: string; customUrl: string } {
-    if (!url) return { action: "", customUrl: "" };
-    if (BUTTON_ACTIONS.some((a) => a.value === url && a.value !== "__custom_url__")) {
-      return { action: url, customUrl: "" };
-    }
-    return { action: "__custom_url__", customUrl: url };
-  }
+  // Новый конструктор кнопок (произвольное число).
+  const [buttons, setButtons] = useState<EditorButton[]>([]);
 
   function openCreate() {
     setEditingId(null);
@@ -195,15 +222,13 @@ export function AutoBroadcastPage() {
       cronExpression: null,
       eventDriven: false,
     });
-    setButtonAction("");
-    setButtonCustomUrl("");
+    setButtons([]);
     setFormError(null);
     setShowForm(true);
   }
 
   function openEdit(rule: AutoBroadcastRule) {
     setEditingId(rule.id);
-    const { action, customUrl } = resolveActionFromUrl(rule.buttonUrl);
     setForm({
       name: rule.name,
       triggerType: rule.triggerType,
@@ -223,8 +248,13 @@ export function AutoBroadcastPage() {
       cronExpression: rule.cronExpression ?? null,
       eventDriven: rule.eventDriven ?? false,
     });
-    setButtonAction(action);
-    setButtonCustomUrl(customUrl);
+    // Конструктор кнопок: если правило уже хранит buttons → берём их, иначе
+    // мигрируем из старых button*/button2* (чтобы редактор показал текущие кнопки).
+    setButtons(
+      rule.buttons && rule.buttons.length > 0
+        ? rule.buttons.map(apiButtonToEditor)
+        : legacyButtonsToEditor(rule),
+    );
     setFormError(null);
     setShowForm(true);
   }
@@ -237,14 +267,21 @@ export function AutoBroadcastPage() {
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setFormError(null);
-    const resolvedUrl = buttonAction === "__custom_url__" ? buttonCustomUrl.trim() : buttonAction;
+    // Конструктор кнопок → массив {text, action} (custom URL раскрывается).
+    const builtButtons = buttons
+      .map((b) => ({ text: b.text.trim(), action: b.action === "__custom_url__" ? b.customUrl.trim() : b.action }))
+      .filter((b) => b.text && b.action);
+    const useConstructor = builtButtons.length > 0;
     const payload: AutoBroadcastRulePayload = {
       ...form,
       subject: form.subject?.trim() || null,
-      buttonText: form.buttonText?.trim() || null,
-      buttonUrl: resolvedUrl || null,
-      button2Text: form.button2Text?.trim() || null,
-      button2Url: form.button2Url?.trim() || null,
+      // Если задан конструктор — он приоритетен; старые button*-поля обнуляем, чтобы
+      // бэкенд однозначно брал buttons. Иначе оставляем пустые кнопки (без кнопок).
+      buttonText: null,
+      buttonUrl: null,
+      button2Text: null,
+      button2Url: null,
+      buttons: useConstructor ? builtButtons : [],
       promoCodeId: form.promoCodeId || null,
       personalDiscountPercent: form.personalDiscountPercent ?? null,
       personalDiscountIsOneTime: form.personalDiscountIsOneTime ?? true,
@@ -671,75 +708,68 @@ export function AutoBroadcastPage() {
               <div className="rounded-2xl border border-white/10 bg-foreground/[0.03] dark:bg-white/[0.02] p-4 space-y-3">
                 <div className="flex items-center gap-2 text-sm font-semibold">
                   <MousePointerClick className="h-4 w-4 text-primary" />
-                  Кнопка под сообщением (только Telegram)
+                  Кнопки под сообщением (только Telegram)
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="space-y-1.5">
-                    <Label className="text-xs text-muted-foreground">Действие кнопки</Label>
-                    <select
-                      className="flex h-10 w-full rounded-xl border border-white/10 bg-background/60 px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
-                      value={buttonAction}
-                      onChange={(e) => setButtonAction(e.target.value)}
-                    >
-                      {BUTTON_ACTIONS.map((a) => (
-                        <option key={a.value} value={a.value}>
-                          {a.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  {buttonAction && (
-                    <div className="space-y-1.5">
-                      <Label className="text-xs text-muted-foreground">Текст кнопки</Label>
-                      <Input
-                        value={form.buttonText ?? ""}
-                        onChange={(e) => setForm((f) => ({ ...f, buttonText: e.target.value }))}
-                        placeholder="Открыть тарифы"
-                        maxLength={64}
-                        className="h-10 rounded-xl bg-background/60 border-white/10 focus-visible:ring-primary/50"
-                      />
-                    </div>
-                  )}
-                </div>
-                {buttonAction === "__custom_url__" && (
-                  <div className="space-y-1.5">
-                    <Label className="text-xs text-muted-foreground">Ссылка (URL)</Label>
-                    <Input
-                      value={buttonCustomUrl}
-                      onChange={(e) => setButtonCustomUrl(e.target.value)}
-                      placeholder="https://example.com/tariffs"
-                      maxLength={500}
-                      className="h-10 rounded-xl bg-background/60 border-white/10 focus-visible:ring-primary/50"
-                    />
-                  </div>
-                )}
-                <p className="text-[11px] text-muted-foreground">
-                  Выберите действие — под сообщением появится inline-кнопка, открывающая выбранный раздел бота.
-                </p>
 
-                {/* вторая кнопка */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-white/5">
-                  <div className="space-y-1.5">
-                    <Label className="text-xs text-muted-foreground">Кнопка #2 — текст</Label>
+                {buttons.length === 0 && (
+                  <p className="text-[11px] text-muted-foreground">Кнопок нет — сообщение уйдёт без кнопок.</p>
+                )}
+
+                {buttons.map((b, i) => (
+                  <div key={i} className="space-y-2 p-2.5 rounded-xl border border-white/10 bg-background/40">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-muted-foreground">Кнопка {i + 1}</span>
+                      <Button
+                        type="button" size="sm" variant="ghost"
+                        className="h-7 px-2 text-rose-400 hover:text-rose-300"
+                        onClick={() => setButtons((arr) => arr.filter((_, idx) => idx !== i))}
+                      >
+                        Удалить
+                      </Button>
+                    </div>
                     <Input
-                      value={form.button2Text ?? ""}
-                      onChange={(e) => setForm((f) => ({ ...f, button2Text: e.target.value }))}
-                      placeholder="🏠 Главное меню"
+                      value={b.text}
+                      onChange={(e) => setButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, text: e.target.value } : x))}
+                      placeholder="Текст кнопки (напр. 📦 Тарифы)"
                       maxLength={64}
                       className="h-10 rounded-xl bg-background/60 border-white/10"
                     />
+                    <select
+                      className="flex h-10 w-full rounded-xl border border-white/10 bg-background/60 px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                      value={b.action}
+                      onChange={(e) => setButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, action: e.target.value } : x))}
+                    >
+                      {CONSTRUCTOR_ACTIONS.map((a) => (
+                        <option key={a.value} value={a.value}>{a.label}</option>
+                      ))}
+                    </select>
+                    {b.action === "__custom_url__" && (
+                      <Input
+                        value={b.customUrl}
+                        onChange={(e) => setButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, customUrl: e.target.value } : x))}
+                        placeholder="https://example.com"
+                        maxLength={500}
+                        className="h-10 rounded-xl bg-background/60 border-white/10"
+                      />
+                    )}
                   </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs text-muted-foreground">Кнопка #2 — действие / URL</Label>
-                    <Input
-                      value={form.button2Url ?? ""}
-                      onChange={(e) => setForm((f) => ({ ...f, button2Url: e.target.value }))}
-                      placeholder="menu:main или https://..."
-                      maxLength={500}
-                      className="h-10 rounded-xl bg-background/60 border-white/10"
-                    />
-                  </div>
-                </div>
+                ))}
+
+                {buttons.length < 10 && (
+                  <Button
+                    type="button" variant="outline" size="sm"
+                    className="w-full bg-background/40"
+                    onClick={() => setButtons((arr) => [...arr, { text: "", action: "menu:my_subs", customUrl: "" }])}
+                  >
+                    + Добавить кнопку
+                  </Button>
+                )}
+
+                <p className="text-[11px] text-muted-foreground leading-snug">
+                  🌐 «Миниапп» открывает страницу внутри Telegram. «Продлить подписку»
+                  подставляет id подписки получателя ({`{{SUBSCRIPTION_ID}}`}). Кнопки идут
+                  отдельными рядами в порядке добавления.
+                </p>
 
                 {/* T-promo: индивидуальная скидка / промокод / лимит получателей */}
                 <div className="space-y-3 pt-3 border-t border-white/5">

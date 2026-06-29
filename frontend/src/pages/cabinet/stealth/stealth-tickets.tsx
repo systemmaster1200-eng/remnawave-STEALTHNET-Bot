@@ -11,11 +11,11 @@
  */
 
 import { useEffect, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Plus, Mail, ChevronRight, Loader2 } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
 import { api } from "@/lib/api";
 import { StadiumButton } from "@/components/stealth/stadium-button";
-import { StealthNewTicketModal } from "@/components/stealth/stealth-new-ticket-modal";
 import { StealthTicketChatModal } from "@/components/stealth/stealth-ticket-chat-modal";
 import { cn } from "@/lib/utils";
 
@@ -44,10 +44,11 @@ function fmtDate(iso: string): string {
 
 export function StealthTickets() {
   const { state } = useClientAuth();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [items, setItems] = useState<TicketItem[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-  const [showNew, setShowNew] = useState(false);
   const [chatTicketId, setChatTicketId] = useState<string | null>(null);
 
   function load() {
@@ -62,7 +63,20 @@ export function StealthTickets() {
 
   useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [state.token]);
 
-  const goNew = () => setShowNew(true);
+  // ?open=<id> (после создания на отдельной странице) — сразу открыть чат тикета.
+  useEffect(() => {
+    const open = searchParams.get("open");
+    if (open) {
+      setChatTicketId(open);
+      const next = new URLSearchParams(searchParams);
+      next.delete("open");
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  // Новое обращение — отдельная страница.
+  const goNew = () => navigate("/cabinet/tickets/new");
   const goTicket = (id: string) => setChatTicketId(id);
 
   return (
@@ -118,16 +132,6 @@ export function StealthTickets() {
           ))}
         </div>
       )}
-
-      <StealthNewTicketModal
-        open={showNew}
-        onClose={() => setShowNew(false)}
-        onCreated={(id) => {
-          load();
-          // Сразу открываем chat созданного тикета
-          setChatTicketId(id);
-        }}
-      />
 
       <StealthTicketChatModal
         open={chatTicketId !== null}

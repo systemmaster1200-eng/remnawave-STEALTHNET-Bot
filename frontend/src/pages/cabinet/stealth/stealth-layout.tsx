@@ -33,7 +33,10 @@ export function StealthLayout() {
       <NetworkBg />
 
       {/* Header: бренд по центру + ambient glow */}
-      <header className="relative pt-6 pb-3 px-4 text-center">
+      <header
+        className="relative pb-1 px-4 text-center"
+        style={{ paddingTop: "calc(var(--tg-content-safe-area-inset-top, env(safe-area-inset-top, 0px)) + 16px)" }}
+      >
         <div className="inline-block relative">
           <span
             className="absolute inset-0 -z-10 blur-2xl opacity-50"

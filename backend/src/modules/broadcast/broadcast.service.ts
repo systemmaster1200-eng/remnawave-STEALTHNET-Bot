@@ -72,6 +72,75 @@ function buildReplyMarkup(buttonText?: string, buttonAction?: string, publicAppU
   return { inline_keyboard: [[btn]] };
 }
 
+/** Одна кнопка конструктора: текст + action (menu:* / webapp:/path / URL). */
+type ConfigButton = { text: string; action: string };
+
+/** action → конкретная inline-кнопка Telegram. */
+function makeConfigButton(text: string, action: string, publicAppUrl?: string | null): InlineKeyboardButton {
+  if (action.startsWith("menu:")) return { text, callback_data: action };
+  if (action.startsWith("webapp:")) {
+    const path = action.slice("webapp:".length);
+    const base = (publicAppUrl || "").replace(/\/+$/, "");
+    return { text, web_app: { url: `${base}${path}` } };
+  }
+  return { text, url: action };
+}
+
+/** Парсит buttonsConfig (JSON). Невалидный/пустой → []. NULL/undefined → null (нет конфига). */
+function parseButtonsConfig(raw: string | null | undefined): ConfigButton[] | null {
+  if (raw == null) return null;
+  if (!raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((b) => {
+        const o = (b && typeof b === "object") ? (b as Record<string, unknown>) : {};
+        return { text: typeof o.text === "string" ? o.text.trim() : "", action: typeof o.action === "string" ? o.action.trim() : "" };
+      })
+      .filter((b) => b.text && b.action);
+  } catch { return []; }
+}
+
+/**
+ * Строит reply_markup из buttonsConfig (произвольное число кнопок, каждая отдельным
+ * рядом). Подставляет {{SUBSCRIPTION_ID}} — если плейсхолдер есть, а id нет, кнопка
+ * пропускается. Если buttonsConfig === null → возвращает null (вызвать fallback на старые поля).
+ */
+function buildReplyMarkupFromConfig(
+  raw: string | null | undefined,
+  publicAppUrl?: string | null,
+  subscriptionId?: string,
+): InlineKeyboard | undefined | null {
+  const parsed = parseButtonsConfig(raw);
+  if (parsed === null) return null; // нет конфига → caller сделает fallback
+  const rows: InlineKeyboardButton[][] = [];
+  for (const b of parsed) {
+    let action = b.action;
+    if (action.includes("{{SUBSCRIPTION_ID}}")) {
+      if (!subscriptionId) continue;
+      action = action.split("{{SUBSCRIPTION_ID}}").join(subscriptionId);
+    }
+    rows.push([makeConfigButton(b.text, action, publicAppUrl)]);
+  }
+  if (rows.length === 0) return undefined;
+  return { inline_keyboard: rows };
+}
+
+/**
+ * Единая точка: сначала buttonsConfig (новый конструктор), при его отсутствии —
+ * старые buttonText/buttonUrl (обратная совместимость).
+ */
+function resolveReplyMarkup(
+  opts: { buttonsConfig?: string | null; buttonText?: string; buttonUrl?: string },
+  publicAppUrl?: string | null,
+  subscriptionId?: string,
+): InlineKeyboard | undefined {
+  const fromConfig = buildReplyMarkupFromConfig(opts.buttonsConfig, publicAppUrl, subscriptionId);
+  if (fromConfig !== null) return fromConfig; // конфиг задан (в т.ч. пустой → undefined)
+  return buildReplyMarkup(opts.buttonText, opts.buttonUrl, publicAppUrl);
+}
+
 /**
  * Отправить текстовое сообщение в Telegram. 25.05.2026, WolfVPN —
  * принимает proxy parameter (берём 1 раз перед циклом, не на каждое сообщение)
@@ -110,6 +179,7 @@ export type DirectSendExtras = {
   subject?: string;
   buttonText?: string;
   buttonUrl?: string;
+  buttonsConfig?: string | null;
   attachment?: BroadcastAttachment;
 };
 
@@ -176,7 +246,7 @@ export async function sendDirectTelegramMessage(chatId: string, text: string, ex
   const botToken = config.telegramBotToken?.trim();
   if (!botToken) return { ok: false, error: "Не задан токен бота (Настройки → Почта и Telegram)" };
   const proxy = await getProxyUrl("telegram");
-  const replyMarkup = buildReplyMarkup(extras?.buttonText, extras?.buttonUrl, config.publicAppUrl);
+  const replyMarkup = resolveReplyMarkup({ buttonsConfig: extras?.buttonsConfig, buttonText: extras?.buttonText, buttonUrl: extras?.buttonUrl }, config.publicAppUrl);
   const media = prepareMedia(extras?.attachment);
   const res = await richSendOne(botToken, chatId, text, replyMarkup, extras?.attachment, media, null, proxy);
   return res.ok ? { ok: true } : { ok: false, error: res.error };
@@ -244,7 +314,7 @@ export function startListSendJob(recipients: string[], message: string, extras?:
         return;
       }
       const proxy = await getProxyUrl("telegram");
-      const replyMarkup = buildReplyMarkup(extras?.buttonText, extras?.buttonUrl, config.publicAppUrl);
+      const replyMarkup = resolveReplyMarkup({ buttonsConfig: extras?.buttonsConfig, buttonText: extras?.buttonText, buttonUrl: extras?.buttonUrl }, config.publicAppUrl);
       const att = extras?.attachment;
       const media = prepareMedia(att);
       let cachedFileId: string | null = null; // file_id reuse: вложение грузим 1 раз, дальше шлём строкой
@@ -656,6 +726,7 @@ export async function runBroadcast(options: {
   attachment?: BroadcastAttachment;
   buttonText?: string;
   buttonUrl?: string;
+  buttonsConfig?: string | null;
   targetGroup?: BroadcastTargetGroup;
   onProgress?: (p: BroadcastProgress) => void;
   /** 19.05.2026, WolfVPN — проверяется перед каждой отправкой. Если вернёт true, рассылка прерывается. */
@@ -664,7 +735,7 @@ export async function runBroadcast(options: {
    *  и auto-resume (skip уже отправленных tgid'ов). Без него log пишется не будет. */
   broadcastId?: string;
 }): Promise<BroadcastResult & { cancelled?: boolean }> {
-  const { channel, subject, message, attachment, buttonText, buttonUrl, targetGroup, onProgress, isCancelled, broadcastId } = options;
+  const { channel, subject, message, attachment, buttonText, buttonUrl, buttonsConfig, targetGroup, onProgress, isCancelled, broadcastId } = options;
   const result: BroadcastResult & { cancelled?: boolean } = {
     ok: true,
     sentTelegram: 0,
@@ -691,7 +762,7 @@ export async function runBroadcast(options: {
   if (isVideo) {
     console.log(`[broadcast] video metadata: ${JSON.stringify(videoMeta)}  thumb=${videoThumb ? videoThumb.length + "B" : "none"}`);
   }
-  const replyMarkup = buildReplyMarkup(buttonText, buttonUrl, config.publicAppUrl);
+  const replyMarkup = resolveReplyMarkup({ buttonsConfig, buttonText, buttonUrl }, config.publicAppUrl);
 
   // T-unify (12.05.2026, WolfVPN): применяем фильтр targetGroup к where-clause.
   const whereTelegram = buildClientWhereForGroup(targetGroup, { telegramId: { not: null } });
@@ -949,6 +1020,7 @@ export async function startBroadcastJob(options: {
   attachment?: BroadcastAttachment;
   buttonText?: string;
   buttonUrl?: string;
+  buttonsConfig?: string | null;
   /** T-unify (12.05.2026, WolfVPN): целевая группа получателей. */
   targetGroup?: BroadcastTargetGroup;
   startedByAdmin?: string;
@@ -995,12 +1067,14 @@ export async function startBroadcastJob(options: {
           message: options.message,
           buttonText: options.buttonText || null,
           buttonUrl: options.buttonUrl || null,
+          // Новый конструктор кнопок (произвольное число). null → fallback на button*.
+          ...(options.buttonsConfig != null ? { buttonsConfig: options.buttonsConfig } : {}),
           attachmentName: options.attachment?.originalname || null,
           attachmentPath: attachmentPath,
           attachmentMime: options.attachment?.mimetype || null,
           targetGroup: options.targetGroup || null,
           startedByAdmin: options.startedByAdmin || null,
-        },
+        } as Parameters<typeof prisma.broadcastHistory.create>[0]["data"],
       });
       console.log(`[broadcast] queued: ${jobId} (worker will pick up within ~3s)`);
     }

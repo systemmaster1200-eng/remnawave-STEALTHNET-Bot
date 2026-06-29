@@ -120,6 +120,49 @@ function buildReplyMarkup(
   return { inline_keyboard: rows };
 }
 
+/** Парсит buttonsConfig (JSON). NULL/undefined → null (нет конфига). Невалид → []. */
+function parseButtonsConfig(raw: string | null | undefined): { text: string; action: string }[] | null {
+  if (raw == null) return null;
+  if (!raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((b) => {
+        const o = (b && typeof b === "object") ? (b as Record<string, unknown>) : {};
+        return { text: typeof o.text === "string" ? o.text.trim() : "", action: typeof o.action === "string" ? o.action.trim() : "" };
+      })
+      .filter((b) => b.text && b.action);
+  } catch { return []; }
+}
+
+/**
+ * Reply markup из конструктора кнопок (buttonsConfig). Подставляет {{SUBSCRIPTION_ID}};
+ * кнопка с плейсхолдером без id пропускается. Возвращает:
+ *   null      — конфига нет (buttonsConfig == null) → caller делает fallback на button*;
+ *   undefined — конфиг есть, но кнопок нет (пустой массив);
+ *   markup    — кнопки.
+ */
+function buildReplyMarkupFromConfig(
+  raw: string | null | undefined,
+  publicAppUrl?: string | null,
+  subscriptionId?: string | null,
+): InlineKeyboard | undefined | null {
+  const parsed = parseButtonsConfig(raw);
+  if (parsed === null) return null;
+  const rows: InlineKeyboardButton[][] = [];
+  for (const b of parsed) {
+    let action = b.action;
+    if (action.includes("{{SUBSCRIPTION_ID}}")) {
+      if (!subscriptionId) continue;
+      action = action.split("{{SUBSCRIPTION_ID}}").join(subscriptionId);
+    }
+    rows.push([makeButton(b.text, action, publicAppUrl)]);
+  }
+  if (rows.length === 0) return undefined;
+  return { inline_keyboard: rows };
+}
+
 async function sendTelegram(botToken: string, chatId: string, text: string, replyMarkup?: InlineKeyboard): Promise<{ ok: boolean; error?: string }> {
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   try {
@@ -842,7 +885,14 @@ export async function runRule(ruleId: string, opts?: { onlyClientId?: string }):
     const subB2Url = rule.button2Url && subscriptionIdForButton
       ? rule.button2Url.split("{{SUBSCRIPTION_ID}}").join(subscriptionIdForButton)
       : rule.button2Url;
-    const perClientMarkup = buildReplyMarkup(
+    // Новый конструктор (произвольное число кнопок) имеет приоритет; при его
+    // отсутствии (buttonsConfig == null) — fallback на старые button*/button2*.
+    const fromConfig = buildReplyMarkupFromConfig(
+      (rule as { buttonsConfig?: string | null }).buttonsConfig ?? null,
+      config.publicAppUrl,
+      subscriptionIdForButton,
+    );
+    const perClientMarkup = fromConfig !== null ? fromConfig : buildReplyMarkup(
       rule.buttonText, subB1Url, config.publicAppUrl,
       rule.button2Text, subB2Url,
     );

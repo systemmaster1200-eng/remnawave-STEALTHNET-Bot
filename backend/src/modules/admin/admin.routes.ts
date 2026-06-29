@@ -948,14 +948,50 @@ const autoRenewNotifSchema = z.object({
   triggerType: z.enum(["UPCOMING", "SUCCESS", "FAILED", "RETRY", "EXPIRED"]),
   offsetMinutes: z.number().int().min(0).max(60 * 24 * 30), // до 30 дней
   messageText: z.string().min(1).max(4000),
+  // Конструктор inline-кнопок. null → дефолтный набор (старое поведение),
+  // [] → без кнопок, иначе — заданные кнопки. action: menu:* / webapp:/path / URL.
+  buttons: z.array(z.object({
+    text: z.string().min(1).max(64),
+    action: z.string().min(1).max(256),
+  })).max(8).nullable().optional(),
   enabled: z.boolean().optional(),
   sortOrder: z.number().int().optional(),
 });
 
+/** buttons (массив) из API → строка buttons_config для БД. undefined-поле не трогаем. */
+function buttonsToConfig(buttons: { text: string; action: string }[] | null | undefined): string | null | undefined {
+  if (buttons === undefined) return undefined; // не передано в PATCH → не меняем
+  if (buttons === null) return null;            // явный null → дефолтный набор
+  return JSON.stringify(buttons);               // [] или список → как есть
+}
+
 adminRouter.get("/auto-renew-notifications", async (_req, res) => {
-  const list = await prisma.autoRenewNotification.findMany({
-    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-  });
+  // Пытаемся прочитать со всеми полями (вкл. buttonsConfig). Если колонки ещё нет
+  // в БД (миграция не применена) — Prisma бросит P2022; тогда читаем без неё,
+  // чтобы страница админки всё равно открылась.
+  type Row = {
+    id: string; name: string; triggerType: string; offsetMinutes: number;
+    messageText: string; buttonsConfig?: string | null; enabled: boolean;
+    sortOrder: number; createdAt: Date; updatedAt: Date;
+  };
+  let list: Row[];
+  try {
+    list = await prisma.autoRenewNotification.findMany({
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+    }) as Row[];
+  } catch (e) {
+    const code = (e as { code?: string })?.code;
+    const isMissingColumn = code === "P2022" || /buttons_config|column .* does not exist/i.test(String(e));
+    if (!isMissingColumn) throw e;
+    console.warn(`[auto-renew-notif GET] buttons_config column missing — reading without it. Apply DB migration.`);
+    list = await prisma.autoRenewNotification.findMany({
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+      select: {
+        id: true, name: true, triggerType: true, offsetMinutes: true,
+        messageText: true, enabled: true, sortOrder: true, createdAt: true, updatedAt: true,
+      },
+    }) as Row[];
+  }
   return res.json({
     items: list.map((n) => ({
       id: n.id,
@@ -963,6 +999,22 @@ adminRouter.get("/auto-renew-notifications", async (_req, res) => {
       triggerType: n.triggerType,
       offsetMinutes: n.offsetMinutes,
       messageText: n.messageText,
+      // buttons_config (JSON-строка или null) → массив для фронта.
+      //   null → null (дефолтный набор), иначе парсим JSON ([] = без кнопок).
+      buttons: ((): { text: string; action: string }[] | null => {
+        const raw = (n as { buttonsConfig?: string | null }).buttonsConfig ?? null;
+        if (raw == null) return null;
+        try {
+          const parsed = JSON.parse(raw) as unknown;
+          if (!Array.isArray(parsed)) return [];
+          return parsed
+            .map((b) => {
+              const o = (b && typeof b === "object") ? (b as Record<string, unknown>) : {};
+              return { text: typeof o.text === "string" ? o.text : "", action: typeof o.action === "string" ? o.action : "" };
+            })
+            .filter((b) => b.text && b.action);
+        } catch { return []; }
+      })(),
       enabled: n.enabled,
       sortOrder: n.sortOrder,
       createdAt: n.createdAt.toISOString(),
@@ -974,30 +1026,84 @@ adminRouter.get("/auto-renew-notifications", async (_req, res) => {
 adminRouter.post("/auto-renew-notifications", async (req, res) => {
   const parsed = autoRenewNotifSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Invalid input", errors: parsed.error.flatten() });
-  const created = await prisma.autoRenewNotification.create({
-    data: {
-      name: parsed.data.name,
-      triggerType: parsed.data.triggerType,
-      offsetMinutes: parsed.data.offsetMinutes,
-      messageText: parsed.data.messageText,
-      enabled: parsed.data.enabled ?? true,
-      sortOrder: parsed.data.sortOrder ?? 0,
-    },
-  });
-  return res.status(201).json({ id: created.id });
+  const cfg = buttonsToConfig(parsed.data.buttons);
+  const baseData = {
+    name: parsed.data.name,
+    triggerType: parsed.data.triggerType,
+    offsetMinutes: parsed.data.offsetMinutes,
+    messageText: parsed.data.messageText,
+    enabled: parsed.data.enabled ?? true,
+    sortOrder: parsed.data.sortOrder ?? 0,
+  };
+  try {
+    const created = await prisma.autoRenewNotification.create({
+      data: {
+        ...baseData,
+        // null/undefined → дефолтный набор кнопок (поле остаётся NULL).
+        ...(cfg == null ? {} : { buttonsConfig: cfg }),
+      } as Parameters<typeof prisma.autoRenewNotification.create>[0]["data"],
+    });
+    return res.status(201).json({ id: created.id });
+  } catch (e) {
+    // Колонки buttons_config ещё нет (миграция не применена) → создаём без кнопок.
+    const code = (e as { code?: string })?.code;
+    const isMissingColumn = code === "P2022" || /buttons_config|column .* does not exist/i.test(String(e));
+    if (isMissingColumn && cfg != null) {
+      const created = await prisma.autoRenewNotification.create({
+        data: baseData as Parameters<typeof prisma.autoRenewNotification.create>[0]["data"],
+      });
+      console.warn(`[auto-renew-notif POST] created WITHOUT buttons — column buttons_config missing. Apply DB migration.`);
+      return res.status(201).json({ id: created.id, warning: "Кнопки не сохранены: в БД нет поля buttons_config. Примените миграцию." });
+    }
+    console.error(`[auto-renew-notif POST] create failed:`, e);
+    return res.status(500).json({ message: "Не удалось создать шаблон." });
+  }
 });
 
 adminRouter.patch("/auto-renew-notifications/:id", async (req, res) => {
   const parsed = autoRenewNotifSchema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Invalid input", errors: parsed.error.flatten() });
+  // buttons (массив) не существует в БД — конвертируем в buttonsConfig (строка).
+  const { buttons, ...rest } = parsed.data;
+  const buttonsConfig = buttonsToConfig(buttons);
+
+  // Существование проверяем отдельно, чтобы не путать «нет записи» с прочими ошибками.
+  const exists = await prisma.autoRenewNotification.findUnique({
+    where: { id: req.params.id },
+    select: { id: true },
+  });
+  if (!exists) return res.status(404).json({ message: "Шаблон не найден" });
+
   try {
     await prisma.autoRenewNotification.update({
       where: { id: req.params.id },
-      data: parsed.data,
+      data: {
+        ...rest,
+        // undefined → ключ не попадёт в data (Prisma не тронет поле).
+        ...(buttonsConfig === undefined ? {} : { buttonsConfig }),
+      } as Parameters<typeof prisma.autoRenewNotification.update>[0]["data"],
     });
     return res.json({ ok: true });
-  } catch {
-    return res.status(404).json({ message: "Шаблон не найден" });
+  } catch (e) {
+    // Если колонки buttons_config ещё нет в БД (миграция не применена) — Prisma бросает
+    // P2022 (column does not exist). Сохраняем остальные поля без кнопок, чтобы редактор
+    // не ломался, и логируем явную подсказку про миграцию.
+    const code = (e as { code?: string })?.code;
+    const isMissingColumn = code === "P2022" || /buttons_config|column .* does not exist/i.test(String(e));
+    if (isMissingColumn && buttonsConfig !== undefined && Object.keys(rest).length > 0) {
+      try {
+        await prisma.autoRenewNotification.update({
+          where: { id: req.params.id },
+          data: rest as Parameters<typeof prisma.autoRenewNotification.update>[0]["data"],
+        });
+        console.warn(`[auto-renew-notif PATCH] saved WITHOUT buttons — column buttons_config missing. Apply DB migration (ADD COLUMN buttons_config).`);
+        return res.json({ ok: true, warning: "Кнопки не сохранены: в БД нет поля buttons_config. Примените миграцию." });
+      } catch (e2) {
+        console.error(`[auto-renew-notif PATCH] fallback update failed for ${req.params.id}:`, e2);
+      }
+    }
+    console.error(`[auto-renew-notif PATCH] update failed for ${req.params.id}:`, e);
+    return res.status(500).json({ message: "Не удалось сохранить шаблон. Проверьте, что миграция БД применена (поле buttons_config)." });
   }
 });
 
@@ -2676,6 +2782,10 @@ const updateSettingsSchema = z.object({
   botTariffsFields: z.union([z.string().max(2000), z.record(z.boolean())]).nullable().optional(),
   botPaymentText: z.string().max(8000).nullable().optional(),
   subscriptionPageConfig: z.string().max(500000).nullable().optional(),
+  // Сообщение «после оформления подписки» (бот): вкл/выкл, текст, конструктор кнопок.
+  purchaseMessageEnabled: z.boolean().optional(),
+  purchaseMessageText: z.string().max(4096).nullable().optional(),
+  purchaseMessageButtons: z.string().max(10000).nullable().optional(),
   supportLink: z.string().max(2000).nullable().optional(),
   agreementLink: z.string().max(2000).nullable().optional(),
   offerLink: z.string().max(2000).nullable().optional(),
@@ -3376,6 +3486,18 @@ adminRouter.patch("/settings", async (req, res) => {
       update: { value: val },
     });
   }
+  if (updates.purchaseMessageEnabled !== undefined) {
+    const val = updates.purchaseMessageEnabled ? "1" : "0";
+    await prisma.systemSetting.upsert({ where: { key: "purchase_message_enabled" }, create: { key: "purchase_message_enabled", value: val }, update: { value: val } });
+  }
+  if (updates.purchaseMessageText !== undefined) {
+    const val = updates.purchaseMessageText ?? "";
+    await prisma.systemSetting.upsert({ where: { key: "purchase_message_text" }, create: { key: "purchase_message_text", value: val }, update: { value: val } });
+  }
+  if (updates.purchaseMessageButtons !== undefined) {
+    const val = updates.purchaseMessageButtons ?? "";
+    await prisma.systemSetting.upsert({ where: { key: "purchase_message_buttons" }, create: { key: "purchase_message_buttons", value: val }, update: { value: val } });
+  }
   if (updates.allowUserThemeChange !== undefined) {
     const val = updates.allowUserThemeChange ? "true" : "false";
     await prisma.systemSetting.upsert({ where: { key: "allow_user_theme_change" }, create: { key: "allow_user_theme_change", value: val }, update: { value: val } });
@@ -4032,12 +4154,36 @@ adminRouter.post("/sync/create-remna-for-missing", async (_req, res) => {
 
 // ——————————————— Рассылка ———————————————
 
+// buttons (JSON-строка массива [{text, action}]) → нормализованная JSON-строка для БД.
+// undefined/пусто → undefined (не трогаем). Невалидный JSON → undefined.
+// Пустой массив "[]" → "[]" (кнопок нет вовсе, осознанный выбор).
+function normalizeButtonsConfig(raw: string | null | undefined): string | undefined {
+  if (raw == null || !String(raw).trim()) return undefined;
+  try {
+    const parsed = JSON.parse(String(raw)) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    const clean = parsed
+      .map((b) => {
+        const o = (b && typeof b === "object") ? (b as Record<string, unknown>) : {};
+        const text = typeof o.text === "string" ? o.text.trim().slice(0, 64) : "";
+        const action = typeof o.action === "string" ? o.action.trim().slice(0, 256) : "";
+        return { text, action };
+      })
+      .filter((b) => b.text && b.action)
+      .slice(0, 10);
+    return JSON.stringify(clean);
+  } catch { return undefined; }
+}
+
 const broadcastSchema = z.object({
   channel: z.enum(["telegram", "email", "both"]),
   subject: z.string().max(500).optional(),
   message: z.string().min(1, "Текст сообщения обязателен").max(4096),
   buttonText: z.string().max(64).optional(),
   buttonUrl: z.string().max(500).optional(),
+  // Новый конструктор кнопок: JSON-строка массива [{text, action}] (multipart-форма).
+  // Если задан — используется вместо buttonText/buttonUrl.
+  buttons: z.string().max(4000).optional(),
   // фильтр получателей.
   targetGroup: z.enum([
     "all",
@@ -4075,6 +4221,14 @@ adminRouter.post("/broadcast/send-to-user", broadcastUpload.single("attachment")
   const subject = req.body.subject ? String(req.body.subject).slice(0, 300) : undefined;
   const buttonText = req.body.buttonText ? String(req.body.buttonText).slice(0, 64) : undefined;
   const buttonUrl = req.body.buttonUrl ? String(req.body.buttonUrl).slice(0, 500) : undefined;
+  // Новый конструктор кнопок (2–5 шт.): массив {text, action}. Приоритетнее одиночной.
+  let buttonsConfig: string | undefined;
+  if (req.body.buttons) {
+    try {
+      const arr = JSON.parse(String(req.body.buttons));
+      if (Array.isArray(arr)) buttonsConfig = JSON.stringify(arr.slice(0, 5));
+    } catch { /* ignore */ }
+  }
   const attachment = req.file ? { buffer: req.file.buffer, mimetype: req.file.mimetype, originalname: req.file.originalname } : undefined;
 
   let result: { ok: boolean; error?: string };
@@ -4083,7 +4237,7 @@ adminRouter.post("/broadcast/send-to-user", broadcastUpload.single("attachment")
     result = await sendDirectEmail(recipient, subject, message, attachment);
   } else {
     if (!/^\d+$/.test(recipient)) return res.status(400).json({ message: "Telegram ID — только цифры" });
-    result = await sendDirectTelegramMessage(recipient, message, { buttonText, buttonUrl, attachment });
+    result = await sendDirectTelegramMessage(recipient, message, { buttonText, buttonUrl, buttonsConfig, attachment });
   }
   if (!result.ok) return res.status(502).json({ message: result.error ?? "Не удалось отправить сообщение" });
   return res.json({ ok: true });
@@ -4101,8 +4255,15 @@ adminRouter.post("/broadcast/send-to-list", broadcastUpload.single("attachment")
   const subject = req.body.subject ? String(req.body.subject).slice(0, 300) : undefined;
   const buttonText = req.body.buttonText ? String(req.body.buttonText).slice(0, 64) : undefined;
   const buttonUrl = req.body.buttonUrl ? String(req.body.buttonUrl).slice(0, 500) : undefined;
+  let buttonsConfig: string | undefined;
+  if (req.body.buttons) {
+    try {
+      const arr = JSON.parse(String(req.body.buttons));
+      if (Array.isArray(arr)) buttonsConfig = JSON.stringify(arr.slice(0, 5));
+    } catch { /* ignore */ }
+  }
   const attachment = req.file ? { buffer: req.file.buffer, mimetype: req.file.mimetype, originalname: req.file.originalname } : undefined;
-  const { jobId, total } = startListSendJob(recipients, message, { channel, subject, buttonText, buttonUrl, attachment });
+  const { jobId, total } = startListSendJob(recipients, message, { channel, subject, buttonText, buttonUrl, buttonsConfig, attachment });
   if (total === 0) return res.status(400).json({ message: channel === "email" ? "Не найдено корректных email" : "Не найдено корректных числовых ID" });
   return res.json({ jobId, total });
 }));
@@ -4121,7 +4282,9 @@ adminRouter.post(
     if (!parsed.success) {
       return res.status(400).json({ message: "Invalid input", errors: parsed.error.flatten() });
     }
-    const { channel, subject, message, buttonText, buttonUrl, targetGroup } = parsed.data;
+    const { channel, subject, message, buttonText, buttonUrl, buttons, targetGroup } = parsed.data;
+    // buttons (JSON-строка массива) → нормализованный buttonsConfig. Невалид → undefined.
+    const buttonsConfig = normalizeButtonsConfig(buttons);
     const attachment =
       req.file && req.file.buffer
         ? { buffer: req.file.buffer, mimetype: req.file.mimetype || "application/octet-stream", originalname: req.file.originalname || "file" }
@@ -4137,6 +4300,7 @@ adminRouter.post(
       attachment,
       buttonText,
       buttonUrl,
+      buttonsConfig,
       targetGroup,
       startedByAdmin: adminId,
     });
@@ -4305,6 +4469,12 @@ const autoBroadcastRuleSchema = z.object({
   // вторая кнопка под сообщением.
   button2Text: z.string().max(64).nullish(),
   button2Url: z.string().max(500).nullish(),
+  // Новый конструктор кнопок (произвольное число). Если задан — приоритет над button*.
+  // null → fallback на button*. action: menu:* / webapp:/path / URL. Поддерживает {{SUBSCRIPTION_ID}}.
+  buttons: z.array(z.object({
+    text: z.string().min(1).max(64),
+    action: z.string().min(1).max(256),
+  })).max(10).nullable().optional(),
   enabled: z.boolean().optional(),
   // индивидуальные скидки/промокоды для авторассылки.
   promoCodeId: z.string().nullable().optional(),
@@ -4340,6 +4510,21 @@ adminRouter.get("/auto-broadcast/rules", asyncRoute(async (_req, res) => {
       buttonUrl: r.buttonUrl,
       button2Text: r.button2Text,
       button2Url: r.button2Url,
+      // buttons_config (JSON) → массив для фронта. null → null (fallback на button*).
+      buttons: ((): { text: string; action: string }[] | null => {
+        const raw = (r as { buttonsConfig?: string | null }).buttonsConfig ?? null;
+        if (raw == null) return null;
+        try {
+          const p = JSON.parse(raw) as unknown;
+          if (!Array.isArray(p)) return [];
+          return p
+            .map((b) => {
+              const o = (b && typeof b === "object") ? (b as Record<string, unknown>) : {};
+              return { text: typeof o.text === "string" ? o.text : "", action: typeof o.action === "string" ? o.action : "" };
+            })
+            .filter((b) => b.text && b.action);
+        } catch { return []; }
+      })(),
       enabled: r.enabled,
       // T-promo (13.05.2026) — поля для рассылки с промокодом/скидкой.
       promoCodeId: r.promoCodeId,
@@ -4368,6 +4553,8 @@ adminRouter.post("/auto-broadcast/rules", asyncRoute(async (req, res) => {
   const parsed = autoBroadcastRuleSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: "Invalid input", errors: parsed.error.flatten() });
   const data = parsed.data;
+  // buttons (массив) → buttonsConfig (строка). undefined → не задаём (NULL = fallback на button*).
+  const buttonsConfig = data.buttons === undefined ? undefined : (data.buttons === null ? null : JSON.stringify(data.buttons));
   const rule = await prisma.autoBroadcastRule.create({
     data: {
       name: data.name,
@@ -4380,6 +4567,7 @@ adminRouter.post("/auto-broadcast/rules", asyncRoute(async (req, res) => {
       buttonUrl: data.buttonUrl ?? null,
       button2Text: data.button2Text ?? null,
       button2Url: data.button2Url ?? null,
+      ...(buttonsConfig === undefined ? {} : { buttonsConfig }),
       enabled: data.enabled ?? true,
       // T-promo (13.05.2026)
       promoCodeId: data.promoCodeId ?? null,
@@ -4390,7 +4578,7 @@ adminRouter.post("/auto-broadcast/rules", asyncRoute(async (req, res) => {
       cronExpression: data.cronExpression?.trim() || null,
       // T-event-driven (14.05.2026)
       eventDriven: data.eventDriven ?? false,
-    },
+    } as Parameters<typeof prisma.autoBroadcastRule.create>[0]["data"],
   });
   // T-cron-per-rule: подхватить cron сразу после create — пересоздаём scheduler для этого правила.
   try {
@@ -4409,6 +4597,15 @@ adminRouter.post("/auto-broadcast/rules", asyncRoute(async (req, res) => {
     buttonUrl: rule.buttonUrl,
     button2Text: rule.button2Text,
     button2Url: rule.button2Url,
+    buttons: ((): { text: string; action: string }[] | null => {
+      const raw = (rule as { buttonsConfig?: string | null }).buttonsConfig ?? null;
+      if (raw == null) return null;
+      try {
+        const p = JSON.parse(raw) as unknown;
+        if (!Array.isArray(p)) return [];
+        return p.map((b) => { const o = (b && typeof b === "object") ? (b as Record<string, unknown>) : {}; return { text: typeof o.text === "string" ? o.text : "", action: typeof o.action === "string" ? o.action : "" }; }).filter((b) => b.text && b.action);
+      } catch { return []; }
+    })(),
     enabled: rule.enabled,
     promoCodeId: rule.promoCodeId,
     personalDiscountPercent: rule.personalDiscountPercent,
@@ -4432,6 +4629,12 @@ adminRouter.patch("/auto-broadcast/rules/:id", asyncRoute(async (req, res) => {
     const raw = typeof data.cronExpression === "string" ? data.cronExpression.trim() : data.cronExpression;
     data.cronExpression = raw || null;
   }
+  // buttons (массив) нет в БД — конвертируем в buttonsConfig (строка) и убираем ключ.
+  if ("buttons" in data) {
+    const b = data.buttons as { text: string; action: string }[] | null | undefined;
+    delete data.buttons;
+    if (b !== undefined) data.buttonsConfig = b === null ? null : JSON.stringify(b);
+  }
   const rule = await prisma.autoBroadcastRule.update({ where: { id }, data });
   // Применяем новое расписание сразу.
   try {
@@ -4450,6 +4653,15 @@ adminRouter.patch("/auto-broadcast/rules/:id", asyncRoute(async (req, res) => {
     buttonUrl: rule.buttonUrl,
     button2Text: rule.button2Text,
     button2Url: rule.button2Url,
+    buttons: ((): { text: string; action: string }[] | null => {
+      const raw = (rule as { buttonsConfig?: string | null }).buttonsConfig ?? null;
+      if (raw == null) return null;
+      try {
+        const p = JSON.parse(raw) as unknown;
+        if (!Array.isArray(p)) return [];
+        return p.map((b) => { const o = (b && typeof b === "object") ? (b as Record<string, unknown>) : {}; return { text: typeof o.text === "string" ? o.text : "", action: typeof o.action === "string" ? o.action : "" }; }).filter((b) => b.text && b.action);
+      } catch { return []; }
+    })(),
     enabled: rule.enabled,
     promoCodeId: rule.promoCodeId,
     personalDiscountPercent: rule.personalDiscountPercent,

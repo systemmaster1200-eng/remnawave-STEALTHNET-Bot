@@ -23,6 +23,26 @@ import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, type D
 import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
+// Действия для конструктора кнопок сообщения «после оформления подписки».
+const PURCHASE_BUTTON_ACTIONS = [
+  { value: "menu:my_subs", label: "💬 Бот · Мои подписки" },
+  { value: "menu:tariffs", label: "💬 Бот · Тарифы" },
+  { value: "menu:topup", label: "💬 Бот · Пополнить баланс" },
+  { value: "menu:profile", label: "💬 Бот · Профиль" },
+  { value: "menu:referral", label: "💬 Бот · Рефералка" },
+  { value: "menu:support", label: "💬 Бот · Поддержка" },
+  { value: "menu:vpn", label: "💬 Бот · VPN подключение" },
+  { value: "menu:devices", label: "💬 Бот · Устройства" },
+  { value: "menu:main", label: "💬 Бот · Главное меню" },
+  { value: "webapp:/cabinet/subscribe", label: "🌐 Миниапп · Подключение к VPN" },
+  { value: "webapp:/cabinet/tariffs", label: "🌐 Миниапп · Тарифы" },
+  { value: "webapp:/cabinet/devices", label: "🌐 Миниапп · Мои устройства" },
+  { value: "webapp:/cabinet", label: "🌐 Миниапп · Главная кабинета" },
+  { value: "{{SUBSCRIPTION_URL}}", label: "🔗 Ссылка подписки (инструкции)" },
+  { value: "__custom_url__", label: "🔗 Своя ссылка (URL)" },
+];
+type PurchaseEditorButton = { text: string; action: string; customUrl: string };
+
 const FALLBACK_LANGS = ["ru", "en"];
 const LANG_NAMES: Record<string, string> = {
   ru: "Русский",
@@ -365,6 +385,9 @@ export function SettingsPage() {
   const { t } = useTranslation();
   const { state, updateAdmin } = useAuth();
   const [settings, setSettings] = useState<AdminSettings | null>(null);
+  // Конструктор кнопок сообщения «после оформления подписки».
+  const [purchaseButtons, setPurchaseButtons] = useState<PurchaseEditorButton[]>([]);
+  const [purchaseButtonsInited, setPurchaseButtonsInited] = useState(false);
   const [twoFaEnableOpen, setTwoFaEnableOpen] = useState(false);
   const [twoFaDisableOpen, setTwoFaDisableOpen] = useState(false);
   const [twoFaSetupData, setTwoFaSetupData] = useState<{ secret: string; otpauthUrl: string } | null>(null);
@@ -516,6 +539,27 @@ export function SettingsPage() {
     api.getAutoRenewStats(token).then(setAutoRenewStats).catch(() => {});
     api.getSshConfig(token).then(setSshConfig).catch(() => {});
   }, [token]);
+
+  // Один раз инициализируем конструктор кнопок «после оформления» из настроек.
+  useEffect(() => {
+    if (!settings || purchaseButtonsInited) return;
+    setPurchaseButtonsInited(true);
+    const raw = settings.purchaseMessageButtons;
+    if (raw && raw.trim()) {
+      try {
+        const arr = JSON.parse(raw) as Array<{ text?: string; action?: string }>;
+        if (Array.isArray(arr)) {
+          setPurchaseButtons(arr.map((b) => {
+            const action = (b.action ?? "").trim();
+            const known = PURCHASE_BUTTON_ACTIONS.some((a) => a.value === action);
+            return known
+              ? { text: (b.text ?? "").trim(), action, customUrl: "" }
+              : { text: (b.text ?? "").trim(), action: "__custom_url__", customUrl: action };
+          }));
+        }
+      } catch { /* битый JSON → пустой конструктор */ }
+    }
+  }, [settings, purchaseButtonsInited]);
 
   useEffect(() => {
     if (!settings) return;
@@ -2593,6 +2637,136 @@ export function SettingsPage() {
                   }}
                 />
                 {message && <p className="text-sm text-muted-foreground mt-4">{message}</p>}
+              </CardContent>
+            </Card>
+
+            {/* Сообщение «после оформления подписки» — текст, кнопки, вкл/выкл */}
+            <Card className="overflow-hidden border-white/10 mt-6">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Send className="h-4 w-4 text-sky-400" />
+                  Сообщение после оформления подписки
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                <p className="text-xs text-muted-foreground">
+                  Это сообщение бот отправляет клиенту в Telegram сразу после успешной оплаты/активации подписки.
+                  Можно изменить текст, настроить кнопки или полностью отключить отправку.
+                </p>
+
+                {/* Переключатель отправки */}
+                <div className="flex items-center justify-between rounded-xl border border-white/10 bg-background/40 p-3">
+                  <div>
+                    <p className="text-sm font-medium">Отправлять сообщение</p>
+                    <p className="text-[11px] text-muted-foreground">Если выключить — клиент не получит это сообщение после покупки.</p>
+                  </div>
+                  <Switch
+                    checked={settings?.purchaseMessageEnabled ?? true}
+                    onCheckedChange={(v) => setSettings((s) => (s ? { ...s, purchaseMessageEnabled: v } : s))}
+                  />
+                </div>
+
+                {/* Текст сообщения */}
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Текст сообщения</Label>
+                  <Textarea
+                    value={settings?.purchaseMessageText ?? ""}
+                    onChange={(e) => setSettings((s) => (s ? { ...s, purchaseMessageText: e.target.value } : s))}
+                    placeholder={"✅ Тариф «{{TARIFF}}» оплачен и активирован.\n\n🔗 Ссылка подписки:\n{{SUBSCRIPTION_URL}}"}
+                    rows={6}
+                    maxLength={4096}
+                    disabled={settings?.purchaseMessageEnabled === false}
+                    className="rounded-xl bg-background/60 border-white/10 focus-visible:ring-sky-500/40 font-mono text-xs"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Плейсхолдеры: <code className="text-sky-400">{"{{TARIFF}}"}</code> — название тарифа,{" "}
+                    <code className="text-sky-400">{"{{SUBSCRIPTION_URL}}"}</code> — ссылка подписки.
+                    Пусто — будет использован стандартный текст. Поддерживается HTML (&lt;b&gt;, &lt;i&gt;).
+                  </p>
+                </div>
+
+                {/* Конструктор кнопок */}
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Кнопки под сообщением (до 5)</Label>
+                  {purchaseButtons.length === 0 && (
+                    <p className="text-[12px] text-muted-foreground">Кнопок нет — будет использован стандартный набор. Добавьте кнопки, чтобы переопределить.</p>
+                  )}
+                  {purchaseButtons.map((b, i) => (
+                    <div key={i} className="rounded-xl border border-white/10 bg-background/40 p-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] text-muted-foreground">Кнопка {i + 1}</span>
+                        <button
+                          type="button"
+                          onClick={() => setPurchaseButtons((arr) => arr.filter((_, idx) => idx !== i))}
+                          className="text-[11px] text-rose-400 hover:text-rose-300"
+                        >
+                          Удалить
+                        </button>
+                      </div>
+                      <Input
+                        value={b.text}
+                        onChange={(e) => setPurchaseButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, text: e.target.value } : x))}
+                        placeholder="Текст кнопки (напр. 📲 Инструкции)"
+                        maxLength={64}
+                        className="h-10 rounded-lg bg-background/60 border-white/10 focus-visible:ring-sky-500/40"
+                      />
+                      <select
+                        className="flex h-10 w-full rounded-lg border border-white/10 bg-background/60 px-3 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50"
+                        value={b.action}
+                        onChange={(e) => setPurchaseButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, action: e.target.value } : x))}
+                      >
+                        {PURCHASE_BUTTON_ACTIONS.map((a) => (
+                          <option key={a.value} value={a.value}>{a.label}</option>
+                        ))}
+                      </select>
+                      {b.action === "__custom_url__" && (
+                        <Input
+                          value={b.customUrl}
+                          onChange={(e) => setPurchaseButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, customUrl: e.target.value } : x))}
+                          placeholder="https://example.com"
+                          maxLength={500}
+                          className="h-10 rounded-lg bg-background/60 border-white/10 focus-visible:ring-sky-500/40"
+                        />
+                      )}
+                    </div>
+                  ))}
+                  {purchaseButtons.length < 5 && (
+                    <button
+                      type="button"
+                      onClick={() => setPurchaseButtons((arr) => [...arr, { text: "", action: "menu:my_subs", customUrl: "" }])}
+                      className="w-full h-10 rounded-xl border border-dashed border-sky-500/40 text-sm text-sky-400 hover:bg-sky-500/10 transition"
+                    >
+                      + Добавить кнопку
+                    </button>
+                  )}
+                </div>
+
+                <Button
+                  disabled={saving}
+                  onClick={async () => {
+                    setSaving(true);
+                    setMessage("");
+                    try {
+                      const built = purchaseButtons
+                        .map((b) => ({ text: b.text.trim(), action: b.action === "__custom_url__" ? b.customUrl.trim() : b.action }))
+                        .filter((b) => b.text && b.action);
+                      const buttonsJson = JSON.stringify(built);
+                      await api.updateSettings(token, {
+                        purchaseMessageEnabled: settings?.purchaseMessageEnabled ?? true,
+                        purchaseMessageText: settings?.purchaseMessageText ?? "",
+                        purchaseMessageButtons: buttonsJson,
+                      });
+                      setSettings((s) => (s ? { ...s, purchaseMessageButtons: buttonsJson } : s));
+                      setMessage(t("admin.settings.saved"));
+                    } catch {
+                      setMessage(t("admin.settings.save_error"));
+                    } finally {
+                      setSaving(false);
+                    }
+                  }}
+                >
+                  {saving ? t("admin.settings.saving") : t("admin.settings.save")}
+                </Button>
               </CardContent>
             </Card>
           </TabsContent>

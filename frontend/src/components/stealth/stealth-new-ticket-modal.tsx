@@ -15,19 +15,22 @@ import { Send, X, Loader2, AlertCircle, Paperclip, ImageIcon } from "lucide-reac
 import { useClientAuth } from "@/contexts/client-auth";
 import { api } from "@/lib/api";
 import { StealthModal } from "./stealth-modal";
+import { WizardHeader } from "./wizard-header";
 import { StadiumButton } from "./stadium-button";
 
 interface Props {
   open: boolean;
   onClose: () => void;
   onCreated?: (id: string) => void;
+  /** Рендер отдельной полноэкранной страницей (WizardHeader) вместо модалки. */
+  asPage?: boolean;
 }
 
 const MAX_FILES = 5;
 const MAX_BODY = 4000;
 const MAX_SUBJECT = 500;
 
-export function StealthNewTicketModal({ open, onClose, onCreated }: Props) {
+export function StealthNewTicketModal({ open, onClose, onCreated, asPage = false }: Props) {
   const { state } = useClientAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -81,8 +84,7 @@ export function StealthNewTicketModal({ open, onClose, onCreated }: Props) {
     }
   }
 
-  return (
-    <StealthModal open={open} onClose={handleClose} title="Новое обращение">
+  const formBody = (
       <div className="space-y-3">
         {/* Subject */}
         <div className="space-y-1.5">
@@ -170,6 +172,22 @@ export function StealthNewTicketModal({ open, onClose, onCreated }: Props) {
           {busy ? "Отправка…" : "Отправить"}
         </StadiumButton>
       </div>
+  );
+
+  // Полноэкранная страница (с дашборда/поддержки) — WizardHeader вместо модалки.
+  if (asPage) {
+    return (
+      <div className="px-4 pt-2 space-y-4 pb-4">
+        <WizardHeader step={1} totalSteps={1} onClose={() => { if (!busy) handleClose(); }} />
+        <h1 className="text-2xl font-extrabold text-zinc-100 px-1">Новое обращение</h1>
+        {formBody}
+      </div>
+    );
+  }
+
+  return (
+    <StealthModal open={open} onClose={handleClose} title="Новое обращение">
+      {formBody}
     </StealthModal>
   );
 }

@@ -2,7 +2,7 @@
  * BottomTabs — нижняя навигация для Stealth-дизайна.
  *
  * левитирующая glass-капсула: отступы от краёв
- * экрана, скруглённые края, backdrop-blur, rose-glow. Активная вкладка —
+ * экрана, скруглённые края, backdrop-blur, blue-glow. Активная вкладка —
  * стеклянная pill-подсветка, плавно перетекающая между вкладками
  * (framer-motion layoutId) + пульсирующий underline.
  *
@@ -41,12 +41,12 @@ export function BottomTabs() {
           "pointer-events-auto relative mx-auto max-w-md overflow-hidden",
           "rounded-[1.75rem] border border-white/[0.08]",
           "bg-zinc-900/70 backdrop-blur-2xl",
-          "shadow-[0_12px_40px_-12px_rgba(0,0,0,0.85),0_0_28px_-14px_rgba(255,35,87,0.35),inset_0_1px_0_rgba(255,255,255,0.06)]",
+          "shadow-[0_12px_40px_-12px_rgba(0,0,0,0.85),0_0_28px_-14px_rgba(47,107,255,0.35),inset_0_1px_0_rgba(255,255,255,0.06)]",
         )}
       >
         {/* верхний стеклянный блик */}
         <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/20 to-transparent" />
-        <div className="pointer-events-none absolute -top-10 left-1/2 h-16 w-40 -translate-x-1/2 rounded-full bg-rose-500/10 blur-2xl" />
+        <div className="pointer-events-none absolute -top-10 left-1/2 h-16 w-40 -translate-x-1/2 rounded-full bg-blue-500/10 blur-2xl" />
 
         <div className="relative grid grid-cols-3 px-3 py-2">
           {TABS.map((t) => {
@@ -65,20 +65,20 @@ export function BottomTabs() {
                   <motion.span
                     layoutId="stealth-tab-pill"
                     transition={{ type: "spring", stiffness: 380, damping: 32 }}
-                    className="absolute inset-0 rounded-2xl bg-white/[0.06] border border-rose-500/25 shadow-[0_0_18px_-6px_rgba(255,35,87,0.5),inset_0_1px_0_rgba(255,255,255,0.06)]"
+                    className="absolute inset-0 rounded-2xl bg-white/[0.06] border border-blue-500/25 shadow-[0_0_18px_-6px_rgba(47,107,255,0.5),inset_0_1px_0_rgba(255,255,255,0.06)]"
                   />
                 )}
                 <Icon
                   className={cn(
                     "relative h-5 w-5 transition-colors duration-300",
-                    active ? "text-rose-500 drop-shadow-[0_0_6px_rgba(255,35,87,0.6)]" : "text-zinc-500",
+                    active ? "text-blue-500 drop-shadow-[0_0_6px_rgba(47,107,255,0.6)]" : "text-zinc-500",
                   )}
                   strokeWidth={active ? 2.4 : 2}
                 />
                 <span
                   className={cn(
                     "relative text-[10px] font-bold tracking-[0.12em] transition-colors duration-300",
-                    active ? "text-rose-400" : "text-zinc-500",
+                    active ? "text-blue-400" : "text-zinc-500",
                   )}
                 >
                   {t.label}
@@ -87,7 +87,7 @@ export function BottomTabs() {
                   <motion.span
                     layoutId="stealth-tab-underline"
                     transition={{ type: "spring", stiffness: 380, damping: 32 }}
-                    className="absolute bottom-0.5 h-[3px] w-6 rounded-full bg-gradient-to-r from-rose-500 to-fuchsia-500 shadow-[0_0_10px_rgba(255,35,87,0.7)]"
+                    className="absolute bottom-0.5 h-[3px] w-6 rounded-full bg-gradient-to-r from-blue-500 to-cyan-500 shadow-[0_0_10px_rgba(47,107,255,0.7)]"
                   />
                 )}
               </Link>

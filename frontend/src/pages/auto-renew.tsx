@@ -22,6 +22,59 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
+// Предустановленные действия кнопок (как в авто-рассылках). Значение → callback/web_app/url.
+//   menu:*          — открыть раздел бота (callback)
+//   webapp:/path    — открыть мини-апп на странице /path (внутри Telegram)
+//   __custom_url__  — произвольная внешняя ссылка
+// В webapp-действиях можно использовать {{SUBSCRIPTION_ID}} — подставится id той
+// подписки, по которой пришло уведомление (для кнопки «Продлить»).
+const BUTTON_ACTIONS: { value: string; label: string }[] = [
+  // ── Разделы бота (callback) ──
+  { value: "menu:my_subs", label: "💬 Бот · Мои подписки" },
+  { value: "menu:tariffs", label: "💬 Бот · Тарифы" },
+  { value: "menu:topup", label: "💬 Бот · Пополнить баланс" },
+  { value: "menu:profile", label: "💬 Бот · Профиль" },
+  { value: "menu:trial", label: "💬 Бот · Бесплатный триал" },
+  { value: "menu:referral", label: "💬 Бот · Рефералка" },
+  { value: "menu:promocode", label: "💬 Бот · Промокод" },
+  { value: "menu:support", label: "💬 Бот · Поддержка" },
+  { value: "menu:vpn", label: "💬 Бот · VPN подключение" },
+  { value: "menu:devices", label: "💬 Бот · Устройства" },
+  { value: "menu:extra_options", label: "💬 Бот · Доп. опции" },
+  { value: "menu:main", label: "💬 Бот · Главное меню" },
+  // ── Страницы мини-аппа (web_app, открываются внутри Telegram) ──
+  { value: "webapp:/cabinet/extend/{{SUBSCRIPTION_ID}}", label: "🌐 Миниапп · Продлить эту подписку" },
+  { value: "webapp:/cabinet/topup", label: "🌐 Миниапп · Пополнить баланс" },
+  { value: "webapp:/cabinet/tariffs", label: "🌐 Миниапп · Тарифы" },
+  { value: "webapp:/cabinet/subscribe", label: "🌐 Миниапп · Подключение к VPN" },
+  { value: "webapp:/cabinet/devices", label: "🌐 Миниапп · Мои устройства" },
+  { value: "webapp:/cabinet/promocode", label: "🌐 Миниапп · Промокод" },
+  { value: "webapp:/cabinet/trial", label: "🌐 Миниапп · Триал" },
+  { value: "webapp:/cabinet/referral", label: "🌐 Миниапп · Рефералка" },
+  { value: "webapp:/cabinet/profile", label: "🌐 Миниапп · Профиль" },
+  { value: "webapp:/cabinet", label: "🌐 Миниапп · Главная кабинета" },
+  // ── Произвольная ссылка ──
+  { value: "__custom_url__", label: "🔗 Своя ссылка (URL)" },
+];
+
+// Кнопка в конструкторе. customUrl используется только когда action === "__custom_url__".
+type EditorButton = { text: string; action: string; customUrl: string };
+
+/** Запись из API (text+action) → форма редактора (с раскрытием custom URL). */
+function apiButtonToEditor(b: { text: string; action: string }): EditorButton {
+  const known = BUTTON_ACTIONS.some((a) => a.value === b.action && a.value !== "__custom_url__");
+  if (known) return { text: b.text, action: b.action, customUrl: "" };
+  // Неизвестное action (внешняя ссылка) → режим «своя ссылка».
+  return { text: b.text, action: "__custom_url__", customUrl: b.action };
+}
+
+/** Дефолтный набор (показывается, когда buttons === null) — для предзаполнения при "настроить". */
+const DEFAULT_EDITOR_BUTTONS: EditorButton[] = [
+  { text: "📋 Мои подписки", action: "menu:my_subs", customUrl: "" },
+  { text: "🏠 Главное меню", action: "menu:main", customUrl: "" },
+];
+
+
 const TRIGGER_INFO: Record<AutoRenewTriggerType, {
   label: string;
   Icon: typeof Clock;
@@ -662,6 +715,15 @@ function NotifEditor({
   );
   const [messageText, setMessageText] = useState(initial?.messageText ?? "");
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
+  // Конструктор кнопок. buttonsMode:
+  //   "default" → buttons === null (отправляется дефолтный набор),
+  //   "custom"  → отправляются кнопки из списка buttons (пустой список = без кнопок).
+  const [buttonsMode, setButtonsMode] = useState<"default" | "custom">(
+    initial && initial.buttons !== null ? "custom" : "default",
+  );
+  const [buttons, setButtons] = useState<EditorButton[]>(
+    initial?.buttons ? initial.buttons.map(apiButtonToEditor) : [],
+  );
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -687,11 +749,23 @@ function NotifEditor({
     if (!messageText.trim()) return setErr("Укажите текст сообщения");
     setSaving(true);
     try {
+      // Кнопки → массив {text, action}. В "default"-режиме отправляем null
+      // (бэк подставит дефолтный набор). В "custom" — заданный список ([] = без кнопок).
+      let buttonsPayload: { text: string; action: string }[] | null = null;
+      if (buttonsMode === "custom") {
+        buttonsPayload = buttons
+          .map((b) => {
+            const action = b.action === "__custom_url__" ? b.customUrl.trim() : b.action;
+            return { text: b.text.trim(), action };
+          })
+          .filter((b) => b.text && b.action);
+      }
       const payload = {
         name: name.trim(),
         triggerType,
         offsetMinutes: triggerType === "UPCOMING" ? toMinutes() : 0,
         messageText: messageText.trim(),
+        buttons: buttonsPayload,
         enabled,
       };
       if (initial) await api.updateAutoRenewNotification(token, initial.id, payload);
@@ -799,6 +873,102 @@ function NotifEditor({
               <Switch checked={enabled} onCheckedChange={setEnabled} />
               <Label>Шаблон включён</Label>
             </div>
+
+            {/* ─── Конструктор кнопок ─── */}
+            <div className="space-y-3 p-3 rounded-xl border bg-white/[0.02]">
+              <div className="flex items-center justify-between gap-2">
+                <Label className="flex items-center gap-2">
+                  <Layers className="h-4 w-4 text-violet-300" /> Кнопки под сообщением
+                </Label>
+              </div>
+
+              {/* Режим: дефолт / свои */}
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setButtonsMode("default")}
+                  className={`text-left p-2.5 rounded-xl border text-xs transition-all ${buttonsMode === "default" ? "bg-violet-500/15 ring-2 ring-violet-400/40" : "bg-white/[0.03] hover:bg-white/[0.06]"}`}
+                >
+                  <p className="font-semibold">По умолчанию</p>
+                  <p className="text-muted-foreground mt-0.5">«Мои подписки» + «Главное меню»</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setButtonsMode("custom");
+                    // Первый переход в custom без кнопок → предзаполняем дефолтным набором,
+                    // чтобы было что редактировать. Пустой список оставляем как есть.
+                    if (buttons.length === 0 && !(initial?.buttons && initial.buttons.length === 0)) {
+                      setButtons(DEFAULT_EDITOR_BUTTONS.map((b) => ({ ...b })));
+                    }
+                  }}
+                  className={`text-left p-2.5 rounded-xl border text-xs transition-all ${buttonsMode === "custom" ? "bg-violet-500/15 ring-2 ring-violet-400/40" : "bg-white/[0.03] hover:bg-white/[0.06]"}`}
+                >
+                  <p className="font-semibold">Настроить свои</p>
+                  <p className="text-muted-foreground mt-0.5">Добавить / убрать кнопки</p>
+                </button>
+              </div>
+
+              {buttonsMode === "custom" && (
+                <div className="space-y-2.5">
+                  {buttons.length === 0 && (
+                    <p className="text-xs text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded-lg p-2.5">
+                      Кнопок нет — сообщение отправится без кнопок.
+                    </p>
+                  )}
+                  {buttons.map((b, i) => (
+                    <div key={i} className="space-y-2 p-2.5 rounded-xl border border-white/10 bg-white/[0.02]">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-muted-foreground">Кнопка {i + 1}</span>
+                        <Button
+                          size="sm" variant="ghost"
+                          className="h-7 px-2 text-rose-400 hover:text-rose-300"
+                          onClick={() => setButtons((arr) => arr.filter((_, idx) => idx !== i))}
+                        >
+                          Удалить
+                        </Button>
+                      </div>
+                      <Input
+                        value={b.text}
+                        onChange={(e) => setButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, text: e.target.value } : x))}
+                        placeholder="Текст кнопки (напр. 📋 Мои подписки)"
+                      />
+                      <select
+                        value={b.action}
+                        onChange={(e) => setButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, action: e.target.value } : x))}
+                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      >
+                        {BUTTON_ACTIONS.map((a) => (
+                          <option key={a.value} value={a.value}>{a.label}</option>
+                        ))}
+                      </select>
+                      {b.action === "__custom_url__" && (
+                        <Input
+                          value={b.customUrl}
+                          onChange={(e) => setButtons((arr) => arr.map((x, idx) => idx === i ? { ...x, customUrl: e.target.value } : x))}
+                          placeholder="https://example.com"
+                        />
+                      )}
+                    </div>
+                  ))}
+                  {buttons.length < 8 && (
+                    <Button
+                      type="button" variant="outline" size="sm"
+                      className="w-full bg-background/40"
+                      onClick={() => setButtons((arr) => [...arr, { text: "", action: "menu:my_subs", customUrl: "" }])}
+                    >
+                      + Добавить кнопку
+                    </Button>
+                  )}
+                  <p className="text-[11px] text-muted-foreground leading-snug">
+                    🌐 «Миниапп» открывает страницу внутри Telegram. «Продлить эту подписку»
+                    автоматически ведёт на ту подписку, по которой пришло уведомление —
+                    в шаблонах типа <b>До списания</b>, <b>Ошибка</b>, <b>Повтор</b>.
+                    Если у уведомления нет конкретной подписки, такая кнопка просто не покажется.
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Preview column */}
@@ -809,6 +979,22 @@ function NotifEditor({
             <div className="rounded-2xl border border-cyan-500/20 bg-gradient-to-br from-cyan-500/10 to-indigo-500/10 p-5 min-h-[200px] backdrop-blur">
               <div className="text-xs text-cyan-300 mb-2 font-mono">📱 Telegram</div>
               <div className="bg-background/60 rounded-xl p-4 border border-white/5 text-sm whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: previewText || "<span class='text-muted-foreground italic'>Введите текст сообщения слева — здесь будет preview...</span>" }} />
+              {/* Превью кнопок */}
+              {(() => {
+                const previewBtns = buttonsMode === "default"
+                  ? DEFAULT_EDITOR_BUTTONS
+                  : buttons.filter((b) => b.text.trim() && (b.action !== "__custom_url__" || b.customUrl.trim()));
+                if (previewBtns.length === 0) return null;
+                return (
+                  <div className="mt-2 space-y-1.5">
+                    {previewBtns.map((b, i) => (
+                      <div key={i} className="bg-background/80 rounded-lg px-3 py-2 border border-cyan-500/20 text-center text-xs font-medium text-cyan-100">
+                        {b.text.trim() || "—"}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
 
             <details className="group">

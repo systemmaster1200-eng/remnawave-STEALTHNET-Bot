@@ -175,12 +175,11 @@ export function ClientOnboardingPage() {
   // Welcome / 2fa / done — всегда; password — всегда (для TG-юзеров пароль отсутствует,
   // для email-регистрации он уже стоит, но бэк позволяет переустановить пока onboardingCompleted=false).
   const STEPS = useMemo<Step[]>(() => {
-    const hasEmail = !!client?.email;
-    const arr: Step[] = ["welcome"];
-    if (!hasEmail) arr.push("email");
-    arr.push("password", "2fa", "done");
-    return arr;
-  }, [client?.email]);
+    // Онбординг упрощён: на первом заходе НЕ запрашиваем email и НЕ предлагаем
+    // подключить 2FA — и то, и другое пользователь может сделать позже в профиле.
+    // Оставляем приветствие → установку пароля → финал.
+    return ["welcome", "password", "done"];
+  }, []);
 
   const stepIndex = STEPS.indexOf(step);
 

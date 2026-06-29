@@ -4,7 +4,7 @@ import { generateSecret, generateURI, verify } from "otplib";
 import { env } from "../../config/index.js";
 import { Router, type Request } from "express";
 import { z } from "zod";
-import { prisma, createPayment, asClientUncheckedCreate, asClientWhere, asClientSelect, asPaymentUncheckedCreate, asTelegramAuthUpdate, type TelegramAuthTokenRecord, type ClientEmptyCloneRow } from "../../db.js";
+import { prisma, createPayment, asClientUncheckedCreate, asClientWhere, asClientSelect, asPaymentUncheckedCreate, asTelegramAuthUpdate, type TelegramAuthTokenRecord } from "../../db.js";
 import {
   hashPassword,
   verifyPassword,
@@ -315,59 +315,57 @@ clientAuthRouter.post("/register", async (req, res) => {
       return res.status(503).json({ message: "Email registration is not configured. Contact administrator." });
     }
 
-    const appUrl = (config.publicAppUrl || "").replace(/\/$/, "");
-    if (!appUrl) {
-      return res.status(503).json({ message: "Public app URL is not set in settings." });
-    }
-
-    const verificationToken = randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 ч
 
-    const referralCode = generateReferralCode();
-    let referrerId: string | null = null;
-    if (data.referralCode) {
-      const referrer = await prisma.client.findFirst({ where: { referralCode: data.referralCode } });
-      if (referrer) referrerId = referrer.id;
-    }
     const passwordHash = await hashPassword(data.password!);
 
-    await prisma.pendingEmailRegistration.create({
-      data: {
-        email: data.email!,
-        passwordHash,
-        preferredLang: data.preferredLang,
-        preferredCurrency: data.preferredCurrency,
-        referralCode: data.referralCode || null,
-        utmSource: data.utm_source ?? null,
-        utmMedium: data.utm_medium ?? null,
-        utmCampaign: data.utm_campaign ?? null,
-        utmContent: data.utm_content ?? null,
-        utmTerm: data.utm_term ?? null,
-        verificationToken,
-        expiresAt,
-      },
-    });
-    // IP/UA сохраним в Client при подтверждении письма (см. /verify-email)
+    // Чистим прежние ожидания по этому email и создаём новое с 6-значным КОДОМ
+    // (хранится в verificationToken). verificationToken @unique → при коллизии кода
+    // перегенерируем.
+    await prisma.pendingEmailRegistration.deleteMany({ where: { email: data.email! } });
+    let code = "";
+    let created = false;
+    for (let attempt = 0; attempt < 6 && !created; attempt++) {
+      code = String(Math.floor(100000 + Math.random() * 900000));
+      try {
+        await prisma.pendingEmailRegistration.create({
+          data: {
+            email: data.email!,
+            passwordHash,
+            preferredLang: data.preferredLang,
+            preferredCurrency: data.preferredCurrency,
+            referralCode: data.referralCode || null,
+            utmSource: data.utm_source ?? null,
+            utmMedium: data.utm_medium ?? null,
+            utmCampaign: data.utm_campaign ?? null,
+            utmContent: data.utm_content ?? null,
+            utmTerm: data.utm_term ?? null,
+            verificationToken: code,
+            expiresAt,
+          },
+        });
+        created = true;
+      } catch {
+        // коллизия по unique(verificationToken) — пробуем другой код
+      }
+    }
     void clientIp;
+    if (!created) return res.status(500).json({ message: "Не удалось создать код. Попробуйте позже." });
 
-    const verificationLink = `${appUrl}/cabinet/verify-email?token=${verificationToken}`;
-    // письмо рендерится из редактируемого шаблона
-    // (админка → Email-шаблоны), а не из захардкоженного HTML.
-    const verificationTpl = await renderEmailTemplate("email_verification", {
-      verifyUrl: verificationLink,
-      hours: "24",
-      serviceName: config.serviceName ?? "STEALTHNET",
-    });
-    const sendResult = verificationTpl
-      ? await sendEmail(smtpConfig, data.email!, verificationTpl.subject, verificationTpl.body)
-      : { ok: false as const, error: "email_verification template missing" };
-    console.log(`[register] Email send result to ${data.email}:`, sendResult);
+    const serviceName = config.serviceName ?? "STEALTHNET";
+    const subject = `Код подтверждения регистрации — ${serviceName}`;
+    const bodyHtml =
+      `<p>Ваш код для завершения регистрации в ${serviceName}:</p>` +
+      `<p style="font-size:28px;font-weight:bold;letter-spacing:4px;margin:12px 0">${code}</p>` +
+      `<p>Код действителен 24 часа. Если вы не регистрировались — просто проигнорируйте это письмо.</p>`;
+    const sendResult = await sendEmail(smtpConfig, data.email!, subject, bodyHtml);
+    console.log(`[register] Code send result to ${data.email}:`, sendResult);
     if (!sendResult.ok) {
-      await prisma.pendingEmailRegistration.deleteMany({ where: { verificationToken } }).catch(() => {});
+      await prisma.pendingEmailRegistration.deleteMany({ where: { email: data.email! } }).catch(() => {});
       return res.status(500).json({ message: "Failed to send verification email. Try again later." });
     }
 
-    return res.status(201).json({ message: "Check your email to complete registration", requiresVerification: true });
+    return res.status(201).json({ message: "Код отправлен на email", requiresVerification: true, email: data.email! });
   }
 
   // Регистрация / вход по Telegram (используется ботом). 2FA не требуем — только для входа на сайте.
@@ -541,6 +539,70 @@ clientAuthRouter.post("/verify-email", async (req, res) => {
 
   await prisma.pendingEmailRegistration.delete({ where: { id: pending.id } }).catch(() => {});
 
+  const signToken = signClientToken(client.id);
+  return res.status(201).json({ token: signToken, client: toClientShape(client) });
+});
+
+// Подтверждение регистрации 6-значным кодом (веб). Аналог /verify-email, но по коду.
+clientAuthRouter.post("/register-verify-code", async (req, res) => {
+  const email = String((req.body as { email?: unknown })?.email ?? "").trim().toLowerCase();
+  const code = String((req.body as { code?: unknown })?.code ?? "").trim();
+  if (!email || !/^\d{6}$/.test(code)) return res.status(400).json({ message: "Введите email и 6-значный код" });
+
+  const pending = await prisma.pendingEmailRegistration.findFirst({ where: { email } });
+  if (!pending || pending.verificationToken !== code) {
+    return res.status(400).json({ message: "Неверный код" });
+  }
+  if (new Date() > pending.expiresAt) {
+    await prisma.pendingEmailRegistration.deleteMany({ where: { id: pending.id } }).catch(() => {});
+    return res.status(400).json({ message: "Код просрочен. Зарегистрируйтесь заново." });
+  }
+
+  // Если аккаунт с таким email уже создан — просто авторизуем.
+  const existingClient = await prisma.client.findUnique({
+    where: { email: pending.email },
+    select: { id: true, email: true, telegramId: true, telegramUsername: true, preferredLang: true, preferredCurrency: true, balance: true, referralCode: true, referralPercent: true, remnawaveUuid: true, trialUsed: true, isBlocked: true, autoRenewEnabled: true, autoRenewTariffId: true, yoomoneyAccessToken: true, totpEnabled: true, createdAt: true, onboardingCompleted: true },
+  });
+  if (existingClient) {
+    await prisma.pendingEmailRegistration.deleteMany({ where: { id: pending.id } }).catch(() => {});
+    return res.json(buildAuthResponse(existingClient));
+  }
+
+  const referralCode = generateReferralCode();
+  let referrerId: string | null = null;
+  if (pending.referralCode) {
+    const referrer = await prisma.client.findFirst({ where: { referralCode: pending.referralCode } });
+    if (referrer) referrerId = referrer.id;
+  }
+  const primaryBot = await getPrimaryBot();
+  if (!primaryBot) return res.status(503).json({ message: "Primary bot not configured. Run migrations." });
+
+  const configForAutoRenew = await getSystemConfig();
+  const client = await prisma.client.create({
+    data: asClientUncheckedCreate({
+      email: pending.email,
+      passwordHash: pending.passwordHash,
+      remnawaveUuid: null,
+      referralCode,
+      referrerId,
+      preferredLang: pending.preferredLang,
+      preferredCurrency: pending.preferredCurrency,
+      telegramId: null,
+      telegramUsername: null,
+      utmSource: pending.utmSource,
+      utmMedium: pending.utmMedium,
+      utmCampaign: pending.utmCampaign,
+      utmContent: pending.utmContent,
+      utmTerm: pending.utmTerm,
+      autoRenewEnabled: configForAutoRenew.defaultAutoRenewEnabled ?? false,
+      onboardingCompleted: false,
+      registrationIp: getRequestIp(req),
+      registrationUa: (req.headers["user-agent"] as string)?.slice(0, 500) ?? null,
+      registrationSource: "web",
+    }),
+  });
+  await prisma.pendingEmailRegistration.deleteMany({ where: { id: pending.id } }).catch(() => {});
+  notifyAdminsAboutNewClient(client.id).catch(() => {});
   const signToken = signClientToken(client.id);
   return res.status(201).json({ token: signToken, client: toClientShape(client) });
 });
@@ -1576,53 +1638,37 @@ clientRouter.post("/link-telegram", async (req, res) => {
     select: asClientSelect({
       id: true,
       email: true,
-      passwordHash: true,
-      googleId: true,
-      appleId: true,
-      remnawaveUuid: true,
-      balance: true,
-      _count: { select: { payments: true, ownedSubscriptions: true } },
     }),
-  })) as ClientEmptyCloneRow | null;
+  })) as { id: string; email: string | null } | null;
   if (other && other.id !== client.id) {
-    // Проверяем: "другой" клиент — это пустой автосоздавшийся через /start в боте
-    // (нет email/OAuth/пароля, без платежей, без дополнительных подписок, нулевой баланс)?
-    // Если да — безопасно удаляем и переносим telegramId (и remnawaveUuid, если есть) на текущего.
-    const isEmptyBotClone =
-      !other.email &&
-      !other.passwordHash &&
-      !other.googleId &&
-      !other.appleId &&
-      other.balance === 0 &&
-      other._count.payments === 0 &&
-      other._count.ownedSubscriptions === 0;
-    if (!isEmptyBotClone) {
-      return res.status(409).json({ message: "Этот Telegram-аккаунт уже привязан к другому аккаунту. Сначала войдите в тот аккаунт и отвяжите Telegram, либо обратитесь в поддержку." });
+    // TG уже привязан к другому аккаунту.
+    //   - если у того аккаунта есть email → отказ (в поддержку);
+    //   - если email нет → СЛИЯНИЕ (основной = аккаунт с TG = other,
+    //     инициатор вливается в него: подписки + баланс + рефералы + email/пароль).
+    if (other.email && other.email.trim()) {
+      return res.status(409).json({ message: "Этот Telegram уже привязан к аккаунту с почтой. Обратитесь в поддержку." });
     }
-    // Сливаем: переносим remnawaveUuid (если есть и у нас пусто) и удаляем пустого клона.
-    const keepRemna = other.remnawaveUuid ?? null;
-    await prisma.$transaction(async (tx) => {
-      await tx.client.delete({ where: { id: other.id } });
-      await tx.client.update({
-        where: { id: client.id },
-        data: {
-          telegramId,
-          telegramUsername,
-          // Только если у текущего клиента нет своего remnawaveUuid — берём из клона.
-          ...(keepRemna ? { remnawaveUuid: { set: keepRemna } } : {}),
-        },
+    try {
+      const { primaryId } = await mergeClientAccounts({
+        initiatorId: client.id,
+        otherId: other.id,
       });
-    }).catch(async (e) => {
-      console.error("[link-telegram] merge failed:", e);
-      // Фолбэк: если транзакция упала, попробуем без переноса remnawaveUuid.
-      await prisma.client.update({ where: { id: client.id }, data: { telegramId, telegramUsername } });
-    });
-    // Если у текущего клиента уже был свой remnawaveUuid — не перезаписываем его клоновым.
-    const current = await prisma.client.findUnique({ where: { id: client.id }, select: { remnawaveUuid: true } });
-    if (current?.remnawaveUuid && keepRemna && current.remnawaveUuid !== keepRemna) {
-      // Уже был свой uuid, транзакция выше его перезаписала — откатываем на родной.
-      // (Это крайний edge case, нормальный путь: у текущего клиента uuid=null, клон имеет uuid, берём клоновый.)
-      await prisma.client.update({ where: { id: client.id }, data: { remnawaveUuid: current.remnawaveUuid } });
+      // Обновим username TG у основного (мог измениться).
+      await prisma.client.update({ where: { id: primaryId }, data: { telegramUsername } }).catch(() => {});
+      const primary = await prisma.client.findUnique({
+        where: { id: primaryId },
+        select: { id: true, email: true, telegramId: true, telegramUsername: true, preferredLang: true, preferredCurrency: true, balance: true, referralCode: true, referralPercent: true, remnawaveUuid: true, trialUsed: true, isBlocked: true, autoRenewEnabled: true, autoRenewTariffId: true, yoomoneyAccessToken: true, totpEnabled: true, createdAt: true, onboardingCompleted: true, passwordHash: true },
+      });
+      if (!primary) return res.status(500).json({ message: "Не удалось привязать Telegram" });
+      const token = signClientToken(primaryId);
+      return res.json({ client: toClientShape(primary), merged: true, token });
+    } catch (e) {
+      if ((e as { code?: string })?.code === "MERGE_BOTH_TG") {
+        return res.status(409).json({ message: "Этот Telegram уже привязан к другому аккаунту с Telegram. Обратитесь в поддержку." });
+      }
+      const pe = e as { code?: string; meta?: unknown; message?: string };
+      console.error("[link-telegram] merge failed:", "code=", pe?.code, "meta=", JSON.stringify(pe?.meta), "msg=", pe?.message, "stack=", e instanceof Error ? e.stack : "");
+      return res.status(500).json({ message: "Не удалось объединить аккаунты. Обратитесь в поддержку." });
     }
   } else {
     await prisma.client.update({ where: { id: client.id }, data: { telegramId, telegramUsername } });
@@ -1801,6 +1847,106 @@ clientRouter.post("/link-email-direct", async (req, res) => {
 });
 
 /** Запросить привязку email (отправить письмо со ссылкой) */
+/**
+ * Слияние двух клиентских аккаунтов в один (вариант: подписки + баланс + рефералы).
+ *
+ * Универсально для двух сценариев:
+ *   - привязка email: инициатор (с TG, без email) сливает аккаунт, владеющий email;
+ *   - привязка Telegram: инициатор (с email, без TG) сливает аккаунт, владеющий TG.
+ *
+ * Правила:
+ *   - Основным считается аккаунт с привязанным Telegram. Если TG есть у обоих —
+ *     слияние невозможно (бросаем MERGE_BOTH_TG, вызывающий код возвращает 400).
+ *   - Если TG нет ни у кого — основным остаётся инициатор.
+ *   - Переносим со «второго» (удаляемого) на основной: подписки (с переиндексацией),
+ *     баланс (+=), рефералов, а также email и passwordHash (если у основного их нет).
+ *   - Остальные связи второго аккаунта удаляются каскадно вместе с ним.
+ *
+ * Возвращает id основного (оставшегося) аккаунта.
+ */
+async function mergeClientAccounts(params: {
+  initiatorId: string;   // кто сейчас инициирует привязку (текущий клиент)
+  otherId: string;       // аккаунт, которому уже принадлежит email/TG
+}): Promise<{ primaryId: string }> {
+  const { initiatorId, otherId } = params;
+  if (initiatorId === otherId) return { primaryId: initiatorId };
+
+  const [a, b] = await Promise.all([
+    prisma.client.findUnique({ where: { id: initiatorId }, select: { id: true, telegramId: true, telegramUsername: true, balance: true, passwordHash: true, email: true } }),
+    prisma.client.findUnique({ where: { id: otherId }, select: { id: true, telegramId: true, telegramUsername: true, balance: true, passwordHash: true, email: true } }),
+  ]);
+  if (!a || !b) throw new Error("Один из аккаунтов не найден");
+
+  const aHasTg = !!a.telegramId;
+  const bHasTg = !!b.telegramId;
+  // Два аккаунта с Telegram слить нельзя.
+  if (aHasTg && bHasTg) {
+    const err = new Error("MERGE_BOTH_TG");
+    (err as { code?: string }).code = "MERGE_BOTH_TG";
+    throw err;
+  }
+
+  // Основной — аккаунт с TG; если TG нет ни у кого — инициатор.
+  const primary = bHasTg ? b : a;
+  const secondary = primary.id === a.id ? b : a;
+
+  await prisma.$transaction(async (tx) => {
+    // 1) Переносим подписки secondary → primary с переиндексацией, чтобы не нарушить
+    //    @@unique([ownerId, subscriptionIndex]).
+    const primarySubs = await tx.subscription.findMany({
+      where: { ownerId: primary.id }, select: { subscriptionIndex: true },
+    });
+    let nextIndex = primarySubs.reduce((m, s) => Math.max(m, s.subscriptionIndex), -1) + 1;
+    const secondarySubs = await tx.subscription.findMany({
+      where: { ownerId: secondary.id }, select: { id: true }, orderBy: { subscriptionIndex: "asc" },
+    });
+    for (const sub of secondarySubs) {
+      await tx.subscription.update({
+        where: { id: sub.id },
+        data: { ownerId: primary.id, subscriptionIndex: nextIndex },
+      });
+      nextIndex += 1;
+    }
+
+    // 2) Переносим рефералов (тех, кого пригласил secondary) на primary,
+    //    чтобы FK referrerId (Restrict) не заблокировал удаление.
+    await tx.client.updateMany({
+      where: { referrerId: secondary.id },
+      data: { referrerId: primary.id },
+    });
+    // Если primary случайно был приглашён secondary — снимаем ссылку (не сам на себя).
+    await tx.client.updateMany({
+      where: { id: primary.id, referrerId: secondary.id },
+      data: { referrerId: null },
+    });
+
+    // 3) Освобождаем email/telegram у secondary ДО присвоения primary
+    //    (иначе @unique(email)/@unique(telegram_id) нарушится).
+    await tx.pendingEmailLink.deleteMany({ where: { clientId: { in: [secondary.id, primary.id] } } });
+    await tx.client.update({ where: { id: secondary.id }, data: { email: null, telegramId: null } });
+
+    // 4) Переносим на primary всё, чего у него нет: email, пароль, telegram, баланс.
+    await tx.client.update({
+      where: { id: primary.id },
+      data: {
+        balance: { increment: secondary.balance ?? 0 },
+        ...(primary.email ? {} : (secondary.email ? { email: secondary.email } : {})),
+        ...(primary.telegramId ? {} : (secondary.telegramId ? { telegramId: secondary.telegramId, telegramUsername: secondary.telegramUsername } : {})),
+        ...(primary.passwordHash
+          ? {}
+          : (secondary.passwordHash
+              ? { passwordHash: secondary.passwordHash, onboardingCompleted: true }
+              : {})),
+      },
+    });
+
+    // 5) Удаляем secondary (остальные связи каскадно удалятся).
+    await tx.client.delete({ where: { id: secondary.id } });
+  });
+
+  return { primaryId: primary.id };
+}
+
 const linkEmailRequestSchema = z.object({ email: z.string().email() });
 clientRouter.post("/link-email-request", async (req, res) => {
   const client = (req as unknown as { client: { id: string; email: string | null } }).client;
@@ -1819,30 +1965,108 @@ clientRouter.post("/link-email-request", async (req, res) => {
     fromName: config.smtpFromName ?? null,
   };
   if (!isSmtpConfigured(smtpConfig)) return res.status(503).json({ message: "Отправка писем не настроена. Обратитесь в поддержку." });
-  const existing = await prisma.client.findUnique({ where: { email } });
-  if (existing && existing.id !== client.id) return res.status(400).json({ message: "Эта почта уже используется другим аккаунтом" });
+  const existing = await prisma.client.findUnique({ where: { email }, select: { id: true, telegramId: true } });
+  if (existing && existing.id !== client.id) {
+    // Email занят другим аккаунтом. Раньше — отказ. Теперь разрешаем привязку
+    // через код подтверждения с последующим СЛИЯНИЕМ аккаунтов в один.
+    // Исключение: если у обоих аккаунтов есть Telegram — слить нельзя.
+    const me = await prisma.client.findUnique({ where: { id: client.id }, select: { telegramId: true } });
+    if (me?.telegramId && existing.telegramId) {
+      return res.status(400).json({ message: "Этот email привязан к аккаунту с Telegram. Объединение двух Telegram-аккаунтов невозможно." });
+    }
+    // иначе — продолжаем (шлём код на этот email; слияние произойдёт при подтверждении).
+  }
   await prisma.pendingEmailLink.deleteMany({ where: { clientId: client.id } });
-  const verificationToken = randomUUID();
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  await prisma.pendingEmailLink.create({
-    data: { clientId: client.id, email, verificationToken, expiresAt },
-  });
-  const appUrl = (config.publicAppUrl || "").replace(/\/$/, "");
-  const verificationLink = appUrl ? `${appUrl}/cabinet/verify-link-email?token=${verificationToken}` : "";
-  if (!verificationLink) return res.status(500).json({ message: "Не задан URL приложения в настройках" });
-  const linkTpl = await renderEmailTemplate("link_email", {
-    verifyUrl: verificationLink,
-    hours: "24",
-    serviceName: config.serviceName ?? "STEALTHNET",
-  });
-  const sendResult = linkTpl
-    ? await sendEmail(smtpConfig, email, linkTpl.subject, linkTpl.body)
-    : { ok: false as const, error: "link_email template missing" };
+  // 6-значный код подтверждения (хранится в verificationToken). Срок — 24 часа.
+  // verificationToken @unique глобально, поэтому при коллизии кода — перегенерируем.
+  let code = "";
+  let created = false;
+  for (let attempt = 0; attempt < 6 && !created; attempt++) {
+    code = String(Math.floor(100000 + Math.random() * 900000));
+    try {
+      await prisma.pendingEmailLink.create({
+        data: { clientId: client.id, email, verificationToken: code, expiresAt },
+      });
+      created = true;
+    } catch {
+      // коллизия по unique(verificationToken) — пробуем другой код
+    }
+  }
+  if (!created) return res.status(500).json({ message: "Не удалось создать код. Попробуйте позже." });
+  const serviceName = config.serviceName ?? "STEALTHNET";
+  const subject = `Код подтверждения почты — ${serviceName}`;
+  const bodyHtml =
+    `<p>Ваш код для привязки почты в ${serviceName}:</p>` +
+    `<p style="font-size:28px;font-weight:bold;letter-spacing:4px;margin:12px 0">${code}</p>` +
+    `<p>Код действителен 24 часа. Если вы не запрашивали привязку — просто проигнорируйте это письмо.</p>`;
+  const sendResult = await sendEmail(smtpConfig, email, subject, bodyHtml);
   if (!sendResult.ok) {
-    await prisma.pendingEmailLink.deleteMany({ where: { verificationToken } }).catch(() => {});
+    await prisma.pendingEmailLink.deleteMany({ where: { clientId: client.id } }).catch(() => {});
     return res.status(500).json({ message: "Не удалось отправить письмо. Попробуйте позже." });
   }
-  return res.json({ message: "Письмо с ссылкой отправлено на указанный email" });
+  return res.json({ message: "Код подтверждения отправлен на указанный email" });
+});
+
+// Подтверждение привязки почты 6-значным кодом (для авторизованного клиента).
+clientRouter.post("/link-email-verify-code", async (req, res) => {
+  const client = (req as unknown as { client: { id: string; email: string | null } }).client;
+  if (client.email?.trim()) return res.status(400).json({ message: "Почта уже привязана" });
+  const code = String((req.body as { code?: unknown })?.code ?? "").trim();
+  if (!/^\d{6}$/.test(code)) return res.status(400).json({ message: "Введите 6-значный код" });
+  const pending = await prisma.pendingEmailLink.findFirst({ where: { clientId: client.id } });
+  if (!pending || pending.verificationToken !== code) {
+    return res.status(400).json({ message: "Неверный код" });
+  }
+  if (new Date() > pending.expiresAt) {
+    await prisma.pendingEmailLink.deleteMany({ where: { id: pending.id } }).catch(() => {});
+    return res.status(400).json({ message: "Код просрочен. Запросите новый." });
+  }
+  const existingByEmail = await prisma.client.findUnique({ where: { email: pending.email }, select: { id: true, telegramId: true } });
+  if (existingByEmail && existingByEmail.id !== client.id) {
+    // Email принадлежит другому аккаунту → СЛИЯНИЕ (подписки + баланс + рефералы).
+    // Основной аккаунт — тот, у кого привязан Telegram.
+    try {
+      const { primaryId } = await mergeClientAccounts({
+        initiatorId: client.id,
+        otherId: existingByEmail.id,
+      });
+      await prisma.pendingEmailLink.deleteMany({ where: { OR: [{ clientId: client.id }, { clientId: existingByEmail.id }] } }).catch(() => {});
+      // Выдаём токен ОСНОВНОГО аккаунта: если основным стал другой аккаунт,
+      // клиент должен продолжить работу уже под ним.
+      const primary = await prisma.client.findUnique({
+        where: { id: primaryId },
+        select: { id: true, email: true, telegramId: true, telegramUsername: true, preferredLang: true, preferredCurrency: true, balance: true, referralCode: true, referralPercent: true, remnawaveUuid: true, trialUsed: true, isBlocked: true, autoRenewEnabled: true, autoRenewTariffId: true, yoomoneyAccessToken: true, totpEnabled: true, createdAt: true, onboardingCompleted: true },
+      });
+      const token = signClientToken(primaryId);
+      return res.json({
+        message: "Аккаунты объединены. Почта привязана.",
+        email: pending.email,
+        merged: true,
+        token,
+        client: primary ? toClientShape(primary) : null,
+      });
+    } catch (e) {
+      await prisma.pendingEmailLink.deleteMany({ where: { id: pending.id } }).catch(() => {});
+      if ((e as { code?: string })?.code === "MERGE_BOTH_TG") {
+        return res.status(400).json({ message: "Объединение двух Telegram-аккаунтов невозможно." });
+      }
+      const pe = e as { code?: string; message?: string; meta?: unknown };
+      console.error("[link-email-verify-code] merge failed:",
+        "code=", pe?.code,
+        "meta=", JSON.stringify(pe?.meta),
+        "msg=", pe?.message,
+        "stack=", e instanceof Error ? e.stack : "");
+      return res.status(500).json({ message: "Не удалось объединить аккаунты. Обратитесь в поддержку." });
+    }
+  }
+  const updated = await prisma.client.update({
+    where: { id: client.id },
+    data: { email: pending.email },
+    select: { email: true },
+  });
+  await prisma.pendingEmailLink.deleteMany({ where: { clientId: client.id } }).catch(() => {});
+  return res.json({ message: "Почта привязана", email: updated.email });
 });
 
 clientRouter.get("/referral-stats", async (req, res) => {
@@ -2287,9 +2511,11 @@ clientRouter.post("/trials/:id/activate", async (req, res) => {
   }
 
   // Помечаем sub как «триал» (для отображения в боте + кнопки «Конвертировать»).
+  // Триалу принудительно ВЫКЛЮЧАЕМ автопродление: createAdditionalSubscription мог
+  // включить autoRenewEnabled по defaultAutoRenewEnabled, но пробник списывать нельзя.
   await prisma.subscription.update({
     where: { id: subResult.data.subscriptionId },
-    data: { trialId: trial.id },
+    data: { trialId: trial.id, autoRenewEnabled: false, autoRenewTariffId: null },
   }).catch(() => {});
 
   // если триал стал primary (subscriptionIndex=0) и у клиента
@@ -3801,6 +4027,18 @@ clientRouter.post("/payments/platega", async (req, res) => {
     paymentMetaObj.originalAmount = metadataExtra ? finalAmount : (originalAmount ?? finalAmount);
   }
   if (personalDiscountMeta) Object.assign(paymentMetaObj, personalDiscountMeta);
+  // КРИТИЧНО: маркеры покупки должны попасть в metadata платежа, иначе webhook
+  // activateTariffByPaymentId не отличит продление/подарок/доп.подписку от обычной
+  // покупки и создаст НОВУЮ подписку вместо продления. Зеркалит логику ЮKassa/CryptoPay.
+  if (tariffIdToStore) {
+    if (parsed.data.asAdditional) paymentMetaObj.isAdditionalSubscription = true;
+    if (parsed.data.asGift) paymentMetaObj.purchasedAsGift = true;
+    if (parsed.data.extendsSecondarySubId) {
+      paymentMetaObj.extendsSecondarySubId = parsed.data.extendsSecondarySubId;
+      if (parsed.data.removeExtrasOnActivate === true) paymentMetaObj.removeExtrasOnActivate = true;
+      if (parsed.data.replaceTrialSubId) paymentMetaObj.replaceTrialSubId = parsed.data.replaceTrialSubId;
+    }
+  }
   const paymentMeta = Object.keys(paymentMetaObj).length > 0 ? paymentMetaObj : null;
   const snap = isTopupOnlyPlatega ? await paymentSnapshotTopup(clientId, finalAmount) : await paymentSnapshotProduct(clientId, finalAmount);
   const payment = await createPayment({
@@ -4152,13 +4390,16 @@ clientRouter.post("/payments/balance", async (req, res) => {
   if (extendsSecondarySubId) {
     const sec = await prisma.subscription.findUnique({
       where: { id: extendsSecondarySubId },
-      select: { ownerId: true, giftedToClientId: true },
+      select: { ownerId: true, giftedToClientId: true, tariffId: true },
     });
     if (!sec || (sec.ownerId !== clientRaw.id && sec.giftedToClientId !== clientRaw.id)) {
       await prisma.client.update({ where: { id: clientRaw.id }, data: { balance: { increment: tariffPaySnap.amount } } }).catch(() => {});
       return res.status(403).json({ message: "Доп. подписка не принадлежит вам" });
     }
     const { extendSecondarySubscription } = await import("../tariff/tariff-activation.service.js");
+    // Продление на ДРУГОЙ тариф → конвертация (пересчёт остатка по цене дня + сумма),
+    // тот же тариф → обычный стек дней.
+    const convertOnExtend = sec.tariffId != null && sec.tariffId !== tariff.id;
     activateResult = await extendSecondarySubscription(
       extendsSecondarySubId,
       tariff,
@@ -4167,6 +4408,7 @@ clientRouter.post("/payments/balance", async (req, res) => {
       // «продлить без устройств» — обработка внутри extendSecondarySubscription
       // (обнуление счётчиков + кик HWID), отдельный helper-вызов ниже больше не нужен.
       removeExtrasOnActivate === true,
+      convertOnExtend,
     );
     isExtendingSecondary = true;
     createdSubscriptionId = extendsSecondarySubId;
@@ -7394,49 +7636,31 @@ publicConfigRouter.post("/link-telegram-from-bot", async (req, res) => {
     select: asClientSelect({
       id: true,
       email: true,
-      passwordHash: true,
-      googleId: true,
-      appleId: true,
-      remnawaveUuid: true,
-      balance: true,
-      _count: { select: { payments: true, ownedSubscriptions: true } },
     }),
-  })) as ClientEmptyCloneRow | null;
+  })) as { id: string; email: string | null } | null;
   if (other && other.id !== pending.clientId) {
-    // Кейс PabloRuss77: юзер нажал /start в боте до ввода кода → авто-создался пустой клиент с
-    // этим telegramId. Если клон пустой — безопасно сливаем (переносим telegramId и
-    // remnawaveUuid, удаляем пустого клона).
-    const isEmptyBotClone =
-      !other.email &&
-      !other.passwordHash &&
-      !other.googleId &&
-      !other.appleId &&
-      other.balance === 0 &&
-      other._count.payments === 0 &&
-      other._count.ownedSubscriptions === 0;
-    if (!isEmptyBotClone) {
+    // TG уже привязан к другому аккаунту:
+    //   - есть email → отказ (в поддержку);
+    //   - email нет → СЛИЯНИЕ (основной = аккаунт с TG = other).
+    if (other.email && other.email.trim()) {
       await prisma.pendingTelegramLink.deleteMany({ where: { id: pending.id } }).catch(() => {});
-      return res.status(409).json({ message: "Этот Telegram-аккаунт уже привязан к другому аккаунту. Отвяжите его сначала или обратитесь в поддержку." });
+      return res.status(409).json({ message: "Этот Telegram уже привязан к аккаунту с почтой. Обратитесь в поддержку." });
     }
-    const target = await prisma.client.findUnique({ where: { id: pending.clientId }, select: { remnawaveUuid: true } });
-    const newRemnaUuid = target?.remnawaveUuid ?? other.remnawaveUuid ?? null;
-    await prisma.$transaction(async (tx) => {
-      await tx.client.delete({ where: { id: other.id } });
-      await tx.client.update({
-        where: { id: pending.clientId },
-        data: {
-          telegramId: tid,
-          telegramUsername: (telegramUsername ?? "").trim() || null,
-          ...(newRemnaUuid ? { remnawaveUuid: newRemnaUuid } : {}),
-        },
-      });
-    }).catch(async (e) => {
-      console.error("[link-telegram-from-bot] merge failed:", e);
-      await prisma.client.update({
-        where: { id: pending.clientId },
-        data: { telegramId: tid, telegramUsername: (telegramUsername ?? "").trim() || null },
-      }).catch(() => {});
-    });
+    try {
+      await mergeClientAccounts({ initiatorId: pending.clientId, otherId: other.id });
+      // username TG мог измениться — обновим у основного.
+      const tgu = (telegramUsername ?? "").trim() || null;
+      const primaryId = other.id; // основной = аккаунт с TG
+      await prisma.client.update({ where: { id: primaryId }, data: { telegramUsername: tgu } }).catch(() => {});
+    } catch (e) {
+      await prisma.pendingTelegramLink.deleteMany({ where: { id: pending.id } }).catch(() => {});
+      if ((e as { code?: string })?.code === "MERGE_BOTH_TG") {
+        return res.status(409).json({ message: "Этот Telegram уже привязан к другому аккаунту с Telegram. Обратитесь в поддержку." });
+      }
+      const pe = e as { code?: string; meta?: unknown; message?: string };
+      console.error("[link-telegram-from-bot] merge failed:", "code=", pe?.code, "meta=", JSON.stringify(pe?.meta), "msg=", pe?.message, "stack=", e instanceof Error ? e.stack : "");
+      return res.status(500).json({ message: "Не удалось объединить аккаунты. Обратитесь в поддержку." });
+    }
   } else {
     await prisma.client.update({
       where: { id: pending.clientId },

@@ -87,6 +87,8 @@ http {
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
+            # SPA-shell не кэшируем: он ссылается на хэшированные бандлы.
+            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
         }
         location = /index.html {
             set $api_backend "api:5000";
@@ -96,6 +98,8 @@ http {
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
+            # index.html всегда свежий — иначе подтянутся старые JS/CSS.
+            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
         }
 
         location / {
@@ -109,6 +113,8 @@ http {
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
+            # SPA-fallback тоже не кэшируем (это тот же shell).
+            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
         }
         location = /manifest.webmanifest {
             expires off;

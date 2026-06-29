@@ -24,7 +24,7 @@ interface Props {
 
 function statusMeta(status: string) {
   if (status === "PAID") return { label: "Оплачено", color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/30", Icon: Check };
-  if (status === "FAILED") return { label: "Неудачно", color: "text-rose-400 bg-rose-500/10 border-rose-500/30", Icon: XIcon };
+  if (status === "FAILED") return { label: "Неудачно", color: "text-blue-400 bg-blue-500/10 border-blue-500/30", Icon: XIcon };
   if (status === "REFUNDED") return { label: "Возврат", color: "text-violet-400 bg-violet-500/10 border-violet-500/30", Icon: RefreshCcw };
   return { label: "Ожидает", color: "text-amber-400 bg-amber-500/10 border-amber-500/30", Icon: Clock };
 }
@@ -62,10 +62,10 @@ export function StealthPaymentsModal({ open, onClose }: Props) {
       <div className="space-y-3">
         {loading ? (
           <div className="flex justify-center py-6">
-            <Loader2 className="h-5 w-5 animate-spin text-rose-500" />
+            <Loader2 className="h-5 w-5 animate-spin text-blue-500" />
           </div>
         ) : err ? (
-          <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 p-3 text-xs text-rose-200">{err}</div>
+          <div className="rounded-xl bg-blue-500/10 border border-blue-500/30 p-3 text-xs text-blue-200">{err}</div>
         ) : !items || items.length === 0 ? (
           <div className="rounded-2xl border border-white/[0.06] bg-zinc-950/40 p-8 text-center">
             <div className="h-12 w-12 mx-auto rounded-xl bg-zinc-800/60 border border-white/10 flex items-center justify-center mb-2">

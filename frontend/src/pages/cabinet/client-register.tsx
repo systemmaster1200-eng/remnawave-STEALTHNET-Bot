@@ -85,6 +85,16 @@ export function ClientRegisterPage() {
     const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
+  const [code, setCode] = useState("");
+  const [verifyLoading, setVerifyLoading] = useState(false);
+  const [verifyError, setVerifyError] = useState("");
+  // Шаг установки пароля после подтверждения кода.
+  const [pwStep, setPwStep] = useState(false);
+  const [pwToken, setPwToken] = useState<string | null>(null);
+  const [pw1, setPw1] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [pwLoading, setPwLoading] = useState(false);
+  const [pwError, setPwError] = useState("");
   const [brand, setBrand] = useState<{ serviceName: string; logo: string | null }>({
     serviceName: "",
     logo: null,
@@ -105,7 +115,7 @@ export function ClientRegisterPage() {
   const [searchParams] = useSearchParams();
   const refCode = searchParams.get("ref")?.trim() || undefined;
   const utm = useUtmCapture(searchParams);
-  const { register, loginByGoogle, loginByApple, loginByTelegramDeepLink, registerByTelegram } = useClientAuth();
+  const { register, verifyRegisterCode, loginByGoogle, loginByApple, loginByTelegramDeepLink, registerByTelegram } = useClientAuth();
   const navigate = useNavigate();
 
   function validateEmail(value: string): string {
@@ -477,12 +487,45 @@ export function ClientRegisterPage() {
       if (result?.requiresVerification) {
         setEmailSent(true);
       } else {
-        navigate("/cabinet/onboarding", { replace: true });
+        navigate("/cabinet/dashboard", { replace: true });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("cabinet.register.error"));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleVerifyCode() {
+    if (verifyLoading || code.trim().length !== 6) return;
+    setVerifyError("");
+    setVerifyLoading(true);
+    try {
+      const token = await verifyRegisterCode(email.trim(), code.trim());
+      // Код принят — обязательно просим задать пароль для входа на сайт.
+      setPwToken(token ?? null);
+      setEmailSent(false);
+      setPwStep(true);
+    } catch (err) {
+      setVerifyError(err instanceof Error ? err.message : t("cabinet.register.error"));
+    } finally {
+      setVerifyLoading(false);
+    }
+  }
+
+  async function handleSetPassword() {
+    if (pwLoading) return;
+    if (pw1.length < 6) { setPwError("Пароль должен быть не менее 6 символов"); return; }
+    if (pw1 !== pw2) { setPwError("Пароли не совпадают"); return; }
+    setPwError("");
+    setPwLoading(true);
+    try {
+      if (pwToken) await api.clientSetPassword(pwToken, { newPassword: pw1 });
+      navigate("/cabinet/dashboard", { replace: true });
+    } catch (err) {
+      setPwError(err instanceof Error ? err.message : t("cabinet.register.error"));
+    } finally {
+      setPwLoading(false);
     }
   }
 
@@ -555,9 +598,68 @@ export function ClientRegisterPage() {
               </div>
               
               {emailSent && (
-                <div className="rounded-md bg-green-500/10 text-green-700 dark:text-green-400 text-sm p-3 flex items-center gap-2">
-                  <Mail className="h-4 w-4 shrink-0" />
-                  {t("cabinet.register.email_sent")}
+                <div className="space-y-3">
+                  <div className="rounded-md bg-green-500/10 text-green-700 dark:text-green-400 text-sm p-3 flex items-center gap-2">
+                    <Mail className="h-4 w-4 shrink-0" />
+                    Мы отправили 6-значный код на {email}. Введите его ниже.
+                  </div>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={code}
+                    onChange={(e) => { setCode(e.target.value.replace(/\D/g, "").slice(0, 6)); setVerifyError(""); }}
+                    placeholder="______"
+                    className="w-full rounded-2xl border border-white/10 bg-background/30 px-4 py-3 text-center text-2xl tracking-[0.5em] font-mono outline-none focus:border-primary"
+                  />
+                  {verifyError && <p className="text-sm text-red-500 text-center">{verifyError}</p>}
+                  <Button
+                    type="button"
+                    onClick={handleVerifyCode}
+                    disabled={verifyLoading || code.trim().length !== 6}
+                    className="w-full h-14 rounded-2xl text-base font-bold shadow-xl"
+                  >
+                    {verifyLoading ? "Проверяем…" : "Подтвердить код"}
+                  </Button>
+                  <button
+                    type="button"
+                    onClick={() => { setEmailSent(false); setCode(""); setVerifyError(""); }}
+                    className="w-full text-xs text-muted-foreground hover:text-foreground transition"
+                  >
+                    Изменить email
+                  </button>
+                </div>
+              )}
+
+              {pwStep && (
+                <div className="space-y-3">
+                  <div className="rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 text-sm p-3">
+                    Email подтверждён. Задайте пароль для входа на сайт.
+                  </div>
+                  <input
+                    type="password"
+                    value={pw1}
+                    onChange={(e) => { setPw1(e.target.value); setPwError(""); }}
+                    placeholder="Новый пароль"
+                    className="w-full rounded-2xl border border-white/10 bg-background/30 px-4 py-3 text-base outline-none focus:border-primary"
+                  />
+                  <input
+                    type="password"
+                    value={pw2}
+                    onChange={(e) => { setPw2(e.target.value); setPwError(""); }}
+                    placeholder="Повторите пароль"
+                    className="w-full rounded-2xl border border-white/10 bg-background/30 px-4 py-3 text-base outline-none focus:border-primary"
+                  />
+                  <p className="text-xs text-muted-foreground">Минимум 6 символов.</p>
+                  {pwError && <p className="text-sm text-red-500 text-center">{pwError}</p>}
+                  <Button
+                    type="button"
+                    onClick={handleSetPassword}
+                    disabled={pwLoading || pw1.length < 6 || pw2.length < 6}
+                    className="w-full h-14 rounded-2xl text-base font-bold shadow-xl"
+                  >
+                    {pwLoading ? "Сохраняем…" : "Сохранить пароль и войти"}
+                  </Button>
                 </div>
               )}
               {/* Согласие с обработкой персональных данных (обязательно при регистрации) */}
@@ -568,9 +670,11 @@ export function ClientRegisterPage() {
                   <Link to="/cabinet/documents/privacy" target="_blank" rel="noopener noreferrer" className="font-medium text-primary hover:underline">Политикой обработки персональных данных</Link>.
                 </Label>
               </div>
-              <Button type="submit" className="w-full h-14 rounded-2xl text-base font-bold shadow-xl hover:scale-[1.02] transition-all gap-2" disabled={loading || !email || !agreedToPrivacy}>
-                {loading ? t("cabinet.register.submit_loading") : "Продолжить"}
-              </Button>
+              {!emailSent && !pwStep && (
+                <Button type="submit" className="w-full h-14 rounded-2xl text-base font-bold shadow-xl hover:scale-[1.02] transition-all gap-2" disabled={loading || !email || !agreedToPrivacy}>
+                  {loading ? t("cabinet.register.submit_loading") : "Продолжить"}
+                </Button>
+              )}
               {(telegramBotUsername || googleEnabled || appleEnabled) && (
                 <div className="space-y-3">
                   <div className="relative flex items-center gap-2">

@@ -116,6 +116,10 @@ export function startAutoRenewScheduler() {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Интервал между повторными попытками автосписания при нехватке средств.
+// Без него вторичный cron (раз в минуту) долбит списание каждую минуту.
+const AUTO_RENEW_RETRY_INTERVAL_MS = 60 * 60 * 1000; // 1 час
+
 export async function processAutoRenewals() {
   if (!isRemnaConfigured()) {
     console.warn("[auto-renew] Remna is not configured. Skipping.");
@@ -677,6 +681,7 @@ async function processSecondaryAutoRenewals(): Promise<void> {
   const config = await getSystemConfig();
   const daysBeforeExpiry = config.autoRenewDaysBeforeExpiry ?? 1;
   const renewThreshold = daysBeforeExpiry * DAY_MS;
+  const maxRetries = config.autoRenewMaxRetries ?? 3;
   const now = Date.now();
 
   // цикл обрабатывает ВСЕ подписки с autoRenewEnabled,
@@ -694,6 +699,12 @@ async function processSecondaryAutoRenewals(): Promise<void> {
       autoRenewEnabled: true,
       remnawaveUuid: { not: null },
       tariffId: { not: null },
+      // Триалы НИКОГДА не автопродлеваются: пробный период бесплатный и должен
+      // конвертироваться только явным действием клиента (покупка тарифа), а не
+      // списанием. Без этого фильтра триал на базе тарифа (trialId + tariffId +
+      // autoRenewEnabled от defaultAutoRenewEnabled) попадал в цикл и крон пытался
+      // списать полную цену тарифа за пробник.
+      trialId: null,
     },
     include: {
       tariff: true,
@@ -759,6 +770,7 @@ async function processSecondaryAutoRenewals(): Promise<void> {
           minutesLeft,
           expireAt: expireAtDate,
           subIndex: sec.subscriptionIndex,
+          subscriptionId: sec.id,
           balance: sec.owner.balance ?? 0,
           dedupKeyForSec: { secondarySubscriptionId: sec.id, ttlMs: 60 * 60 * 1000 },
         }).catch(() => {});
@@ -836,16 +848,35 @@ async function processSecondaryAutoRenewals(): Promise<void> {
           !!config.yookassaSecretKey?.trim();
 
         if (!ykEnabled) {
-          console.log(`[auto-renew/sec] Insufficient balance for sec ${sec.id} (need ${price}, have ${balanceForUser}); YK fallback disabled. Skipping.`);
-          // T-autorenew: кастомные FAILED уведомления (когда нет ни баланса, ни YK).
-          await dispatchAutoRenewNotification(sec.owner.id, "FAILED", {
-            tariffName: sec.tariff.name,
-            amount: price,
-            currency: sec.tariff.currency,
-            expireAt: expireAtDate,
-            subIndex: sec.subscriptionIndex,
-            balance: balanceForUser,
-          }).catch(() => {});
+          // Нет средств и карта отключена.
+          //   • Попытка списания идёт КАЖДУЮ минуту (debit выше атомарный — при нуле
+          //     баланса ничего не спишет; как только баланс пополнят, в ту же минуту
+          //     спишется и подписка продлится). Автопродление НЕ выключаем.
+          //   • Уведомляем клиента максимум maxRetries раз (с интервалом
+          //     AUTO_RENEW_RETRY_INTERVAL_MS между уведомлениями). После лимита —
+          //     перестаём слать уведомления, но списывать продолжаем.
+          const prevRetries = sec.autoRenewRetryCount ?? 0;
+          if (prevRetries < maxRetries) {
+            const lastNotifyMs = sec.autoRenewNotifiedAt?.getTime() ?? 0;
+            if (now - lastNotifyMs >= AUTO_RENEW_RETRY_INTERVAL_MS) {
+              await prisma.subscription.update({
+                where: { id: sec.id },
+                data: { autoRenewRetryCount: prevRetries + 1, autoRenewNotifiedAt: new Date() },
+              }).catch(() => {});
+              console.log(`[auto-renew/sec] Insufficient balance for sec ${sec.id} (need ${price}, have ${balanceForUser}); notify ${prevRetries + 1}/${maxRetries}.`);
+              await dispatchAutoRenewNotification(sec.owner.id, "FAILED", {
+                tariffName: sec.tariff.name,
+                amount: price,
+                currency: sec.tariff.currency,
+                expireAt: expireAtDate,
+                subIndex: sec.subscriptionIndex,
+                subscriptionId: sec.id,
+                balance: balanceForUser,
+              }).catch(() => {});
+            }
+          }
+          // Лимит уведомлений исчерпан или ещё не прошёл интервал — молча продолжаем:
+          // попытка списания уже была сделана выше и повторится на следующем тике.
           continue;
         }
 
@@ -906,6 +937,7 @@ async function processSecondaryAutoRenewals(): Promise<void> {
               currency: sec.tariff.currency,
               expireAt: expireAtDate,
               subIndex: sec.subscriptionIndex,
+              subscriptionId: sec.id,
               balance: sec.owner.balance ?? 0,
             }).catch(() => {});
             continue;
@@ -994,6 +1026,12 @@ async function processSecondaryAutoRenewals(): Promise<void> {
         continue;
       }
 
+      // Успешное продление → сбрасываем счётчик ретраев и метку backoff.
+      await prisma.subscription.update({
+        where: { id: sec.id },
+        data: { autoRenewRetryCount: 0, autoRenewNotifiedAt: null },
+      }).catch(() => {});
+
       // 7. Success → notif клиенту.
       if (paidViaYookassa > 0) {
         await notifyAutoRenewYookassaSuccess(
@@ -1013,6 +1051,7 @@ async function processSecondaryAutoRenewals(): Promise<void> {
         currency: sec.tariff.currency,
         expireAt: expireAtDate,
         subIndex: sec.subscriptionIndex,
+        subscriptionId: sec.id,
         balance: Math.max(0, (sec.owner.balance ?? 0) - paidViaBalance),
       }).catch(() => {});
 

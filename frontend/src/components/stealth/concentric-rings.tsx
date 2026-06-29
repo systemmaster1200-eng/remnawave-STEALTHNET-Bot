@@ -19,7 +19,7 @@ interface Props {
   icon: LucideIcon;
   /** Размер центрального круга в px (внешние кольца масштабируются от него). */
   size?: number;
-  /** Custom CSS color для всех колец и glow. По умолчанию rose-500. */
+  /** Custom CSS color для всех колец и glow. По умолчанию blue-500. */
   accent?: string;
   className?: string;
 }

@@ -149,10 +149,10 @@ export function StealthTicketChatModal({ open, ticketId, onClose }: Props) {
       >
         {loading && !data ? (
           <div className="flex justify-center py-6">
-            <Loader2 className="h-5 w-5 animate-spin text-rose-500" />
+            <Loader2 className="h-5 w-5 animate-spin text-blue-500" />
           </div>
         ) : err && !data ? (
-          <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 p-3 text-xs text-rose-200 flex items-start gap-2">
+          <div className="rounded-xl bg-blue-500/10 border border-blue-500/30 p-3 text-xs text-blue-200 flex items-start gap-2">
             <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
             <span>{err}</span>
           </div>
@@ -166,7 +166,7 @@ export function StealthTicketChatModal({ open, ticketId, onClose }: Props) {
                 <div className={cn(
                   "max-w-[80%] rounded-2xl px-3 py-2",
                   isClient
-                    ? "bg-rose-500/[0.12] border border-rose-500/20"
+                    ? "bg-blue-500/[0.12] border border-blue-500/20"
                     : "bg-zinc-800/60 border border-white/[0.06]",
                 )}>
                   <p className="text-sm text-zinc-100 whitespace-pre-wrap break-words">{m.content}</p>
@@ -193,7 +193,7 @@ export function StealthTicketChatModal({ open, ticketId, onClose }: Props) {
                   )}
                   <p className={cn(
                     "text-[9px] mt-1 tabular-nums",
-                    isClient ? "text-rose-300/70" : "text-zinc-500",
+                    isClient ? "text-blue-300/70" : "text-zinc-500",
                   )}>
                     {fmtTime(m.createdAt)}
                   </p>
@@ -205,7 +205,7 @@ export function StealthTicketChatModal({ open, ticketId, onClose }: Props) {
       </div>
 
       {err && data && (
-        <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 p-2.5 text-xs text-rose-200 mb-2">{err}</div>
+        <div className="rounded-xl bg-blue-500/10 border border-blue-500/30 p-2.5 text-xs text-blue-200 mb-2">{err}</div>
       )}
 
       {/* Reply form */}
@@ -224,7 +224,7 @@ export function StealthTicketChatModal({ open, ticketId, onClose }: Props) {
                   <p className="text-[8px] text-zinc-500 truncate w-full text-center">{f.name}</p>
                   <button
                     onClick={() => removeFile(idx)}
-                    className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-rose-500 flex items-center justify-center"
+                    className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-blue-500 flex items-center justify-center"
                   >
                     <XIcon className="h-2.5 w-2.5 text-white" />
                   </button>
@@ -262,13 +262,13 @@ export function StealthTicketChatModal({ open, ticketId, onClose }: Props) {
               }}
               placeholder="Введите сообщение…"
               rows={1}
-              className="flex-1 min-h-[44px] max-h-32 rounded-2xl bg-zinc-950/60 border border-white/[0.08] px-3 py-3 text-sm placeholder-zinc-500 outline-none focus:border-rose-500/40 transition resize-none"
+              className="flex-1 min-h-[44px] max-h-32 rounded-2xl bg-zinc-950/60 border border-white/[0.08] px-3 py-3 text-sm placeholder-zinc-500 outline-none focus:border-blue-500/40 transition resize-none"
             />
             <button
               type="button"
               onClick={send}
               disabled={sending || (!reply.trim() && files.length === 0)}
-              className="h-11 w-11 rounded-2xl bg-gradient-to-b from-rose-500 to-rose-600 hover:from-rose-500 hover:to-rose-500 shadow-[0_0_20px_-4px_rgba(255,35,87,0.5)] flex items-center justify-center text-white disabled:opacity-40 disabled:shadow-none transition shrink-0"
+              className="h-11 w-11 rounded-2xl bg-gradient-to-b from-blue-500 to-blue-600 hover:from-blue-500 hover:to-blue-500 shadow-[0_0_20px_-4px_rgba(47,107,255,0.5)] flex items-center justify-center text-white disabled:opacity-40 disabled:shadow-none transition shrink-0"
               aria-label="Отправить"
             >
               {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}

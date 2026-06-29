@@ -173,6 +173,9 @@ function ClassicProfilePage() {
       setTwoFaLoading(false);
     }
   }
+  // Предложение включения 2FA скрыто в вебе; функцию оставляем (ссылка ниже),
+  // чтобы при необходимости легко вернуть фичу.
+  void openTwoFaEnable;
   function closeTwoFaEnable() {
     setTwoFaEnableOpen(false);
     setTwoFaSetupData(null);
@@ -776,27 +779,25 @@ function ClassicProfilePage() {
             </div>
 
             <div className="flex-1 flex flex-col gap-4 min-w-0">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-2xl bg-muted/40 border border-border/50 transition-colors hover:bg-muted/60 dark:bg-white/5 dark:border-white/5 dark:hover:bg-white/10">
-                <div className="flex items-center gap-4 min-w-0">
-                  <div className="flex h-10 w-10 items-center justify-center shrink-0 rounded-xl bg-primary/10 text-primary">
-                    <KeyRound className="w-5 h-5" />
+              {/* 2FA: предложение ВКЛЮЧЕНИЯ убрано из веб-версии. Строка показывается
+                  только если 2FA уже включена — тогда доступно лишь отключение. */}
+              {client.totpEnabled && (
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-2xl bg-muted/40 border border-border/50 transition-colors hover:bg-muted/60 dark:bg-white/5 dark:border-white/5 dark:hover:bg-white/10">
+                  <div className="flex items-center gap-4 min-w-0">
+                    <div className="flex h-10 w-10 items-center justify-center shrink-0 rounded-xl bg-primary/10 text-primary">
+                      <KeyRound className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs text-muted-foreground mb-0.5">{t("cabinet.profile.2fa_label")}</p>
+                      <p className="font-medium text-sm truncate">{t("cabinet.profile.2fa_multi_level")}</p>
+                    </div>
                   </div>
-                  <div className="min-w-0">
-                    <p className="text-xs text-muted-foreground mb-0.5">{t("cabinet.profile.2fa_label")}</p>
-                    <p className="font-medium text-sm truncate">{t("cabinet.profile.2fa_multi_level")}</p>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full bg-green-500/20 text-green-700 dark:text-green-400 dark:bg-green-500/20">{t("cabinet.profile.2fa_enabled")}</span>
+                    <Button variant="outline" size="sm" className="shadow-sm border-red-500/50 text-red-600 hover:bg-red-500/15 dark:text-red-400 dark:hover:bg-red-500/20" onClick={openTwoFaDisable}>{t("cabinet.profile.2fa_disable")}</Button>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  {client.totpEnabled ? (
-                    <>
-                      <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-full bg-green-500/20 text-green-700 dark:text-green-400 dark:bg-green-500/20">{t("cabinet.profile.2fa_enabled")}</span>
-                      <Button variant="outline" size="sm" className="shadow-sm border-red-500/50 text-red-600 hover:bg-red-500/15 dark:text-red-400 dark:hover:bg-red-500/20" onClick={openTwoFaDisable}>{t("cabinet.profile.2fa_disable")}</Button>
-                    </>
-                  ) : (
-                    <Button variant="outline" size="sm" className="shadow-sm" onClick={openTwoFaEnable}>{t("cabinet.profile.2fa_enable")}</Button>
-                  )}
-                </div>
-              </div>
+              )}
 
               {client.hasPassword === false && client.email ? (
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-2xl bg-muted/40 border border-border/50 transition-colors hover:bg-muted/60 dark:bg-white/5 dark:border-white/5 dark:hover:bg-white/10">

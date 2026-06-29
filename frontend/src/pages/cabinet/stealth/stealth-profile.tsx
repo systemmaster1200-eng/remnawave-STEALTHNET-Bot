@@ -19,7 +19,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Globe, HelpCircle, Gift, CreditCard, FileText, Lock, ChevronRight,
-  Shield, MessageCircle, LogOut, type LucideIcon,
+  Shield, MessageCircle, LogOut, Smartphone, Mail, type LucideIcon,
 } from "lucide-react";
 import { useClientAuth } from "@/contexts/client-auth";
 import { api, type PublicConfig } from "@/lib/api";
@@ -98,8 +98,19 @@ export function StealthProfile() {
       {
         title: "Приложение",
         items: [
+          // Привязки аккаунта — В САМОМ ВЕРХУ и с красным glow, чтобы привлечь
+          // внимание (пользователю важно привязать почту/TG для входа и связи).
+          // Email-привязка: код подтверждения → обязательный пароль (внутри /cabinet/connect).
+          ...(!state.client?.email ? [{
+            id: "link-email", label: "Привязать email", icon: Mail, to: "/cabinet/connect?type=email", glow: "rose" as const,
+          }] : []),
+          // Telegram: в мини-аппе авто по initData, в вебе — код + кнопка открытия бота.
+          ...(!state.client?.telegramId ? [{
+            id: "link-telegram", label: "Привязать Telegram", icon: MessageCircle, to: "/cabinet/connect?type=telegram", glow: "rose" as const,
+          }] : []),
           { id: "language", label: "Язык", icon: Globe, rightLabel: langLabel, to: "/cabinet/profile?tab=language" },
           { id: "support", label: "Поддержка", icon: HelpCircle, to: "/cabinet/tickets" },
+          { id: "devices", label: "Мои устройства", icon: Smartphone, to: "/cabinet/devices" },
           { id: "referral", label: "Реферальная система", icon: Gift, to: "/cabinet/referral" },
         ],
       },
@@ -146,7 +157,7 @@ export function StealthProfile() {
     ];
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config, langLabel, logout]);
+  }, [config, langLabel, logout, state.client?.email, state.client?.telegramId]);
 
   return (
     <div className="px-4 pt-2 space-y-4 pb-2">
@@ -206,11 +217,11 @@ export function StealthProfile() {
                 >
                   <div className={cn(
                     "h-9 w-9 rounded-lg border flex items-center justify-center shrink-0",
-                    it.danger ? "bg-rose-500/15 border-rose-500/30" : "bg-zinc-800/60 border-white/10",
+                    it.danger || it.glow === "rose" ? "bg-rose-500/15 border-rose-500/30" : "bg-zinc-800/60 border-white/10",
                   )}>
-                    <Icon className={cn("h-4 w-4", it.danger ? "text-rose-400" : "text-zinc-300")} />
+                    <Icon className={cn("h-4 w-4", it.danger || it.glow === "rose" ? "text-rose-400" : "text-zinc-300")} />
                   </div>
-                  <span className={cn("flex-1 text-sm font-medium truncate", it.danger && "text-rose-400")}>{it.label}</span>
+                  <span className={cn("flex-1 text-sm font-medium truncate", (it.danger || it.glow === "rose") && "text-rose-400")}>{it.label}</span>
                   {it.rightLabel && <span className="text-xs text-zinc-500 shrink-0">{it.rightLabel}</span>}
                   <ChevronRight className="h-4 w-4 text-zinc-500 shrink-0" />
                 </button>

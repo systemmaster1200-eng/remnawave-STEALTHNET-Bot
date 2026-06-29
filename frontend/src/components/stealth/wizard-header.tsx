@@ -9,8 +9,8 @@
  *   └──────────────────────────────────────┘
  *
  * Сегменты прогресса:
- *  - пройденные: pure rose-500
- *  - текущий: ярко rose-500 (тот же)
+ *  - пройденные: pure blue-500
+ *  - текущий: ярко blue-500 (тот же)
  *  - будущие: zinc-800
  */
 
@@ -62,8 +62,8 @@ export function WizardHeader({ step, totalSteps, onBack, onClose }: Props) {
             key={i}
             className={cn(
               "h-[3px] flex-1 rounded-full transition-all duration-500",
-              i + 1 < step && "bg-gradient-to-r from-rose-600 to-rose-500/70",
-              i + 1 === step && "bg-gradient-to-r from-rose-500 to-fuchsia-500 shadow-[0_0_12px_rgba(255,35,87,0.65)]",
+              i + 1 < step && "bg-gradient-to-r from-blue-600 to-blue-500/70",
+              i + 1 === step && "bg-gradient-to-r from-blue-500 to-cyan-500 shadow-[0_0_12px_rgba(47,107,255,0.65)]",
               i + 1 > step && "bg-zinc-800",
             )}
           />

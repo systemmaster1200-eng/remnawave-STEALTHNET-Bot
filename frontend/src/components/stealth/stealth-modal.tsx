@@ -47,14 +47,14 @@ export function StealthModal({ open, onClose, title, children, maxWidth = "28rem
       <div
         className={cn(
           "relative w-full rounded-3xl border border-white/10 bg-zinc-900/80 backdrop-blur-2xl",
-          "shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7),0_0_60px_-24px_rgba(255,35,87,0.35),inset_0_1px_0_rgba(255,255,255,0.08)]",
+          "shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7),0_0_60px_-24px_rgba(47,107,255,0.35),inset_0_1px_0_rgba(255,255,255,0.08)]",
           "p-5 max-h-[80vh] overflow-y-auto",
           "animate-in fade-in slide-in-from-bottom-4 zoom-in-95 duration-300",
         )}
         style={{ maxWidth }}
       >
-        {/* мягкое rose-свечение в верхнем углу карточки */}
-        <div className="pointer-events-none absolute -top-14 -right-14 h-36 w-36 rounded-full bg-rose-500/10 blur-3xl" aria-hidden="true" />
+        {/* мягкое blue-свечение в верхнем углу карточки */}
+        <div className="pointer-events-none absolute -top-14 -right-14 h-36 w-36 rounded-full bg-blue-500/10 blur-3xl" aria-hidden="true" />
         <div className="flex items-center justify-between gap-3 mb-4">
           <h3 className="text-lg font-bold tracking-tight">{title}</h3>
           <button
